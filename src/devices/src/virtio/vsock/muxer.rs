@@ -461,14 +461,14 @@ impl VsockMuxer {
         if let Some(req) = pkt.read_release_req() {
             let id = ((req.peer_port as u64) << 32) | (req.local_port as u64);
             debug!(
-                "DGRAM release request: id={} local_port={} peer_port={}",
+                "DGRAM release: id={:#x} local_port={} peer_port={}",
                 id, req.local_port, req.peer_port
             );
             let update = if let Some(proxy) = self.proxy_map.read().unwrap().get(&id) {
                 Some(proxy.lock().unwrap().release())
             } else {
                 debug!(
-                    "release without proxy: id={}, proxies={}",
+                    "release without proxy: id={:#x}, proxies={}",
                     id,
                     self.proxy_map.read().unwrap().len()
                 );
@@ -480,7 +480,7 @@ impl VsockMuxer {
             }
         }
         debug!(
-            "DGRAM release request: proxies={}",
+            "DGRAM release done: proxies={}",
             self.proxy_map.read().unwrap().len()
         );
     }
@@ -537,7 +537,7 @@ impl VsockMuxer {
     }
 
     fn process_op_request(&mut self, pkt: &VsockPacket) {
-        debug!("OP_REQUEST");
+        debug!("OP_REQUEST: src={} dst={}", pkt.src_port(), pkt.dst_port());
         let id: u64 = ((pkt.src_port() as u64) << 32) | (pkt.dst_port() as u64);
         let mut proxy_map = self.proxy_map.write().unwrap();
 
@@ -584,7 +584,7 @@ impl VsockMuxer {
     }
 
     fn process_op_response(&self, pkt: &VsockPacket) {
-        debug!("OP_RESPONSE");
+        debug!("OP_RESPONSE: src={} dst={}", pkt.src_port(), pkt.dst_port());
         let id: u64 = ((pkt.src_port() as u64) << 32) | (pkt.dst_port() as u64);
         let update = self
             .proxy_map
@@ -609,8 +609,9 @@ impl VsockMuxer {
     }
 
     fn process_op_shutdown(&self, pkt: &VsockPacket) {
-        debug!("OP_SHUTDOWN");
+        debug!("OP_SHUTDOWN: src={} dst={} flags={}", pkt.src_port(), pkt.dst_port(), pkt.flags());
         let id: u64 = ((pkt.src_port() as u64) << 32) | (pkt.dst_port() as u64);
+        debug!("OP_SHUTDOWN: id={:#x}", id);
         if let Some(proxy) = self.proxy_map.read().unwrap().get(&id) {
             proxy.lock().unwrap().shutdown(pkt);
         }
@@ -631,19 +632,19 @@ impl VsockMuxer {
     }
 
     fn process_stream_rw(&self, pkt: &VsockPacket) {
-        debug!("OP_RW");
+        debug!("OP_RW: src={} dst={} len={}", pkt.src_port(), pkt.dst_port(), pkt.len());
         let id: u64 = ((pkt.src_port() as u64) << 32) | (pkt.dst_port() as u64);
         if let Some(proxy_lock) = self.proxy_map.read().unwrap().get(&id) {
             debug!(
-                "allowing OP_RW: src={} dst={}",
-                pkt.src_port(),
-                pkt.dst_port()
+                "allowing OP_RW: id={:#x} src={} dst={} len={}",
+                id, pkt.src_port(), pkt.dst_port(), pkt.len()
             );
             let mut proxy = proxy_lock.lock().unwrap();
             let update = proxy.sendmsg(pkt);
             self.process_proxy_update(id, update);
         } else {
-            debug!("invalid OP_RW for {}, sending reset", pkt.src_port());
+            let proxy_ids: Vec<String> = self.proxy_map.read().unwrap().keys().map(|k| format!("{:#x}", k)).collect();
+            warn!("invalid OP_RW: id={:#x} src={} dst={}, known proxies: {:?}", id, pkt.src_port(), pkt.dst_port(), proxy_ids);
             let mem = match self.mem.as_ref() {
                 Some(m) => m,
                 None => {
@@ -669,7 +670,7 @@ impl VsockMuxer {
     }
 
     fn process_stream_rst(&self, pkt: &VsockPacket) {
-        debug!("OP_RST");
+        debug!("OP_RST: src={} dst={}", pkt.src_port(), pkt.dst_port());
         let id: u64 = ((pkt.src_port() as u64) << 32) | (pkt.dst_port() as u64);
         if let Some(proxy_lock) = self.proxy_map.read().unwrap().get(&id) {
             debug!(
@@ -688,10 +689,11 @@ impl VsockMuxer {
 
     pub(crate) fn send_stream_pkt(&mut self, pkt: &VsockPacket) -> super::Result<()> {
         debug!(
-            "send_pkt: src_port={} dst_port={}, op={}",
+            "send_pkt: src_port={} dst_port={} op={} len={}",
             pkt.src_port(),
             pkt.dst_port(),
-            pkt.op()
+            pkt.op(),
+            pkt.len()
         );
 
         if pkt.dst_cid() != uapi::VSOCK_HOST_CID {

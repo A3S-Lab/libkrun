@@ -241,7 +241,13 @@ impl TsiStreamProxy {
                 // it's possible the userspace application can't do it itself.
                 self.unixsock_path = unixsock_path;
 
-                match Backlog::new(req.backlog) {
+                // Clamp backlog to SOMAXCONN — the real Linux kernel does this
+                // automatically, but nix's Backlog::new() rejects values above
+                // SOMAXCONN on macOS (where SOMAXCONN=128). Guest applications
+                // like nginx use backlog=511 which is valid on Linux but would
+                // fail here without clamping.
+                let clamped_backlog = std::cmp::min(req.backlog, libc::SOMAXCONN);
+                match Backlog::new(clamped_backlog) {
                     Ok(backlog) => match listen(&self.fd, backlog) {
                         Ok(_) => {
                             debug!("proxy: id={}", self.id);
@@ -331,20 +337,26 @@ impl TsiStreamProxy {
             let len = match VsockPacket::from_rx_virtq_head(&head) {
                 Ok(mut pkt) => match self.recv_to_pkt(&mut pkt) {
                     RecvPkt::WaitForCredit => {
+                        debug!("recv_pkt: WaitForCredit id={:#x}", self.id);
                         wait_credit = true;
                         0
                     }
                     RecvPkt::Read(cnt) => {
+                        debug!("recv_pkt: Read {} bytes from TCP, id={:#x}", cnt, self.id);
                         self.rx_cnt += Wrapping(cnt as u32);
                         self.init_data_pkt(&mut pkt);
                         pkt.set_len(cnt as u32);
                         pkt.hdr().len() + cnt
                     }
                     RecvPkt::Close => {
+                        debug!("recv_pkt: Close id={:#x}", self.id);
                         self.status = ProxyStatus::Closed;
                         0
                     }
-                    RecvPkt::Error => 0,
+                    RecvPkt::Error => {
+                        debug!("recv_pkt: Error id={:#x}", self.id);
+                        0
+                    }
                 },
                 Err(e) => {
                     debug!("recv_pkt: RX queue error: {e:?}");
@@ -359,8 +371,8 @@ impl TsiStreamProxy {
                 have_used = true;
                 self.push_cnt += Wrapping(len as u32);
                 debug!(
-                    "recv_pkt: pushing packet with {} bytes, push_cnt={}",
-                    len, self.push_cnt
+                    "recv_pkt: pushing packet with {} bytes to guest, push_cnt={}, id={:#x}",
+                    len, self.push_cnt, self.id
                 );
                 if let Err(e) = queue.add_used(&self.mem, head.index, len as u32) {
                     error!("failed to add used elements to the queue: {e:?}");
@@ -576,7 +588,7 @@ impl Proxy for TsiStreamProxy {
     }
 
     fn sendmsg(&mut self, pkt: &VsockPacket) -> ProxyUpdate {
-        debug!("sendmsg");
+        debug!("sendmsg: id={:#x} status={:?} len={}", self.id, self.status, pkt.len());
 
         let mut update = ProxyUpdate::default();
 
@@ -761,6 +773,20 @@ impl Proxy for TsiStreamProxy {
     }
 
     fn shutdown(&mut self, pkt: &VsockPacket) {
+        // For reverse proxies (accepted connections), ignore OP_SHUTDOWN.
+        // When a guest process forks (e.g., nginx master → worker), the parent
+        // closes its copy of the accepted socket fd, which triggers the kernel's
+        // tsi_release → OP_SHUTDOWN. But the child worker still has the vsock fd
+        // open and will use it for data transfer. Forwarding the shutdown to the
+        // host TCP socket would kill the connection before the worker can respond.
+        if self.parent_id != 0 {
+            debug!(
+                "ignoring shutdown for reverse proxy: id={}, parent_id={}",
+                self.id, self.parent_id
+            );
+            return;
+        }
+
         let recv_off = pkt.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_RCV != 0;
         let send_off = pkt.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_SEND != 0;
 
@@ -782,6 +808,21 @@ impl Proxy for TsiStreamProxy {
             "release: id={}, tx_cnt={}, last_tx_cnt={}",
             self.id, self.tx_cnt, self.last_tx_cnt_sent
         );
+
+        // For reverse proxies (accepted connections), ignore the release if
+        // no data has been transferred yet. This handles the fork case where
+        // the parent process closes its copy of the accepted socket fd,
+        // triggering tsi_release, while the child worker still needs the
+        // connection. The proxy will be cleaned up when the actual TCP
+        // connection closes (HANG_UP event).
+        if self.parent_id != 0 && self.status == ProxyStatus::Connected && self.tx_cnt.0 == 0 {
+            debug!(
+                "ignoring release for reverse proxy with no data: id={}, parent_id={}",
+                self.id, self.parent_id
+            );
+            return ProxyUpdate::default();
+        }
+
         let remove_proxy = if self.status == ProxyStatus::Listening {
             ProxyRemoval::Immediate
         } else {
@@ -797,7 +838,7 @@ impl Proxy for TsiStreamProxy {
         let mut update = ProxyUpdate::default();
 
         if evset.contains(EventSet::HANG_UP) {
-            debug!("process_event: HANG_UP");
+            debug!("process_event: HANG_UP id={:#x}", self.id);
             if self.status == ProxyStatus::Connecting {
                 self.push_connect_rsp(-libc::ECONNREFUSED);
             } else {
@@ -816,7 +857,7 @@ impl Proxy for TsiStreamProxy {
         }
 
         if evset.contains(EventSet::IN) {
-            debug!("process_event: IN");
+            debug!("process_event: IN id={:#x} status={:?}", self.id, self.status);
             if self.status == ProxyStatus::Connected {
                 let (signal_queue, wait_credit) = self.recv_pkt();
                 update.signal_queue = signal_queue;
