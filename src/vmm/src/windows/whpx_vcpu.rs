@@ -35,9 +35,11 @@ impl WhpxVcpu {
     /// # Errors
     /// Returns an error if vCPU creation fails.
     pub fn new(partition: WHV_PARTITION_HANDLE, index: u32) -> io::Result<Self> {
-        // SAFETY: WHvCreateVirtualProcessor is safe to call with a valid partition handle
+        // SAFETY: We assume the caller has provided a valid partition handle.
+        // The partition must remain valid for the lifetime of this vCPU (documented in struct).
+        // The third parameter (0) represents flags, with 0 meaning default behavior.
         unsafe {
-            WHvCreateVirtualProcessor(partition, index, 0)
+            WHvCreateVirtualProcessor(partition, index, 0 /* flags: default behavior */)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to create vCPU: {}", e)))?;
         }
 
@@ -47,7 +49,9 @@ impl WhpxVcpu {
 
 impl Drop for WhpxVcpu {
     fn drop(&mut self) {
-        // SAFETY: WHvDeleteVirtualProcessor is safe to call with valid handles
+        // SAFETY: WHvDeleteVirtualProcessor is safe to call with valid handles.
+        // We ignore errors because Drop cannot fail, and the vCPU may already be
+        // in an invalid state during cleanup.
         unsafe {
             let _ = WHvDeleteVirtualProcessor(self.partition, self.index);
         }
