@@ -11,6 +11,48 @@ use windows::Win32::System::Hypervisor::{
     WHvCreateVirtualProcessor, WHvDeleteVirtualProcessor, WHV_PARTITION_HANDLE,
 };
 
+/// Represents a VM exit from the WHPX virtual CPU.
+///
+/// The lifetime parameter `'a` ensures that borrowed data (MMIO/IO port buffers)
+/// cannot outlive the exit context.
+#[cfg(target_os = "windows")]
+pub enum VcpuExit<'a> {
+    /// MMIO read operation.
+    /// Contains the physical address and a mutable buffer to fill with data.
+    MmioRead(u64, &'a mut [u8]),
+
+    /// MMIO write operation.
+    /// Contains the physical address and the data to write.
+    MmioWrite(u64, &'a [u8]),
+
+    /// IO port read operation.
+    /// Contains the port number and a mutable buffer to fill with data.
+    IoPortRead(u16, &'a mut [u8]),
+
+    /// IO port write operation.
+    /// Contains the port number and the data to write.
+    IoPortWrite(u16, &'a [u8]),
+
+    /// CPU executed HLT instruction.
+    Halted,
+
+    /// VM shutdown requested.
+    Shutdown,
+}
+
+/// Result of emulating a VM exit.
+#[cfg(target_os = "windows")]
+pub enum VcpuEmulation {
+    /// The exit was handled successfully, continue execution.
+    Handled,
+
+    /// The VM should stop execution.
+    Stopped,
+
+    /// The CPU is halted.
+    Halted,
+}
+
 /// Represents a WHPX virtual CPU.
 ///
 /// # Ownership
