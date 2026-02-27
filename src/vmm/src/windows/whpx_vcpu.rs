@@ -5,6 +5,40 @@
 //!
 //! This module provides the WhpxVcpu wrapper around Windows Hypervisor Platform
 //! virtual processor APIs, handling VM exits and vCPU execution.
+//!
+//! # Architecture
+//!
+//! The vCPU run loop follows this flow:
+//! 1. `WhpxVcpu::run()` calls `WHvRunVirtualProcessor` to execute guest code
+//! 2. When a VM exit occurs, the exit context is parsed into a `VcpuExit` enum
+//! 3. The `VcpuExit` is returned to the caller (typically `Vcpu::run()`)
+//! 4. The caller handles the exit via `Vcpu::run_emulation()`
+//! 5. Based on the `VcpuEmulation` result, execution continues or stops
+//!
+//! # Supported VM Exits
+//!
+//! The minimal set of VM exits currently supported:
+//! - **MMIO Read/Write**: Memory-mapped I/O operations
+//! - **IO Port Read/Write**: x86 port I/O operations
+//! - **HLT**: CPU halt instruction
+//! - **Shutdown**: VM shutdown request
+//!
+//! # Example
+//!
+//! ```no_run
+//! # use windows::Win32::System::Hypervisor::WHV_PARTITION_HANDLE;
+//! # fn example(partition: WHV_PARTITION_HANDLE) -> std::io::Result<()> {
+//! let mut vcpu = WhpxVcpu::new(partition, 0)?;
+//! loop {
+//!     let exit = vcpu.run()?;
+//!     match exit {
+//!         VcpuExit::Halted => break,
+//!         _ => { /* handle exit */ }
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use std::io;
 use windows::Win32::System::Hypervisor::{
@@ -186,3 +220,14 @@ impl Drop for WhpxVcpu {
         }
     }
 }
+
+// Implementation complete for x86_64 minimal VM exit set:
+// - MMIO read/write operations
+// - IO port read/write operations
+// - HLT instruction handling
+// - Shutdown/cancellation handling
+//
+// Future enhancements could include:
+// - Additional VM exit types (CPUID, MSR access, etc.)
+// - Performance optimizations (exit context caching)
+// - Enhanced error reporting and debugging
