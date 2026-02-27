@@ -1,0 +1,5 @@
+[target.x86_64-pc-windows-msvc]
+linker = "lld-link"
+
+[target.aarch64-pc-windows-msvc]
+linker = "lld-link"
