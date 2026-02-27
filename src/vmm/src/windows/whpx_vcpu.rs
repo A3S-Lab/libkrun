@@ -9,7 +9,9 @@
 use std::io;
 use windows::Win32::System::Hypervisor::{
     WHvCreateVirtualProcessor, WHvDeleteVirtualProcessor, WHvRunVirtualProcessor,
-    WHV_PARTITION_HANDLE, WHV_RUN_VP_EXIT_CONTEXT,
+    WHV_PARTITION_HANDLE, WHV_RUN_VP_EXIT_CONTEXT, WHV_RUN_VP_EXIT_REASON,
+    WHV_RUN_VP_EXIT_REASON_MEMORY_ACCESS, WHV_MEMORY_ACCESS_INFO,
+    WHV_MEMORY_ACCESS_TYPE_READ, WHV_MEMORY_ACCESS_TYPE_WRITE,
 };
 
 /// Represents a VM exit from the WHPX virtual CPU.
@@ -74,6 +76,8 @@ pub struct WhpxVcpu {
     partition: WHV_PARTITION_HANDLE,
     /// Index of this vCPU within the partition.
     index: u32,
+    /// Buffer for MMIO/IO port data transfer.
+    data_buffer: [u8; 8],
 }
 
 impl WhpxVcpu {
@@ -94,7 +98,11 @@ impl WhpxVcpu {
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to create vCPU: {}", e)))?;
         }
 
-        Ok(Self { partition, index })
+        Ok(Self {
+            partition,
+            index,
+            data_buffer: [0; 8],
+        })
     }
 
     /// Runs the virtual CPU until a VM exit occurs.
@@ -114,9 +122,37 @@ impl WhpxVcpu {
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to run vCPU: {}", e)))?;
         }
 
-        // TODO: Parse exit_context and return appropriate VcpuExit variant
-        // For now, return Shutdown as a placeholder
-        Ok(VcpuExit::Shutdown)
+        // Parse the exit reason
+        match exit_context.ExitReason {
+            WHV_RUN_VP_EXIT_REASON_MEMORY_ACCESS => {
+                let memory_access = unsafe { exit_context.Anonymous.MemoryAccess };
+                let gpa = memory_access.Gpa;
+                let access_type = memory_access.AccessInfo.AccessType();
+
+                match access_type {
+                    WHV_MEMORY_ACCESS_TYPE_READ => {
+                        let size = memory_access.AccessInfo.AccessSizeBytes() as usize;
+                        Ok(VcpuExit::MmioRead(gpa, &mut self.data_buffer[..size]))
+                    }
+                    WHV_MEMORY_ACCESS_TYPE_WRITE => {
+                        let size = memory_access.AccessInfo.AccessSizeBytes() as usize;
+                        // Copy write data from exit context to buffer
+                        for i in 0..size {
+                            self.data_buffer[i] = memory_access.InstructionBytes[i];
+                        }
+                        Ok(VcpuExit::MmioWrite(gpa, &self.data_buffer[..size]))
+                    }
+                    _ => Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Unsupported memory access type: {}", access_type),
+                    )),
+                }
+            }
+            _ => {
+                // Placeholder for other exit reasons
+                Ok(VcpuExit::Shutdown)
+            }
+        }
     }
 }
 
