@@ -10,6 +10,9 @@ use windows::Win32::System::Hypervisor::*;
 
 use super::whpx_vcpu::{VcpuExit, VcpuEmulation, WhpxVcpu};
 
+#[cfg(target_arch = "x86_64")]
+use std::io;
+
 /// Errors associated with WHPX operations
 #[derive(Debug)]
 pub enum Error {
@@ -183,6 +186,8 @@ pub struct Vcpu {
     /// The WHPX virtual CPU implementation
     #[cfg(target_arch = "x86_64")]
     whpx_vcpu: WhpxVcpu,
+    #[cfg(target_arch = "x86_64")]
+    partition: WHV_PARTITION_HANDLE,
     boot_entry_addr: u64,
     boot_receiver: Option<crossbeam_channel::Receiver<u64>>,
     boot_senders: Option<std::collections::HashMap<u64, crossbeam_channel::Sender<u64>>>,
@@ -215,6 +220,73 @@ impl Vcpu {
             id,
             boot_entry_addr: boot_entry_addr.raw_value(),
             boot_receiver,
+            boot_senders: None,
+            fdt_addr: 0,
+            mmio_bus: None,
+            exit_evt,
+            mpidr: id as u64,
+            event_receiver,
+            event_sender: Some(event_sender),
+            response_receiver: Some(response_receiver),
+            response_sender,
+            vcpu_list,
+            nested_enabled,
+        })
+    }
+
+    /// Constructs a new x86_64 VCPU for `vm`.
+    #[cfg(target_arch = "x86_64")]
+    pub fn new(
+        id: u8,
+        partition: WHV_PARTITION_HANDLE,
+        exit_evt: utils::eventfd::EventFd,
+        vcpu_list: std::sync::Arc<devices::legacy::VcpuList>,
+        nested_enabled: bool,
+    ) -> Result<Self> {
+        let (event_sender, event_receiver) = crossbeam_channel::unbounded();
+        let (response_sender, response_receiver) = crossbeam_channel::unbounded();
+
+        let vcpu_index = id as u32;
+
+        // Create the WHPX vCPU
+        let whpx_vcpu = WhpxVcpu::new(partition, vcpu_index)
+            .map_err(|e| {
+                error!("Failed to create WHPX vCPU: {}", e);
+                Error::VcpuSpawn(e)
+            })?;
+
+        // Initialize basic x86_64 registers
+        let mut reg_names = [
+            WHV_REGISTER_NAME(WHvX64RegisterRip.0),
+            WHV_REGISTER_NAME(WHvX64RegisterRsp.0),
+            WHV_REGISTER_NAME(WHvX64RegisterRflags.0),
+        ];
+
+        let mut reg_values = [
+            WHV_REGISTER_VALUE { Reg64: 0x0 },  // RIP = 0x0
+            WHV_REGISTER_VALUE { Reg64: 0x0 },  // RSP = 0x0
+            WHV_REGISTER_VALUE { Reg64: 0x2 },  // RFLAGS = 0x2 (reserved bit)
+        ];
+
+        unsafe {
+            WHvSetVirtualProcessorRegisters(
+                partition,
+                vcpu_index,
+                reg_names.as_ptr(),
+                3,
+                reg_values.as_ptr(),
+            ).map_err(|e| {
+                error!("Failed to set registers: {}", e);
+                Error::VcpuSpawn(io::Error::new(io::ErrorKind::Other, format!("Failed to set registers: {}", e)))
+            })?;
+        }
+
+        Ok(Vcpu {
+            id,
+            whpx_vcpu,
+            partition,
+            boot_entry_addr: 0,
+            boot_receiver: None,
             boot_senders: None,
             fdt_addr: 0,
             mmio_bus: None,
