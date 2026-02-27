@@ -12,6 +12,8 @@ use windows::Win32::System::Hypervisor::{
     WHV_PARTITION_HANDLE, WHV_RUN_VP_EXIT_CONTEXT, WHV_RUN_VP_EXIT_REASON,
     WHV_RUN_VP_EXIT_REASON_MEMORY_ACCESS, WHV_MEMORY_ACCESS_INFO,
     WHV_MEMORY_ACCESS_TYPE_READ, WHV_MEMORY_ACCESS_TYPE_WRITE,
+    WHV_RUN_VP_EXIT_REASON_X64_IO_PORT_ACCESS, WHV_RUN_VP_EXIT_REASON_X64_HALT,
+    WHV_RUN_VP_EXIT_REASON_CANCELED,
 };
 
 /// Represents a VM exit from the WHPX virtual CPU.
@@ -148,6 +150,24 @@ impl WhpxVcpu {
                     )),
                 }
             }
+            WHV_RUN_VP_EXIT_REASON_X64_IO_PORT_ACCESS => {
+                let io_port = unsafe { exit_context.Anonymous.IoPortAccess };
+                let port = io_port.PortNumber;
+                let size = io_port.AccessInfo.AccessSize() as usize;
+                let is_write = io_port.AccessInfo.IsWrite() != 0;
+
+                if is_write {
+                    // Copy write data to buffer
+                    for i in 0..size {
+                        self.data_buffer[i] = io_port.Anonymous.Data[i];
+                    }
+                    Ok(VcpuExit::IoPortWrite(port, &self.data_buffer[..size]))
+                } else {
+                    Ok(VcpuExit::IoPortRead(port, &mut self.data_buffer[..size]))
+                }
+            }
+            WHV_RUN_VP_EXIT_REASON_X64_HALT => Ok(VcpuExit::Halted),
+            WHV_RUN_VP_EXIT_REASON_CANCELED => Ok(VcpuExit::Shutdown),
             _ => {
                 // Placeholder for other exit reasons
                 Ok(VcpuExit::Shutdown)
