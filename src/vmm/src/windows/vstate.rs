@@ -8,6 +8,8 @@ use crossbeam_channel::Sender;
 use vm_memory::{Address, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
 use windows::Win32::System::Hypervisor::*;
 
+use super::whpx_vcpu::{VcpuExit, VcpuEmulation};
+
 /// Errors associated with WHPX operations
 #[derive(Debug)]
 pub enum Error {
@@ -286,6 +288,57 @@ impl Vcpu {
 
         if let Err(e) = self.exit_evt.write(1) {
             error!("Failed signaling vcpu exit event: {e}");
+        }
+    }
+
+    /// Handles a VM exit by delegating to the appropriate device.
+    ///
+    /// # Arguments
+    /// * `exit` - The VM exit to handle
+    ///
+    /// # Returns
+    /// Returns how the VMM should proceed after handling the exit.
+    #[cfg(target_arch = "x86_64")]
+    pub fn run_emulation(&mut self, exit: VcpuExit) -> VcpuEmulation {
+        match exit {
+            VcpuExit::MmioRead(addr, data) => {
+                // Delegate to MMIO bus for MMIO read
+                if let Some(mmio_bus) = &self.mmio_bus {
+                    if mmio_bus.read(self.id as u64, addr, data) {
+                        return VcpuEmulation::Handled;
+                    }
+                }
+                VcpuEmulation::Stopped
+            }
+            VcpuExit::MmioWrite(addr, data) => {
+                // Delegate to MMIO bus for MMIO write
+                if let Some(mmio_bus) = &self.mmio_bus {
+                    if mmio_bus.write(self.id as u64, addr, data) {
+                        return VcpuEmulation::Handled;
+                    }
+                }
+                VcpuEmulation::Stopped
+            }
+            VcpuExit::IoPortRead(port, data) => {
+                // Delegate to MMIO bus for IO port read
+                if let Some(mmio_bus) = &self.mmio_bus {
+                    if mmio_bus.read(self.id as u64, port as u64, data) {
+                        return VcpuEmulation::Handled;
+                    }
+                }
+                VcpuEmulation::Stopped
+            }
+            VcpuExit::IoPortWrite(port, data) => {
+                // Delegate to MMIO bus for IO port write
+                if let Some(mmio_bus) = &self.mmio_bus {
+                    if mmio_bus.write(self.id as u64, port as u64, data) {
+                        return VcpuEmulation::Handled;
+                    }
+                }
+                VcpuEmulation::Stopped
+            }
+            VcpuExit::Halted => VcpuEmulation::Halted,
+            VcpuExit::Shutdown => VcpuEmulation::Stopped,
         }
     }
 }
