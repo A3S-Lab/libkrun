@@ -1,6 +1,5 @@
-// Copyright 2024 The ChromiumOS Authors
-// Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
 
 //! WHPX vCPU implementation for x86_64 architecture.
 //!
@@ -10,9 +9,15 @@
 use windows::Win32::System::Hypervisor::WHV_PARTITION_HANDLE;
 
 /// Represents a WHPX virtual CPU.
+///
+/// # Ownership
+/// The `partition` handle must remain valid for the lifetime of this vCPU.
+/// The caller is responsible for ensuring the partition is not destroyed
+/// while this vCPU exists.
+#[cfg(target_os = "windows")]
 pub struct WhpxVcpu {
-    /// Handle to the WHPX partition this vCPU belongs to
+    /// Handle to the WHPX partition this vCPU belongs to.
     partition: WHV_PARTITION_HANDLE,
-    /// Index of this vCPU within the partition
+    /// Index of this vCPU within the partition.
     index: u32,
 }
