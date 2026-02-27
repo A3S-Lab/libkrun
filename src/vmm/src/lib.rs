@@ -42,6 +42,7 @@ use windows::vstate;
 
 use std::fmt::{Display, Formatter};
 use std::io;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
