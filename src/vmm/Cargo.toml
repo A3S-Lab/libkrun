@@ -56,5 +56,12 @@ kvm-ioctls = ">=0.21"
 [target.'cfg(target_os = "macos")'.dependencies]
 hvf = { path = "../hvf" }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_System_Hypervisor",
+    "Win32_Foundation",
+    "Win32_System_Memory",
+] }
+
 [dev-dependencies]
 devices = { path = "../devices", features = ["test_utils"] }
