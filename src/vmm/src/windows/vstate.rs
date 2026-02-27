@@ -164,42 +164,159 @@ impl Drop for Vm {
     }
 }
 
-/// A wrapper around creating and using a WHPX VCPU
+/// Encapsulates configuration parameters for the guest vCPUS.
+#[derive(Debug, Eq, PartialEq)]
+pub struct VcpuConfig {
+    /// Number of guest VCPUs.
+    pub vcpu_count: u8,
+    /// Enable hyperthreading in the CPUID configuration.
+    pub ht_enabled: bool,
+    /// CPUID template to use.
+    pub cpu_template: Option<crate::vmm_config::machine_config::CpuFeaturesTemplate>,
+}
+
+/// A wrapper around creating and using a WHPX VCPU.
 pub struct Vcpu {
     id: u8,
+    boot_entry_addr: u64,
+    boot_receiver: Option<crossbeam_channel::Receiver<u64>>,
+    boot_senders: Option<std::collections::HashMap<u64, crossbeam_channel::Sender<u64>>>,
+    fdt_addr: u64,
+    mmio_bus: Option<devices::Bus>,
+    exit_evt: utils::eventfd::EventFd,
+    mpidr: u64,
+    event_receiver: crossbeam_channel::Receiver<VcpuEvent>,
+    event_sender: Option<crossbeam_channel::Sender<VcpuEvent>>,
+    response_receiver: Option<crossbeam_channel::Receiver<VcpuResponse>>,
+    response_sender: crossbeam_channel::Sender<VcpuResponse>,
+    vcpu_list: std::sync::Arc<devices::legacy::VcpuList>,
+    nested_enabled: bool,
 }
 
 impl Vcpu {
-    /// Constructs a new VCPU for WHPX
+    /// Constructs a new VCPU for `vm`.
     pub fn new_aarch64(
         id: u8,
-        _boot_entry_addr: vm_memory::GuestAddress,
-        _boot_receiver: Option<crossbeam_channel::Receiver<u64>>,
-        _exit_evt: utils::eventfd::EventFd,
-        _vcpu_list: std::sync::Arc<devices::legacy::VcpuList>,
-        _nested_enabled: bool,
+        boot_entry_addr: vm_memory::GuestAddress,
+        boot_receiver: Option<crossbeam_channel::Receiver<u64>>,
+        exit_evt: utils::eventfd::EventFd,
+        vcpu_list: std::sync::Arc<devices::legacy::VcpuList>,
+        nested_enabled: bool,
     ) -> Result<Self> {
-        Ok(Vcpu { id })
+        let (event_sender, event_receiver) = crossbeam_channel::unbounded();
+        let (response_sender, response_receiver) = crossbeam_channel::unbounded();
+
+        Ok(Vcpu {
+            id,
+            boot_entry_addr: boot_entry_addr.raw_value(),
+            boot_receiver,
+            boot_senders: None,
+            fdt_addr: 0,
+            mmio_bus: None,
+            exit_evt,
+            mpidr: id as u64,
+            event_receiver,
+            event_sender: Some(event_sender),
+            response_receiver: Some(response_receiver),
+            response_sender,
+            vcpu_list,
+            nested_enabled,
+        })
     }
 
-    /// Returns the cpu index
+    /// Returns the cpu index as seen by the guest OS.
     pub fn cpu_index(&self) -> u8 {
         self.id
     }
+
+    /// Gets the MPIDR register value.
+    pub fn get_mpidr(&self) -> u64 {
+        self.mpidr
+    }
+
+    /// Sets a MMIO bus for this vcpu.
+    pub fn set_mmio_bus(&mut self, mmio_bus: devices::Bus) {
+        self.mmio_bus = Some(mmio_bus);
+    }
+
+    pub fn set_boot_senders(
+        &mut self,
+        boot_senders: std::collections::HashMap<u64, crossbeam_channel::Sender<u64>>,
+    ) {
+        self.boot_senders = Some(boot_senders);
+    }
+
+    /// Configures an aarch64 specific vcpu.
+    pub fn configure_aarch64(&mut self, mem_info: &arch::ArchMemoryInfo) -> Result<()> {
+        self.fdt_addr = mem_info.fdt_addr;
+        Ok(())
+    }
+
+    /// Moves the vcpu to its own thread and constructs a VcpuHandle.
+    pub fn start_threaded(mut self) -> Result<VcpuHandle> {
+        let event_sender = self.event_sender.take().unwrap();
+        let response_receiver = self.response_receiver.take().unwrap();
+        let (init_tls_sender, init_tls_receiver) = crossbeam_channel::unbounded::<bool>();
+
+        let vcpu_thread = std::thread::Builder::new()
+            .name(format!("fc_vcpu {}", self.cpu_index()))
+            .spawn(move || {
+                init_tls_sender
+                    .send(true)
+                    .expect("Cannot notify vcpu TLS initialization.");
+                // TODO: Implement WHPX vCPU run loop
+            })
+            .map_err(Error::VcpuSpawn)?;
+
+        init_tls_receiver
+            .recv()
+            .expect("Error waiting for TLS initialization.");
+
+        Ok(VcpuHandle::new(
+            event_sender,
+            response_receiver,
+            vcpu_thread,
+        ))
+    }
+
+    fn exit(&mut self, exit_code: u8) {
+        self.response_sender
+            .send(VcpuResponse::Exited(exit_code))
+            .expect("failed to send Exited status");
+
+        if let Err(e) = self.exit_evt.write(1) {
+            error!("Failed signaling vcpu exit event: {e}");
+        }
+    }
 }
 
-/// Wrapper over Vcpu that hides the underlying interactions
+/// Wrapper over Vcpu that hides the underlying interactions with the Vcpu thread.
 pub struct VcpuHandle {
-    // TODO: Add event channels
+    event_sender: crossbeam_channel::Sender<VcpuEvent>,
+    response_receiver: crossbeam_channel::Receiver<VcpuResponse>,
 }
 
 impl VcpuHandle {
     pub fn new(
-        _event_sender: crossbeam_channel::Sender<VcpuEvent>,
-        _response_receiver: crossbeam_channel::Receiver<VcpuResponse>,
+        event_sender: crossbeam_channel::Sender<VcpuEvent>,
+        response_receiver: crossbeam_channel::Receiver<VcpuResponse>,
         _vcpu_thread: std::thread::JoinHandle<()>,
     ) -> Self {
-        Self {}
+        Self {
+            event_sender,
+            response_receiver,
+        }
+    }
+
+    pub fn send_event(&self, event: VcpuEvent) -> Result<()> {
+        self.event_sender
+            .send(event)
+            .expect("event sender channel closed on vcpu end.");
+        Ok(())
+    }
+
+    pub fn response_receiver(&self) -> &crossbeam_channel::Receiver<VcpuResponse> {
+        &self.response_receiver
     }
 }
 
