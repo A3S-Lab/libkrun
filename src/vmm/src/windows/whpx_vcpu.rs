@@ -8,7 +8,8 @@
 
 use std::io;
 use windows::Win32::System::Hypervisor::{
-    WHvCreateVirtualProcessor, WHvDeleteVirtualProcessor, WHV_PARTITION_HANDLE,
+    WHvCreateVirtualProcessor, WHvDeleteVirtualProcessor, WHvRunVirtualProcessor,
+    WHV_PARTITION_HANDLE, WHV_RUN_VP_EXIT_CONTEXT,
 };
 
 /// Represents a VM exit from the WHPX virtual CPU.
@@ -94,6 +95,28 @@ impl WhpxVcpu {
         }
 
         Ok(Self { partition, index })
+    }
+
+    /// Runs the virtual CPU until a VM exit occurs.
+    ///
+    /// # Returns
+    /// Returns a `VcpuExit` describing why the vCPU stopped executing.
+    ///
+    /// # Errors
+    /// Returns an error if running the vCPU fails.
+    pub fn run(&mut self) -> io::Result<VcpuExit<'_>> {
+        let mut exit_context = WHV_RUN_VP_EXIT_CONTEXT::default();
+
+        // SAFETY: WHvRunVirtualProcessor is safe to call with valid partition and vCPU handles.
+        // The exit_context is a valid mutable reference that will be filled by the API.
+        unsafe {
+            WHvRunVirtualProcessor(self.partition, self.index, &mut exit_context as *mut _, std::mem::size_of::<WHV_RUN_VP_EXIT_CONTEXT>() as u32)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to run vCPU: {}", e)))?;
+        }
+
+        // TODO: Parse exit_context and return appropriate VcpuExit variant
+        // For now, return Shutdown as a placeholder
+        Ok(VcpuExit::Shutdown)
     }
 }
 
