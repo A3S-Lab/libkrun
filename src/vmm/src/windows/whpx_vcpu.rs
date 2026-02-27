@@ -15,22 +15,27 @@ use windows::Win32::System::Hypervisor::{
 ///
 /// The lifetime parameter `'a` ensures that borrowed data (MMIO/IO port buffers)
 /// cannot outlive the exit context.
+#[derive(Debug)]
 #[cfg(target_os = "windows")]
 pub enum VcpuExit<'a> {
     /// MMIO read operation.
     /// Contains the physical address and a mutable buffer to fill with data.
+    /// The buffer size determines how many bytes to read (typically 1, 2, 4, or 8).
     MmioRead(u64, &'a mut [u8]),
 
     /// MMIO write operation.
     /// Contains the physical address and the data to write.
+    /// The buffer size determines how many bytes to write (typically 1, 2, 4, or 8).
     MmioWrite(u64, &'a [u8]),
 
     /// IO port read operation.
     /// Contains the port number and a mutable buffer to fill with data.
+    /// The buffer size determines how many bytes to read (typically 1, 2, or 4).
     IoPortRead(u16, &'a mut [u8]),
 
     /// IO port write operation.
     /// Contains the port number and the data to write.
+    /// The buffer size determines how many bytes to write (typically 1, 2, or 4).
     IoPortWrite(u16, &'a [u8]),
 
     /// CPU executed HLT instruction.
@@ -41,6 +46,9 @@ pub enum VcpuExit<'a> {
 }
 
 /// Result of emulating a VM exit.
+///
+/// Indicates how the VMM should proceed after handling a VM exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg(target_os = "windows")]
 pub enum VcpuEmulation {
     /// The exit was handled successfully, continue execution.
