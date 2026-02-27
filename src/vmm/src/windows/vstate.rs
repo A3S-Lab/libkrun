@@ -8,7 +8,7 @@ use crossbeam_channel::Sender;
 use vm_memory::{Address, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
 use windows::Win32::System::Hypervisor::*;
 
-use super::whpx_vcpu::{VcpuExit, VcpuEmulation};
+use super::whpx_vcpu::{VcpuExit, VcpuEmulation, WhpxVcpu};
 
 /// Errors associated with WHPX operations
 #[derive(Debug)]
@@ -180,6 +180,9 @@ pub struct VcpuConfig {
 /// A wrapper around creating and using a WHPX VCPU.
 pub struct Vcpu {
     id: u8,
+    /// The WHPX virtual CPU implementation
+    #[cfg(target_arch = "x86_64")]
+    whpx_vcpu: WhpxVcpu,
     boot_entry_addr: u64,
     boot_receiver: Option<crossbeam_channel::Receiver<u64>>,
     boot_senders: Option<std::collections::HashMap<u64, crossbeam_channel::Sender<u64>>>,
@@ -339,6 +342,28 @@ impl Vcpu {
             }
             VcpuExit::Halted => VcpuEmulation::Halted,
             VcpuExit::Shutdown => VcpuEmulation::Stopped,
+        }
+    }
+
+    /// Main vCPU run loop for x86_64.
+    ///
+    /// Continuously runs the vCPU, handling exits until the VM stops or halts.
+    ///
+    /// # Returns
+    /// Returns the final emulation state (Stopped or Halted).
+    ///
+    /// # Errors
+    /// Returns an error if the vCPU fails to run.
+    #[cfg(target_arch = "x86_64")]
+    pub fn run(&mut self) -> Result<VcpuEmulation, std::io::Error> {
+        loop {
+            let exit = self.whpx_vcpu.run()?;
+            let emulation = self.run_emulation(exit);
+
+            match emulation {
+                VcpuEmulation::Handled => continue,
+                VcpuEmulation::Stopped | VcpuEmulation::Halted => return Ok(emulation),
+            }
         }
     }
 }
