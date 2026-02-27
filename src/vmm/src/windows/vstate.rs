@@ -294,25 +294,27 @@ impl Vcpu {
 pub struct VcpuHandle {
     event_sender: crossbeam_channel::Sender<VcpuEvent>,
     response_receiver: crossbeam_channel::Receiver<VcpuResponse>,
+    #[allow(dead_code)]
+    vcpu_thread: std::thread::JoinHandle<()>,
 }
 
 impl VcpuHandle {
     pub fn new(
         event_sender: crossbeam_channel::Sender<VcpuEvent>,
         response_receiver: crossbeam_channel::Receiver<VcpuResponse>,
-        _vcpu_thread: std::thread::JoinHandle<()>,
+        vcpu_thread: std::thread::JoinHandle<()>,
     ) -> Self {
         Self {
             event_sender,
             response_receiver,
+            vcpu_thread,
         }
     }
 
     pub fn send_event(&self, event: VcpuEvent) -> Result<()> {
         self.event_sender
             .send(event)
-            .expect("event sender channel closed on vcpu end.");
-        Ok(())
+            .map_err(|_| Error::VcpuRun)
     }
 
     pub fn response_receiver(&self) -> &crossbeam_channel::Receiver<VcpuResponse> {
