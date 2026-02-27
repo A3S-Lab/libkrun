@@ -331,3 +331,44 @@ impl DeviceInfoForFDT for MMIODeviceInfo {
         self.len
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kernel::cmdline as kernel_cmdline;
+
+    #[test]
+    fn test_error_messages() {
+        let device_manager =
+            MMIODeviceManager::new(&mut 0xd000_0000, (arch::IRQ_BASE, arch::IRQ_MAX));
+        let mut cmdline = kernel_cmdline::Cmdline::new(4096);
+        let e = Error::Cmdline(
+            cmdline
+                .insert(
+                    "virtio_mmio=device",
+                    &format!(
+                        "{}K@0x{:08x}:{}",
+                        MMIO_LEN / 1024,
+                        device_manager.mmio_base,
+                        device_manager.irq
+                    ),
+                )
+                .unwrap_err(),
+        );
+        assert_eq!(
+            format!("{}", e),
+            format!(
+                "unable to add device to kernel command line: {}",
+                kernel_cmdline::Error::HasEquals
+            ),
+        );
+        assert_eq!(
+            format!("{}", Error::UpdateFailed),
+            "failed to update the mmio device"
+        );
+        assert_eq!(
+            format!("{}", Error::IrqsExhausted),
+            "no more IRQs are available"
+        );
+    }
+}
