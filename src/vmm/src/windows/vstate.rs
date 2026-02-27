@@ -4,6 +4,8 @@
 use std::fmt::{Display, Formatter};
 use std::result;
 
+use crossbeam_channel::Sender;
+use vm_memory::{Address, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
 use windows::Win32::System::Hypervisor::*;
 
 /// Errors associated with WHPX operations
@@ -43,20 +45,124 @@ pub type Result<T> = result::Result<T, Error>;
 
 /// A wrapper around creating and using a WHPX VM
 pub struct Vm {
-    // TODO: Add WHPX partition handle
+    partition: WHV_PARTITION_HANDLE,
 }
 
 impl Vm {
     /// Constructs a new `Vm` using WHPX
     pub fn new(_nested_enabled: bool) -> Result<Self> {
-        // TODO: Call WHvCreatePartition
-        Ok(Vm {})
+        unsafe {
+            let mut partition: WHV_PARTITION_HANDLE = std::mem::zeroed();
+            WHvCreatePartition(&mut partition).map_err(|_| Error::VmSetup)?;
+
+            // Set processor count to 1 initially (will be updated when vCPUs are created)
+            let property = WHV_PARTITION_PROPERTY {
+                ProcessorCount: 1,
+                ..Default::default()
+            };
+            WHvSetPartitionProperty(
+                partition,
+                WHvPartitionPropertyCodeProcessorCount,
+                &property as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<WHV_PARTITION_PROPERTY>() as u32,
+            )
+            .map_err(|_| {
+                let _ = WHvDeletePartition(partition);
+                Error::VmSetup
+            })?;
+
+            WHvSetupPartition(partition).map_err(|_| {
+                let _ = WHvDeletePartition(partition);
+                Error::VmSetup
+            })?;
+
+            Ok(Vm { partition })
+        }
     }
 
-    /// Initializes the guest memory
-    pub fn memory_init(&mut self, _guest_mem: &vm_memory::GuestMemoryMmap) -> Result<()> {
-        // TODO: Call WHvMapGpaRange for each memory region
+    pub fn partition(&self) -> WHV_PARTITION_HANDLE {
+        self.partition
+    }
+
+    /// Initializes the guest memory.
+    pub fn memory_init(&mut self, guest_mem: &GuestMemoryMmap) -> Result<()> {
+        for region in guest_mem.iter() {
+            let host_addr = guest_mem
+                .get_host_address(region.start_addr())
+                .ok_or(Error::SetUserMemoryRegion)?;
+
+            unsafe {
+                WHvMapGpaRange(
+                    self.partition,
+                    host_addr as *const std::ffi::c_void,
+                    region.start_addr().raw_value(),
+                    region.len(),
+                    WHV_MAP_GPA_RANGE_FLAGS(
+                        WHvMapGpaRangeFlagRead.0
+                            | WHvMapGpaRangeFlagWrite.0
+                            | WHvMapGpaRangeFlagExecute.0,
+                    ),
+                )
+                .map_err(|_| Error::SetUserMemoryRegion)?;
+            }
+        }
         Ok(())
+    }
+
+    pub fn add_mapping(
+        &self,
+        reply_sender: crossbeam_channel::Sender<bool>,
+        host_addr: u64,
+        guest_addr: u64,
+        len: u64,
+    ) {
+        unsafe {
+            // Unmap first in case there's an existing mapping
+            let _ = WHvUnmapGpaRange(self.partition, guest_addr, len);
+
+            match WHvMapGpaRange(
+                self.partition,
+                host_addr as *const std::ffi::c_void,
+                guest_addr,
+                len,
+                WHV_MAP_GPA_RANGE_FLAGS(
+                    WHvMapGpaRangeFlagRead.0
+                        | WHvMapGpaRangeFlagWrite.0
+                        | WHvMapGpaRangeFlagExecute.0,
+                ),
+            ) {
+                Ok(_) => reply_sender.send(true).unwrap(),
+                Err(e) => {
+                    error!("Error adding memory map: {e:?}");
+                    reply_sender.send(false).unwrap();
+                }
+            }
+        }
+    }
+
+    pub fn remove_mapping(
+        &self,
+        reply_sender: crossbeam_channel::Sender<bool>,
+        guest_addr: u64,
+        len: u64,
+    ) {
+        unsafe {
+            match WHvUnmapGpaRange(self.partition, guest_addr, len) {
+                Ok(_) => reply_sender.send(true).unwrap(),
+                Err(e) => {
+                    error!("Error removing memory map: {e:?}");
+                    reply_sender.send(false).unwrap();
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Vm {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = WHvDeletePartition(self.partition);
+        }
     }
 }
 
