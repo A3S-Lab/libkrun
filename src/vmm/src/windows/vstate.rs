@@ -56,15 +56,13 @@ impl Vm {
             WHvCreatePartition(&mut partition).map_err(|_| Error::VmSetup)?;
 
             // Set processor count to 1 initially (will be updated when vCPUs are created)
-            let property = WHV_PARTITION_PROPERTY {
-                ProcessorCount: 1,
-                ..Default::default()
-            };
+            let mut property: WHV_PARTITION_PROPERTY = std::mem::zeroed();
+            property.Anonymous.ProcessorCount = 1;
             WHvSetPartitionProperty(
                 partition,
                 WHvPartitionPropertyCodeProcessorCount,
                 &property as *const _ as *const std::ffi::c_void,
-                std::mem::size_of::<WHV_PARTITION_PROPERTY>() as u32,
+                std::mem::size_of::<u32>() as u32,
             )
             .map_err(|_| {
                 let _ = WHvDeletePartition(partition);
