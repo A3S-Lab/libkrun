@@ -30,11 +30,15 @@ mod linux;
 use crate::linux::vstate;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "windows")]
+mod windows;
 mod terminal;
 pub mod worker;
 
 #[cfg(target_os = "macos")]
 use macos::vstate;
+#[cfg(target_os = "windows")]
+use windows::vstate;
 
 use std::fmt::{Display, Formatter};
 use std::io;
