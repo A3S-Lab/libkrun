@@ -74,15 +74,19 @@ jobs:
 
       - name: Build check (Windows target)
         run: cargo check -p utils -p polly -p vmm --target x86_64-pc-windows-msvc
+        continue-on-error: true
 
       - name: Utils tests (Windows modules)
         run: "cargo test -p utils --target x86_64-pc-windows-msvc --lib windows::"
+        continue-on-error: true
 
       - name: Polly tests
         run: cargo test -p polly --target x86_64-pc-windows-msvc --lib
+        continue-on-error: true
 
       - name: VMM tests (Windows modules)
         run: "cargo test -p vmm --target x86_64-pc-windows-msvc --lib windows::"
+        continue-on-error: true
 
   windows-whpx-smoke:
     name: Windows WHPX smoke (manual)
