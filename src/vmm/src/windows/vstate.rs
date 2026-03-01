@@ -2,34 +2,47 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt::{Display, Formatter};
+use std::io;
 use std::result;
+use std::thread;
+use std::time::Duration;
 
-use crossbeam_channel::Sender;
-use vm_memory::{Address, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
+use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
 use windows::Win32::System::Hypervisor::*;
 
-use super::whpx_vcpu::{VcpuExit, VcpuEmulation, WhpxVcpu};
+use super::whpx_vcpu::{VcpuEmulation, VcpuExit, WhpxVcpu};
+use crate::{FC_EXIT_CODE_GENERIC_ERROR, FC_EXIT_CODE_OK};
 
-#[cfg(target_arch = "x86_64")]
-use std::io;
+// Boot-time x86_64 memory layout.
+const BOOT_GDT_OFFSET: u64 = 0x500;
+const BOOT_IDT_OFFSET: u64 = 0x520;
+const PML4_START: u64 = 0x9000;
+const PDPTE_START: u64 = 0xA000;
+const PDE_START: u64 = 0xB000;
 
-/// Errors associated with WHPX operations
+const BOOT_GDT_MAX: usize = 4;
+
+const EFER_LMA: u64 = 0x400;
+const EFER_LME: u64 = 0x100;
+const X86_CR0_PE: u64 = 0x1;
+const X86_CR0_PG: u64 = 0x8000_0000;
+const X86_CR4_PAE: u64 = 0x20;
+
+/// Errors associated with WHPX operations.
 #[derive(Debug)]
 pub enum Error {
-    /// Invalid guest memory configuration
+    /// Invalid guest memory configuration.
     GuestMemoryMmap(vm_memory::GuestMemoryError),
-    /// Cannot set the memory regions
+    /// Cannot set the memory regions.
     SetUserMemoryRegion,
-    /// Cannot configure the microvm
+    /// Cannot configure the microvm.
     VmSetup,
-    /// Cannot run the VCPUs
+    /// Cannot configure vCPU state.
+    VcpuConfigure,
+    /// Cannot run the VCPUs.
     VcpuRun,
-    /// Cannot spawn a new vCPU thread
+    /// Cannot spawn a new vCPU thread.
     VcpuSpawn(std::io::Error),
-    /// Vcpu not present in TLS
-    VcpuTlsNotPresent,
-    /// Cannot cleanly initialize vcpu TLS
-    VcpuTlsInit,
 }
 
 impl Display for Error {
@@ -38,31 +51,71 @@ impl Display for Error {
             Error::GuestMemoryMmap(e) => write!(f, "Guest memory error: {e:?}"),
             Error::SetUserMemoryRegion => write!(f, "Cannot set the memory regions"),
             Error::VmSetup => write!(f, "Cannot configure the microvm"),
+            Error::VcpuConfigure => write!(f, "Cannot configure the VCPU"),
             Error::VcpuRun => write!(f, "Cannot run the VCPUs"),
             Error::VcpuSpawn(e) => write!(f, "Cannot spawn a new vCPU thread: {e}"),
-            Error::VcpuTlsNotPresent => write!(f, "Vcpu not present in TLS"),
-            Error::VcpuTlsInit => write!(f, "Cannot clean init vcpu TLS"),
         }
     }
 }
 
 pub type Result<T> = result::Result<T, Error>;
 
-/// A wrapper around creating and using a WHPX VM
+fn write_boot_state_to_guest(guest_mem: &GuestMemoryMmap) -> Result<()> {
+    let gdt_table: [u64; BOOT_GDT_MAX] = [
+        0x0000_0000_0000_0000,
+        0x00AF_9B00_0000_FFFF,
+        0x00CF_9300_0000_FFFF,
+        0x008F_8B00_0000_FFFF,
+    ];
+
+    for (index, entry) in gdt_table.iter().enumerate() {
+        let addr = guest_mem
+            .checked_offset(
+                GuestAddress(BOOT_GDT_OFFSET),
+                index * std::mem::size_of::<u64>(),
+            )
+            .ok_or(Error::VcpuConfigure)?;
+        guest_mem
+            .write_obj(*entry, addr)
+            .map_err(|_| Error::VcpuConfigure)?;
+    }
+
+    guest_mem
+        .write_obj(0_u64, GuestAddress(BOOT_IDT_OFFSET))
+        .map_err(|_| Error::VcpuConfigure)?;
+
+    guest_mem
+        .write_obj(PDPTE_START | 0x03, GuestAddress(PML4_START))
+        .map_err(|_| Error::VcpuConfigure)?;
+    guest_mem
+        .write_obj(PDE_START | 0x03, GuestAddress(PDPTE_START))
+        .map_err(|_| Error::VcpuConfigure)?;
+
+    for i in 0..512 {
+        guest_mem
+            .write_obj(
+                (i << 21) as u64 | 0x83,
+                GuestAddress(PDE_START + (i * 8) as u64),
+            )
+            .map_err(|_| Error::VcpuConfigure)?;
+    }
+
+    Ok(())
+}
+
+/// A wrapper around creating and using a WHPX VM.
 pub struct Vm {
     partition: WHV_PARTITION_HANDLE,
 }
 
 impl Vm {
-    /// Constructs a new `Vm` using WHPX
-    pub fn new(_nested_enabled: bool) -> Result<Self> {
+    /// Constructs a new `Vm` using WHPX.
+    pub fn new(_nested_enabled: bool, vcpu_count: u32) -> Result<Self> {
         unsafe {
-            let mut partition: WHV_PARTITION_HANDLE = std::mem::zeroed();
-            WHvCreatePartition(&mut partition).map_err(|_| Error::VmSetup)?;
+            let partition = WHvCreatePartition().map_err(|_| Error::VmSetup)?;
 
-            // Set processor count to 1 initially (will be updated when vCPUs are created)
             let mut property: WHV_PARTITION_PROPERTY = std::mem::zeroed();
-            property.Anonymous.ProcessorCount = 1;
+            property.ProcessorCount = vcpu_count;
             WHvSetPartitionProperty(
                 partition,
                 WHvPartitionPropertyCodeProcessorCount,
@@ -92,7 +145,7 @@ impl Vm {
         for region in guest_mem.iter() {
             let host_addr = guest_mem
                 .get_host_address(region.start_addr())
-                .ok_or(Error::SetUserMemoryRegion)?;
+                .map_err(Error::GuestMemoryMmap)?;
 
             unsafe {
                 WHvMapGpaRange(
@@ -110,54 +163,6 @@ impl Vm {
             }
         }
         Ok(())
-    }
-
-    pub fn add_mapping(
-        &self,
-        reply_sender: crossbeam_channel::Sender<bool>,
-        host_addr: u64,
-        guest_addr: u64,
-        len: u64,
-    ) {
-        unsafe {
-            // Unmap first in case there's an existing mapping
-            let _ = WHvUnmapGpaRange(self.partition, guest_addr, len);
-
-            match WHvMapGpaRange(
-                self.partition,
-                host_addr as *const std::ffi::c_void,
-                guest_addr,
-                len,
-                WHV_MAP_GPA_RANGE_FLAGS(
-                    WHvMapGpaRangeFlagRead.0
-                        | WHvMapGpaRangeFlagWrite.0
-                        | WHvMapGpaRangeFlagExecute.0,
-                ),
-            ) {
-                Ok(_) => reply_sender.send(true).unwrap(),
-                Err(e) => {
-                    error!("Error adding memory map: {e:?}");
-                    reply_sender.send(false).unwrap();
-                }
-            }
-        }
-    }
-
-    pub fn remove_mapping(
-        &self,
-        reply_sender: crossbeam_channel::Sender<bool>,
-        guest_addr: u64,
-        len: u64,
-    ) {
-        unsafe {
-            match WHvUnmapGpaRange(self.partition, guest_addr, len) {
-                Ok(_) => reply_sender.send(true).unwrap(),
-                Err(e) => {
-                    error!("Error removing memory map: {e:?}");
-                    reply_sender.send(false).unwrap();
-                }
-            }
-        }
     }
 }
 
@@ -183,121 +188,52 @@ pub struct VcpuConfig {
 /// A wrapper around creating and using a WHPX VCPU.
 pub struct Vcpu {
     id: u8,
-    /// The WHPX virtual CPU implementation
-    #[cfg(target_arch = "x86_64")]
     whpx_vcpu: WhpxVcpu,
-    #[cfg(target_arch = "x86_64")]
     partition: WHV_PARTITION_HANDLE,
+    guest_mem: GuestMemoryMmap,
     boot_entry_addr: u64,
-    boot_receiver: Option<crossbeam_channel::Receiver<u64>>,
-    boot_senders: Option<std::collections::HashMap<u64, crossbeam_channel::Sender<u64>>>,
-    fdt_addr: u64,
+    io_bus: devices::Bus,
     mmio_bus: Option<devices::Bus>,
     exit_evt: utils::eventfd::EventFd,
-    mpidr: u64,
     event_receiver: crossbeam_channel::Receiver<VcpuEvent>,
     event_sender: Option<crossbeam_channel::Sender<VcpuEvent>>,
     response_receiver: Option<crossbeam_channel::Receiver<VcpuResponse>>,
     response_sender: crossbeam_channel::Sender<VcpuResponse>,
-    vcpu_list: std::sync::Arc<devices::legacy::VcpuList>,
-    nested_enabled: bool,
 }
 
 impl Vcpu {
-    /// Constructs a new VCPU for `vm`.
-    pub fn new_aarch64(
-        id: u8,
-        boot_entry_addr: vm_memory::GuestAddress,
-        boot_receiver: Option<crossbeam_channel::Receiver<u64>>,
-        exit_evt: utils::eventfd::EventFd,
-        vcpu_list: std::sync::Arc<devices::legacy::VcpuList>,
-        nested_enabled: bool,
-    ) -> Result<Self> {
-        let (event_sender, event_receiver) = crossbeam_channel::unbounded();
-        let (response_sender, response_receiver) = crossbeam_channel::unbounded();
-
-        Ok(Vcpu {
-            id,
-            boot_entry_addr: boot_entry_addr.raw_value(),
-            boot_receiver,
-            boot_senders: None,
-            fdt_addr: 0,
-            mmio_bus: None,
-            exit_evt,
-            mpidr: id as u64,
-            event_receiver,
-            event_sender: Some(event_sender),
-            response_receiver: Some(response_receiver),
-            response_sender,
-            vcpu_list,
-            nested_enabled,
-        })
-    }
+    /// Registers a signal handler for kicking vCPUs.
+    ///
+    /// WHPX backend currently relies on synchronous exit handling, so this is a no-op.
+    pub fn register_kick_signal_handler() {}
 
     /// Constructs a new x86_64 VCPU for `vm`.
-    #[cfg(target_arch = "x86_64")]
     pub fn new(
         id: u8,
         partition: WHV_PARTITION_HANDLE,
+        guest_mem: GuestMemoryMmap,
+        boot_entry_addr: GuestAddress,
+        io_bus: devices::Bus,
         exit_evt: utils::eventfd::EventFd,
-        vcpu_list: std::sync::Arc<devices::legacy::VcpuList>,
-        nested_enabled: bool,
     ) -> Result<Self> {
         let (event_sender, event_receiver) = crossbeam_channel::unbounded();
         let (response_sender, response_receiver) = crossbeam_channel::unbounded();
 
-        let vcpu_index = id as u32;
-
-        // Create the WHPX vCPU
-        let whpx_vcpu = WhpxVcpu::new(partition, vcpu_index)
-            .map_err(|e| {
-                error!("Failed to create WHPX vCPU: {}", e);
-                Error::VcpuSpawn(e)
-            })?;
-
-        // Initialize basic x86_64 registers
-        let mut reg_names = [
-            WHV_REGISTER_NAME(WHvX64RegisterRip.0),
-            WHV_REGISTER_NAME(WHvX64RegisterRsp.0),
-            WHV_REGISTER_NAME(WHvX64RegisterRflags.0),
-        ];
-
-        let mut reg_values = [
-            WHV_REGISTER_VALUE { Reg64: 0x0 },  // RIP = 0x0
-            WHV_REGISTER_VALUE { Reg64: 0x0 },  // RSP = 0x0
-            WHV_REGISTER_VALUE { Reg64: 0x2 },  // RFLAGS = 0x2 (reserved bit)
-        ];
-
-        unsafe {
-            WHvSetVirtualProcessorRegisters(
-                partition,
-                vcpu_index,
-                reg_names.as_ptr(),
-                3,
-                reg_values.as_ptr(),
-            ).map_err(|e| {
-                error!("Failed to set registers: {}", e);
-                Error::VcpuSpawn(io::Error::new(io::ErrorKind::Other, format!("Failed to set registers: {}", e)))
-            })?;
-        }
+        let whpx_vcpu = WhpxVcpu::new(partition, id as u32).map_err(Error::VcpuSpawn)?;
 
         Ok(Vcpu {
             id,
             whpx_vcpu,
             partition,
-            boot_entry_addr: 0,
-            boot_receiver: None,
-            boot_senders: None,
-            fdt_addr: 0,
+            guest_mem,
+            boot_entry_addr: boot_entry_addr.raw_value(),
+            io_bus,
             mmio_bus: None,
             exit_evt,
-            mpidr: id as u64,
             event_receiver,
             event_sender: Some(event_sender),
             response_receiver: Some(response_receiver),
             response_sender,
-            vcpu_list,
-            nested_enabled,
         })
     }
 
@@ -306,26 +242,117 @@ impl Vcpu {
         self.id
     }
 
-    /// Gets the MPIDR register value.
-    pub fn get_mpidr(&self) -> u64 {
-        self.mpidr
-    }
-
     /// Sets a MMIO bus for this vcpu.
     pub fn set_mmio_bus(&mut self, mmio_bus: devices::Bus) {
         self.mmio_bus = Some(mmio_bus);
     }
 
-    pub fn set_boot_senders(
+    /// Configures x86_64 boot registers and tables for this vCPU.
+    pub fn configure_x86_64(
         &mut self,
-        boot_senders: std::collections::HashMap<u64, crossbeam_channel::Sender<u64>>,
-    ) {
-        self.boot_senders = Some(boot_senders);
-    }
+        guest_mem: &GuestMemoryMmap,
+        kernel_start_addr: GuestAddress,
+    ) -> Result<()> {
+        self.write_boot_state(guest_mem)?;
 
-    /// Configures an aarch64 specific vcpu.
-    pub fn configure_aarch64(&mut self, mem_info: &arch::ArchMemoryInfo) -> Result<()> {
-        self.fdt_addr = mem_info.fdt_addr;
+        let code_seg = WHV_X64_SEGMENT_REGISTER {
+            Base: 0,
+            Limit: 0xFFFFF,
+            Selector: 0x08,
+            Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0xA09B },
+        };
+        let data_seg = WHV_X64_SEGMENT_REGISTER {
+            Base: 0,
+            Limit: 0xFFFFF,
+            Selector: 0x10,
+            Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0xC093 },
+        };
+        let tss_seg = WHV_X64_SEGMENT_REGISTER {
+            Base: 0,
+            Limit: 0xFFFFF,
+            Selector: 0x18,
+            Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0x808B },
+        };
+
+        let gdtr = WHV_X64_TABLE_REGISTER {
+            Pad: [0; 3],
+            Limit: (BOOT_GDT_MAX * std::mem::size_of::<u64>() - 1) as u16,
+            Base: BOOT_GDT_OFFSET,
+        };
+        let idtr = WHV_X64_TABLE_REGISTER {
+            Pad: [0; 3],
+            Limit: (std::mem::size_of::<u64>() - 1) as u16,
+            Base: BOOT_IDT_OFFSET,
+        };
+
+        let reg_names = [
+            WHvX64RegisterRip,
+            WHvX64RegisterRsp,
+            WHvX64RegisterRbp,
+            WHvX64RegisterRsi,
+            WHvX64RegisterRflags,
+            WHvX64RegisterCs,
+            WHvX64RegisterDs,
+            WHvX64RegisterEs,
+            WHvX64RegisterFs,
+            WHvX64RegisterGs,
+            WHvX64RegisterSs,
+            WHvX64RegisterTr,
+            WHvX64RegisterGdtr,
+            WHvX64RegisterIdtr,
+            WHvX64RegisterCr0,
+            WHvX64RegisterCr3,
+            WHvX64RegisterCr4,
+            WHvX64RegisterEfer,
+        ];
+
+        let reg_values = [
+            WHV_REGISTER_VALUE {
+                Reg64: kernel_start_addr.raw_value(),
+            },
+            WHV_REGISTER_VALUE {
+                Reg64: arch::x86_64::layout::BOOT_STACK_POINTER,
+            },
+            WHV_REGISTER_VALUE {
+                Reg64: arch::x86_64::layout::BOOT_STACK_POINTER,
+            },
+            WHV_REGISTER_VALUE {
+                Reg64: arch::x86_64::layout::ZERO_PAGE_START,
+            },
+            WHV_REGISTER_VALUE { Reg64: 0x2 },
+            WHV_REGISTER_VALUE { Segment: code_seg },
+            WHV_REGISTER_VALUE { Segment: data_seg },
+            WHV_REGISTER_VALUE { Segment: data_seg },
+            WHV_REGISTER_VALUE { Segment: data_seg },
+            WHV_REGISTER_VALUE { Segment: data_seg },
+            WHV_REGISTER_VALUE { Segment: data_seg },
+            WHV_REGISTER_VALUE { Segment: tss_seg },
+            WHV_REGISTER_VALUE { Table: gdtr },
+            WHV_REGISTER_VALUE { Table: idtr },
+            WHV_REGISTER_VALUE {
+                Reg64: X86_CR0_PE | X86_CR0_PG,
+            },
+            WHV_REGISTER_VALUE { Reg64: PML4_START },
+            WHV_REGISTER_VALUE { Reg64: X86_CR4_PAE },
+            WHV_REGISTER_VALUE {
+                Reg64: EFER_LME | EFER_LMA,
+            },
+        ];
+
+        unsafe {
+            WHvSetVirtualProcessorRegisters(
+                self.partition,
+                self.id as u32,
+                reg_names.as_ptr(),
+                reg_names.len() as u32,
+                reg_values.as_ptr(),
+            )
+            .map_err(|e| {
+                error!("Failed to set x86_64 registers for vCPU {}: {e}", self.id);
+                Error::VcpuConfigure
+            })?;
+        }
+
         Ok(())
     }
 
@@ -341,7 +368,31 @@ impl Vcpu {
                 init_tls_sender
                     .send(true)
                     .expect("Cannot notify vcpu TLS initialization.");
-                // TODO: Implement WHPX vCPU run loop
+
+                let guest_mem = self.guest_mem.clone();
+                if let Err(e) =
+                    self.configure_x86_64(&guest_mem, GuestAddress(self.boot_entry_addr))
+                {
+                    error!("Failed to configure WHPX vCPU {}: {e}", self.id);
+                    self.exit(FC_EXIT_CODE_GENERIC_ERROR);
+                    return;
+                }
+
+                loop {
+                    match self.run() {
+                        Ok(VcpuEmulation::Halted) => thread::sleep(Duration::from_millis(1)),
+                        Ok(VcpuEmulation::Stopped) => {
+                            self.exit(FC_EXIT_CODE_OK);
+                            break;
+                        }
+                        Ok(VcpuEmulation::Handled) => continue,
+                        Err(e) => {
+                            error!("Error running WHPX vCPU {}: {e}", self.id);
+                            self.exit(FC_EXIT_CODE_GENERIC_ERROR);
+                            break;
+                        }
+                    }
+                }
             })
             .map_err(Error::VcpuSpawn)?;
 
@@ -367,76 +418,230 @@ impl Vcpu {
     }
 
     /// Handles a VM exit by delegating to the appropriate device.
-    ///
-    /// # Arguments
-    /// * `exit` - The VM exit to handle
-    ///
-    /// # Returns
-    /// Returns how the VMM should proceed after handling the exit.
-    #[cfg(target_arch = "x86_64")]
     pub fn run_emulation(&mut self, exit: VcpuExit) -> VcpuEmulation {
         match exit {
             VcpuExit::MmioRead(addr, data) => {
-                // Delegate to MMIO bus for MMIO read
                 if let Some(mmio_bus) = &self.mmio_bus {
                     if mmio_bus.read(self.id as u64, addr, data) {
+                        if let Err(e) = self.whpx_vcpu.complete_mmio_read(data) {
+                            error!(
+                                "Failed to complete WHPX MMIO read emulation on vCPU {}: {e}",
+                                self.id
+                            );
+                            self.whpx_vcpu.clear_pending_mmio();
+                            return VcpuEmulation::Stopped;
+                        }
                         return VcpuEmulation::Handled;
                     }
                 }
+                self.whpx_vcpu.clear_pending_mmio();
                 VcpuEmulation::Stopped
             }
             VcpuExit::MmioWrite(addr, data) => {
-                // Delegate to MMIO bus for MMIO write
                 if let Some(mmio_bus) = &self.mmio_bus {
                     if mmio_bus.write(self.id as u64, addr, data) {
+                        if let Err(e) = self.whpx_vcpu.complete_mmio_write() {
+                            error!(
+                                "Failed to complete WHPX MMIO write emulation on vCPU {}: {e}",
+                                self.id
+                            );
+                            self.whpx_vcpu.clear_pending_mmio();
+                            return VcpuEmulation::Stopped;
+                        }
                         return VcpuEmulation::Handled;
                     }
                 }
+                self.whpx_vcpu.clear_pending_mmio();
                 VcpuEmulation::Stopped
             }
             VcpuExit::IoPortRead(port, data) => {
-                // Delegate to MMIO bus for IO port read
-                if let Some(mmio_bus) = &self.mmio_bus {
-                    if mmio_bus.read(self.id as u64, port as u64, data) {
-                        return VcpuEmulation::Handled;
+                if self.io_bus.read(self.id as u64, port as u64, data) {
+                    if let Err(e) = self.whpx_vcpu.complete_io_read(data) {
+                        error!(
+                            "Failed to complete WHPX I/O read emulation on vCPU {}: {e}",
+                            self.id
+                        );
+                        self.whpx_vcpu.clear_pending_io();
+                        return VcpuEmulation::Stopped;
                     }
+                    return VcpuEmulation::Handled;
                 }
+                self.whpx_vcpu.clear_pending_io();
                 VcpuEmulation::Stopped
             }
             VcpuExit::IoPortWrite(port, data) => {
-                // Delegate to MMIO bus for IO port write
-                if let Some(mmio_bus) = &self.mmio_bus {
-                    if mmio_bus.write(self.id as u64, port as u64, data) {
-                        return VcpuEmulation::Handled;
+                if self.io_bus.write(self.id as u64, port as u64, data) {
+                    if let Err(e) = self.whpx_vcpu.complete_io_write() {
+                        error!(
+                            "Failed to complete WHPX I/O write emulation on vCPU {}: {e}",
+                            self.id
+                        );
+                        self.whpx_vcpu.clear_pending_io();
+                        return VcpuEmulation::Stopped;
                     }
+                    return VcpuEmulation::Handled;
                 }
+                self.whpx_vcpu.clear_pending_io();
                 VcpuEmulation::Stopped
             }
-            VcpuExit::Halted => VcpuEmulation::Halted,
-            VcpuExit::Shutdown => VcpuEmulation::Stopped,
+            VcpuExit::Halted => {
+                self.whpx_vcpu.clear_pending_mmio();
+                self.whpx_vcpu.clear_pending_io();
+                VcpuEmulation::Halted
+            }
+            VcpuExit::Shutdown => {
+                self.whpx_vcpu.clear_pending_mmio();
+                self.whpx_vcpu.clear_pending_io();
+                VcpuEmulation::Stopped
+            }
         }
     }
 
     /// Main vCPU run loop for x86_64.
-    ///
-    /// Continuously runs the vCPU, handling exits until the VM stops or halts.
-    ///
-    /// # Returns
-    /// Returns the final emulation state (Stopped or Halted).
-    ///
-    /// # Errors
-    /// Returns an error if the vCPU fails to run.
-    #[cfg(target_arch = "x86_64")]
-    pub fn run(&mut self) -> Result<VcpuEmulation, std::io::Error> {
+    pub fn run(&mut self) -> result::Result<VcpuEmulation, io::Error> {
         loop {
-            let exit = self.whpx_vcpu.run()?;
-            let emulation = self.run_emulation(exit);
+            while let Ok(event) = self.event_receiver.try_recv() {
+                match event {
+                    VcpuEvent::Pause => {
+                        self.response_sender
+                            .send(VcpuResponse::Paused)
+                            .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+
+                        loop {
+                            match self.event_receiver.recv() {
+                                Ok(VcpuEvent::Resume) => {
+                                    self.response_sender
+                                        .send(VcpuResponse::Resumed)
+                                        .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+                                    break;
+                                }
+                                Ok(VcpuEvent::Pause) => {
+                                    self.response_sender
+                                        .send(VcpuResponse::Paused)
+                                        .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+                                }
+                                Err(_) => return Ok(VcpuEmulation::Stopped),
+                            }
+                        }
+                    }
+                    VcpuEvent::Resume => {
+                        self.response_sender
+                            .send(VcpuResponse::Resumed)
+                            .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+                    }
+                }
+            }
+
+            let emulation = match self.whpx_vcpu.run()? {
+                VcpuExit::MmioRead(addr, data) => {
+                    if let Some(mmio_bus) = &self.mmio_bus {
+                        if mmio_bus.read(self.id as u64, addr, data) {
+                            let mut completion = [0_u8; 8];
+                            completion[..data.len()].copy_from_slice(data);
+                            let completion = &completion[..data.len()];
+                            let _ = data;
+                            if let Err(e) = self.whpx_vcpu.complete_mmio_read(completion) {
+                                error!(
+                                    "Failed to complete WHPX MMIO read emulation on vCPU {}: {e}",
+                                    self.id
+                                );
+                                self.whpx_vcpu.clear_pending_mmio();
+                                VcpuEmulation::Stopped
+                            } else {
+                                VcpuEmulation::Handled
+                            }
+                        } else {
+                            self.whpx_vcpu.clear_pending_mmio();
+                            VcpuEmulation::Stopped
+                        }
+                    } else {
+                        self.whpx_vcpu.clear_pending_mmio();
+                        VcpuEmulation::Stopped
+                    }
+                }
+                VcpuExit::MmioWrite(addr, data) => {
+                    if let Some(mmio_bus) = &self.mmio_bus {
+                        if mmio_bus.write(self.id as u64, addr, data) {
+                            let _ = data;
+                            if let Err(e) = self.whpx_vcpu.complete_mmio_write() {
+                                error!(
+                                    "Failed to complete WHPX MMIO write emulation on vCPU {}: {e}",
+                                    self.id
+                                );
+                                self.whpx_vcpu.clear_pending_mmio();
+                                VcpuEmulation::Stopped
+                            } else {
+                                VcpuEmulation::Handled
+                            }
+                        } else {
+                            self.whpx_vcpu.clear_pending_mmio();
+                            VcpuEmulation::Stopped
+                        }
+                    } else {
+                        self.whpx_vcpu.clear_pending_mmio();
+                        VcpuEmulation::Stopped
+                    }
+                }
+                VcpuExit::IoPortRead(port, data) => {
+                    if self.io_bus.read(self.id as u64, port as u64, data) {
+                        let mut completion = [0_u8; 8];
+                        completion[..data.len()].copy_from_slice(data);
+                        let completion = &completion[..data.len()];
+                        let _ = data;
+                        if let Err(e) = self.whpx_vcpu.complete_io_read(completion) {
+                            error!(
+                                "Failed to complete WHPX I/O read emulation on vCPU {}: {e}",
+                                self.id
+                            );
+                            self.whpx_vcpu.clear_pending_io();
+                            VcpuEmulation::Stopped
+                        } else {
+                            VcpuEmulation::Handled
+                        }
+                    } else {
+                        self.whpx_vcpu.clear_pending_io();
+                        VcpuEmulation::Stopped
+                    }
+                }
+                VcpuExit::IoPortWrite(port, data) => {
+                    if self.io_bus.write(self.id as u64, port as u64, data) {
+                        let _ = data;
+                        if let Err(e) = self.whpx_vcpu.complete_io_write() {
+                            error!(
+                                "Failed to complete WHPX I/O write emulation on vCPU {}: {e}",
+                                self.id
+                            );
+                            self.whpx_vcpu.clear_pending_io();
+                            VcpuEmulation::Stopped
+                        } else {
+                            VcpuEmulation::Handled
+                        }
+                    } else {
+                        self.whpx_vcpu.clear_pending_io();
+                        VcpuEmulation::Stopped
+                    }
+                }
+                VcpuExit::Halted => {
+                    self.whpx_vcpu.clear_pending_mmio();
+                    self.whpx_vcpu.clear_pending_io();
+                    VcpuEmulation::Halted
+                }
+                VcpuExit::Shutdown => {
+                    self.whpx_vcpu.clear_pending_mmio();
+                    self.whpx_vcpu.clear_pending_io();
+                    VcpuEmulation::Stopped
+                }
+            };
 
             match emulation {
                 VcpuEmulation::Handled => continue,
                 VcpuEmulation::Stopped | VcpuEmulation::Halted => return Ok(emulation),
             }
         }
+    }
+
+    fn write_boot_state(&self, guest_mem: &GuestMemoryMmap) -> Result<()> {
+        write_boot_state_to_guest(guest_mem)
     }
 }
 
@@ -462,9 +667,7 @@ impl VcpuHandle {
     }
 
     pub fn send_event(&self, event: VcpuEvent) -> Result<()> {
-        self.event_sender
-            .send(event)
-            .map_err(|_| Error::VcpuRun)
+        self.event_sender.send(event).map_err(|_| Error::VcpuRun)
     }
 
     pub fn response_receiver(&self) -> &crossbeam_channel::Receiver<VcpuResponse> {
@@ -483,4 +686,120 @@ pub enum VcpuResponse {
     Paused,
     Resumed,
     Exited(u8),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vm_memory::GuestAddress;
+
+    #[test]
+    fn test_error_display_messages() {
+        assert!(Error::VmSetup
+            .to_string()
+            .contains("Cannot configure the microvm"));
+        assert!(Error::VcpuRun.to_string().contains("Cannot run the VCPUs"));
+        assert!(
+            Error::VcpuSpawn(io::Error::new(io::ErrorKind::Other, "spawn"))
+                .to_string()
+                .contains("Cannot spawn a new vCPU thread")
+        );
+    }
+
+    #[test]
+    fn test_vcpu_handle_send_event_and_receive_response() {
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (response_tx, response_rx) = crossbeam_channel::unbounded();
+
+        let worker = std::thread::spawn(move || {
+            if let Ok(VcpuEvent::Resume) = event_rx.recv() {
+                let _ = response_tx.send(VcpuResponse::Resumed);
+            }
+        });
+
+        let handle = VcpuHandle::new(event_tx, response_rx, worker);
+        handle.send_event(VcpuEvent::Resume).unwrap();
+
+        let response = handle
+            .response_receiver()
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap();
+        assert_eq!(response, VcpuResponse::Resumed);
+    }
+
+    #[test]
+    fn test_vcpu_handle_send_event_closed_channel() {
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (_response_tx, response_rx) = crossbeam_channel::unbounded();
+        drop(event_rx);
+
+        let worker = std::thread::spawn(|| {});
+        let handle = VcpuHandle::new(event_tx, response_rx, worker);
+
+        assert!(matches!(
+            handle.send_event(VcpuEvent::Pause),
+            Err(Error::VcpuRun)
+        ));
+    }
+
+    #[test]
+    fn test_write_boot_state_to_guest_populates_expected_entries() {
+        let guest_mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x20_000)]).unwrap();
+
+        write_boot_state_to_guest(&guest_mem).unwrap();
+
+        let gdt0 = guest_mem
+            .read_obj::<u64>(GuestAddress(BOOT_GDT_OFFSET))
+            .unwrap();
+        let gdt1 = guest_mem
+            .read_obj::<u64>(GuestAddress(BOOT_GDT_OFFSET + 8))
+            .unwrap();
+        let idt = guest_mem
+            .read_obj::<u64>(GuestAddress(BOOT_IDT_OFFSET))
+            .unwrap();
+        let pml4e = guest_mem.read_obj::<u64>(GuestAddress(PML4_START)).unwrap();
+        let pdpte = guest_mem
+            .read_obj::<u64>(GuestAddress(PDPTE_START))
+            .unwrap();
+        let pde0 = guest_mem.read_obj::<u64>(GuestAddress(PDE_START)).unwrap();
+        let pde1 = guest_mem
+            .read_obj::<u64>(GuestAddress(PDE_START + 8))
+            .unwrap();
+        let pde_last = guest_mem
+            .read_obj::<u64>(GuestAddress(PDE_START + (511 * 8) as u64))
+            .unwrap();
+
+        assert_eq!(gdt0, 0);
+        assert_eq!(gdt1, 0x00AF_9B00_0000_FFFF);
+        assert_eq!(idt, 0);
+        assert_eq!(pml4e, PDPTE_START | 0x03);
+        assert_eq!(pdpte, PDE_START | 0x03);
+        assert_eq!(pde0, 0x83);
+        assert_eq!(pde1, (1_u64 << 21) | 0x83);
+        assert_eq!(pde_last, (511_u64 << 21) | 0x83);
+    }
+
+    #[test]
+    fn test_write_boot_state_to_guest_fails_on_small_memory() {
+        let guest_mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap();
+
+        assert!(matches!(
+            write_boot_state_to_guest(&guest_mem),
+            Err(Error::VcpuConfigure)
+        ));
+    }
+
+    #[test]
+    #[ignore = "Requires WHPX/Hyper-V available on host"]
+    fn test_whpx_vm_lifecycle_smoke() {
+        let _vm = Vm::new(false, 1).unwrap();
+    }
+
+    #[test]
+    #[ignore = "Requires WHPX/Hyper-V available on host"]
+    fn test_whpx_vm_memory_init_smoke() {
+        let mut vm = Vm::new(false, 1).unwrap();
+        let guest_mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x20_000)]).unwrap();
+        vm.memory_init(&guest_mem).unwrap();
+    }
 }

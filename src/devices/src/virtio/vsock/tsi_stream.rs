@@ -588,7 +588,12 @@ impl Proxy for TsiStreamProxy {
     }
 
     fn sendmsg(&mut self, pkt: &VsockPacket) -> ProxyUpdate {
-        debug!("sendmsg: id={:#x} status={:?} len={}", self.id, self.status, pkt.len());
+        debug!(
+            "sendmsg: id={:#x} status={:?} len={}",
+            self.id,
+            self.status,
+            pkt.len()
+        );
 
         let mut update = ProxyUpdate::default();
 
@@ -857,7 +862,10 @@ impl Proxy for TsiStreamProxy {
         }
 
         if evset.contains(EventSet::IN) {
-            debug!("process_event: IN id={:#x} status={:?}", self.id, self.status);
+            debug!(
+                "process_event: IN id={:#x} status={:?}",
+                self.id, self.status
+            );
             if self.status == ProxyStatus::Connected {
                 let (signal_queue, wait_credit) = self.recv_pkt();
                 update.signal_queue = signal_queue;

@@ -609,7 +609,12 @@ impl VsockMuxer {
     }
 
     fn process_op_shutdown(&self, pkt: &VsockPacket) {
-        debug!("OP_SHUTDOWN: src={} dst={} flags={}", pkt.src_port(), pkt.dst_port(), pkt.flags());
+        debug!(
+            "OP_SHUTDOWN: src={} dst={} flags={}",
+            pkt.src_port(),
+            pkt.dst_port(),
+            pkt.flags()
+        );
         let id: u64 = ((pkt.src_port() as u64) << 32) | (pkt.dst_port() as u64);
         debug!("OP_SHUTDOWN: id={:#x}", id);
         if let Some(proxy) = self.proxy_map.read().unwrap().get(&id) {
@@ -632,19 +637,39 @@ impl VsockMuxer {
     }
 
     fn process_stream_rw(&self, pkt: &VsockPacket) {
-        debug!("OP_RW: src={} dst={} len={}", pkt.src_port(), pkt.dst_port(), pkt.len());
+        debug!(
+            "OP_RW: src={} dst={} len={}",
+            pkt.src_port(),
+            pkt.dst_port(),
+            pkt.len()
+        );
         let id: u64 = ((pkt.src_port() as u64) << 32) | (pkt.dst_port() as u64);
         if let Some(proxy_lock) = self.proxy_map.read().unwrap().get(&id) {
             debug!(
                 "allowing OP_RW: id={:#x} src={} dst={} len={}",
-                id, pkt.src_port(), pkt.dst_port(), pkt.len()
+                id,
+                pkt.src_port(),
+                pkt.dst_port(),
+                pkt.len()
             );
             let mut proxy = proxy_lock.lock().unwrap();
             let update = proxy.sendmsg(pkt);
             self.process_proxy_update(id, update);
         } else {
-            let proxy_ids: Vec<String> = self.proxy_map.read().unwrap().keys().map(|k| format!("{:#x}", k)).collect();
-            warn!("invalid OP_RW: id={:#x} src={} dst={}, known proxies: {:?}", id, pkt.src_port(), pkt.dst_port(), proxy_ids);
+            let proxy_ids: Vec<String> = self
+                .proxy_map
+                .read()
+                .unwrap()
+                .keys()
+                .map(|k| format!("{:#x}", k))
+                .collect();
+            warn!(
+                "invalid OP_RW: id={:#x} src={} dst={}, known proxies: {:?}",
+                id,
+                pkt.src_port(),
+                pkt.dst_port(),
+                proxy_ids
+            );
             let mem = match self.mem.as_ref() {
                 Some(m) => m,
                 None => {
