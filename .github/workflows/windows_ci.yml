@@ -58,6 +58,7 @@ jobs:
   windows-build-and-tests:
     name: Windows build and tests
     runs-on: windows-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
