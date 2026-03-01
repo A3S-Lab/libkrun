@@ -802,4 +802,44 @@ mod tests {
         let guest_mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x20_000)]).unwrap();
         vm.memory_init(&guest_mem).unwrap();
     }
+
+    #[test]
+    #[ignore = "Requires WHPX/Hyper-V available on host"]
+    fn test_whpx_vm_hlt_boot() {
+        const ENTRY_ADDR: u64 = 0x10000;
+        const MEM_SIZE: usize = 0x40_0000; // 4 MB — page tables end at ~0xC000, code at 0x10000
+
+        // 1. Create WHPX partition and map guest memory.
+        let mut vm = Vm::new(false, 1).unwrap();
+        let guest_mem =
+            GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MEM_SIZE)]).unwrap();
+        vm.memory_init(&guest_mem).unwrap();
+
+        // 2. Place a single HLT (0xF4) at the entry point.
+        guest_mem
+            .write_obj::<u8>(0xF4, GuestAddress(ENTRY_ADDR))
+            .unwrap();
+
+        // 3. Build a minimal vCPU (no MMIO bus needed for a pure HLT test).
+        let exit_evt = utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
+        let io_bus = devices::Bus::new();
+        let mut vcpu = Vcpu::new(
+            0,
+            vm.partition(),
+            guest_mem.clone(),
+            GuestAddress(ENTRY_ADDR),
+            io_bus,
+            exit_evt,
+        )
+        .unwrap();
+
+        // 4. Set up long-mode boot state: GDT, IDT, PML4/PDPTE/PDE, all segment
+        //    registers, CR0/CR3/CR4, EFER, RIP=ENTRY_ADDR.
+        vcpu.configure_x86_64(&guest_mem, GuestAddress(ENTRY_ADDR))
+            .unwrap();
+
+        // 5. Run: guest executes HLT → WHvRunReasonX64Halt → VcpuEmulation::Halted.
+        let result = vcpu.run().unwrap();
+        assert_eq!(result, VcpuEmulation::Halted);
+    }
 }
