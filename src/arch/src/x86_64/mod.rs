@@ -5,16 +5,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
+#[cfg(target_os = "linux")]
 mod gdt;
 /// Contains logic for setting up Advanced Programmable Interrupt Controller (local version).
+#[cfg(target_os = "linux")]
 pub mod interrupts;
 /// Layout for the x86_64 system.
 pub mod layout;
 #[cfg(not(feature = "tee"))]
 mod mptable;
 /// Logic for configuring x86_64 model specific registers (MSRs).
+#[cfg(target_os = "linux")]
 pub mod msr;
 /// Logic for configuring x86_64 registers.
+#[cfg(target_os = "linux")]
 pub mod regs;
 
 use crate::x86_64::layout::{EBDA_START, FIRST_ADDR_PAST_32BITS, MMIO_MEM_START};
@@ -25,6 +29,16 @@ use arch_gen::x86::bootparam::{boot_params, E820_RAM};
 use vm_memory::Bytes;
 use vm_memory::{Address, ByteValued, GuestAddress, GuestMemoryMmap};
 use vmm_sys_util::align_upwards;
+
+#[cfg(target_os = "linux")]
+fn host_page_size() -> usize {
+    unsafe { libc::sysconf(libc::_SC_PAGESIZE).try_into().unwrap() }
+}
+
+#[cfg(target_os = "windows")]
+fn host_page_size() -> usize {
+    crate::PAGE_SIZE
+}
 
 // This is a workaround to the Rust enforcement specifying that any implementation of a foreign
 // trait (in this case `ByteValued`) where:
@@ -63,7 +77,7 @@ pub fn arch_memory_regions(
     initrd_size: u64,
     firmware_size: Option<usize>,
 ) -> (ArchMemoryInfo, Vec<(GuestAddress, usize)>) {
-    let page_size: usize = unsafe { libc::sysconf(libc::_SC_PAGESIZE).try_into().unwrap() };
+    let page_size = host_page_size();
 
     let size = align_upwards!(size, page_size);
 
@@ -179,7 +193,7 @@ pub fn arch_memory_regions(
     _initrd_size: u64,
     _firmware_size: Option<usize>,
 ) -> (ArchMemoryInfo, Vec<(GuestAddress, usize)>) {
-    let page_size: usize = unsafe { libc::sysconf(libc::_SC_PAGESIZE).try_into().unwrap() };
+    let page_size = host_page_size();
 
     let size = align_upwards!(size, page_size);
     if let Some(kernel_load_addr) = kernel_load_addr {

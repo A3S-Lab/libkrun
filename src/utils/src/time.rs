@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt;
+use std::sync::OnceLock;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Constant to convert seconds to nanoseconds.
 pub const NANOS_PER_SECOND: u64 = 1_000_000_000;
@@ -18,6 +20,7 @@ pub enum ClockType {
     ThreadCpu,
 }
 
+#[cfg(not(target_os = "windows"))]
 impl From<ClockType> for libc::clockid_t {
     fn from(ctype: ClockType) -> libc::clockid_t {
         match ctype {
@@ -54,27 +57,23 @@ impl LocalTime {
             tv_sec: 0,
             tv_nsec: 0,
         };
-        let mut tm: libc::tm = libc::tm {
-            tm_sec: 0,
-            tm_min: 0,
-            tm_hour: 0,
-            tm_mday: 0,
-            tm_mon: 0,
-            tm_year: 0,
-            tm_wday: 0,
-            tm_yday: 0,
-            tm_isdst: 0,
-            tm_gmtoff: 0,
-            #[cfg(target_os = "linux")]
-            tm_zone: std::ptr::null(),
-            #[cfg(target_os = "macos")]
-            tm_zone: std::ptr::null_mut(),
-        };
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
 
-        // Safe because the parameters are valid.
+        #[cfg(not(target_os = "windows"))]
         unsafe {
             libc::clock_gettime(libc::CLOCK_REALTIME, &mut timespec);
             libc::localtime_r(&timespec.tv_sec, &mut tm);
+        }
+
+        #[cfg(target_os = "windows")]
+        unsafe {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            let secs = now.as_secs() as libc::time_t;
+            timespec.tv_sec = secs;
+            timespec.tv_nsec = now.subsec_nanos() as _;
+            libc::localtime_s(&mut tm, &secs);
         }
 
         LocalTime {
@@ -84,7 +83,7 @@ impl LocalTime {
             mday: tm.tm_mday,
             mon: tm.tm_mon,
             year: tm.tm_year,
-            nsec: timespec.tv_nsec,
+            nsec: timespec.tv_nsec as i64,
         }
     }
 }
@@ -144,13 +143,31 @@ pub fn timestamp_cycles() -> u64 {
 ///
 /// * `clock_type` - Identifier of the Linux Kernel clock on which to act.
 pub fn get_time(clock_type: ClockType) -> u64 {
-    let mut time_struct = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // Safe because the parameters are valid.
-    unsafe { libc::clock_gettime(clock_type.into(), &mut time_struct) };
-    seconds_to_nanoseconds(time_struct.tv_sec).unwrap() as u64 + (time_struct.tv_nsec as u64)
+    #[cfg(target_os = "windows")]
+    {
+        static START: OnceLock<Instant> = OnceLock::new();
+        let start = START.get_or_init(Instant::now);
+        match clock_type {
+            ClockType::Real => SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64,
+            ClockType::Monotonic | ClockType::ProcessCpu | ClockType::ThreadCpu => {
+                start.elapsed().as_nanos() as u64
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut time_struct = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // Safe because the parameters are valid.
+        unsafe { libc::clock_gettime(clock_type.into(), &mut time_struct) };
+        seconds_to_nanoseconds(time_struct.tv_sec).unwrap() as u64 + (time_struct.tv_nsec as u64)
+    }
 }
 
 /// Converts a timestamp in seconds to an equivalent one in nanoseconds.

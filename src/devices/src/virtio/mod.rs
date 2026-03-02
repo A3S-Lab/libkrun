@@ -17,11 +17,20 @@ pub mod balloon;
 pub mod bindings;
 #[cfg(feature = "blk")]
 pub mod block;
+#[cfg(not(target_os = "windows"))]
 pub mod console;
+#[cfg(target_os = "windows")]
+mod console_windows;
 pub mod descriptor_utils;
 pub mod device;
+#[cfg(not(target_os = "windows"))]
 pub mod file_traits;
-#[cfg(not(any(feature = "tee", feature = "nitro")))]
+#[cfg(target_os = "windows")]
+pub mod file_traits_windows;
+#[cfg(all(
+    not(any(feature = "tee", feature = "nitro")),
+    not(target_os = "windows")
+))]
 pub mod fs;
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -36,15 +45,26 @@ mod queue;
 pub mod rng;
 #[cfg(feature = "snd")]
 pub mod snd;
+#[cfg(not(target_os = "windows"))]
 pub mod vsock;
+#[cfg(target_os = "windows")]
+mod vsock_windows;
 
 #[cfg(not(feature = "tee"))]
 pub use self::balloon::*;
 #[cfg(feature = "blk")]
 pub use self::block::{Block, CacheType};
+#[cfg(not(target_os = "windows"))]
 pub use self::console::*;
+#[cfg(target_os = "windows")]
+pub use self::console_windows::*;
 pub use self::device::*;
-#[cfg(not(any(feature = "tee", feature = "nitro")))]
+#[cfg(target_os = "windows")]
+pub use self::file_traits_windows as file_traits;
+#[cfg(all(
+    not(any(feature = "tee", feature = "nitro")),
+    not(target_os = "windows")
+))]
 pub use self::fs::*;
 #[cfg(feature = "gpu")]
 pub use self::gpu::*;
@@ -56,7 +76,10 @@ pub use self::queue::{Descriptor, DescriptorChain, Queue};
 pub use self::rng::*;
 #[cfg(feature = "snd")]
 pub use self::snd::Snd;
+#[cfg(not(target_os = "windows"))]
 pub use self::vsock::*;
+#[cfg(target_os = "windows")]
+pub use self::vsock_windows::*;
 
 /// When the driver initializes the device, it lets the device know about the
 /// completed stages using the Device Status Field.

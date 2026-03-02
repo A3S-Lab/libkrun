@@ -9,14 +9,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::{fmt, io};
 
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 use devices::fdt::DeviceInfoForFDT;
+#[cfg(target_arch = "aarch64")]
 use devices::legacy::IrqChip;
 use devices::{BusDevice, DeviceType};
 use kernel::cmdline as kernel_cmdline;
-use polly::event_manager::EventManager;
-#[cfg(target_arch = "aarch64")]
 use utils::eventfd::EventFd;
 
+#[cfg(target_arch = "aarch64")]
 use crate::vstate::Vm;
 
 /// Errors for MMIO device manager.
@@ -315,11 +316,19 @@ impl MMIODeviceManager {
 #[derive(Clone, Debug)]
 pub struct MMIODeviceInfo {
     addr: u64,
+    #[cfg_attr(
+        not(any(target_arch = "aarch64", target_arch = "riscv64")),
+        allow(dead_code)
+    )]
     irq: u32,
+    #[cfg_attr(
+        not(any(target_arch = "aarch64", target_arch = "riscv64")),
+        allow(dead_code)
+    )]
     len: u64,
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 impl DeviceInfoForFDT for MMIODeviceInfo {
     fn addr(&self) -> u64 {
         self.addr

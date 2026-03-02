@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", allow(dead_code))]
+
 const LINUX_EPERM: i32 = 1;
 const LINUX_ENOENT: i32 = 2;
 const LINUX_ESRCH: i32 = 3;
@@ -91,6 +93,68 @@ pub fn linux_error(error: std::io::Error) -> std::io::Error {
     std::io::Error::from_raw_os_error(linux_errno_raw(error.raw_os_error().unwrap_or(libc::EIO)))
 }
 
+#[cfg(target_os = "windows")]
+pub fn linux_errno_raw(errno: i32) -> i32 {
+    match errno {
+        libc::EPERM => LINUX_EPERM,
+        libc::ENOENT => LINUX_ENOENT,
+        libc::EINTR => LINUX_EINTR,
+        libc::EIO => LINUX_EIO,
+        libc::ENXIO => LINUX_ENXIO,
+        libc::ENOEXEC => LINUX_ENOEXEC,
+        libc::EBADF => LINUX_EBADF,
+        libc::ENOMEM => LINUX_ENOMEM,
+        libc::EACCES => LINUX_EACCES,
+        libc::EFAULT => LINUX_EFAULT,
+        libc::EBUSY => LINUX_EBUSY,
+        libc::EEXIST => LINUX_EEXIST,
+        libc::ENODEV => LINUX_ENODEV,
+        libc::ENOTDIR => LINUX_ENOTDIR,
+        libc::EISDIR => LINUX_EISDIR,
+        libc::EINVAL => LINUX_EINVAL,
+        libc::ENFILE => LINUX_ENFILE,
+        libc::EMFILE => LINUX_EMFILE,
+        libc::ENOTTY => LINUX_ENOTTY,
+        libc::EFBIG => LINUX_EFBIG,
+        libc::ENOSPC => LINUX_ENOSPC,
+        libc::EROFS => LINUX_EROFS,
+        libc::EPIPE => LINUX_EPIPE,
+        libc::EDOM => LINUX_EDOM,
+        libc::EAGAIN => LINUX_EAGAIN,
+        libc::EINPROGRESS => LINUX_EINPROGRESS,
+        libc::EALREADY => LINUX_EALREADY,
+        libc::ENOTSOCK => LINUX_ENOTSOCK,
+        libc::EDESTADDRREQ => LINUX_EDESTADDRREQ,
+        libc::EMSGSIZE => LINUX_EMSGSIZE,
+        libc::EPROTOTYPE => LINUX_EPROTOTYPE,
+        libc::ENOPROTOOPT => LINUX_ENOPROTOOPT,
+        libc::EPROTONOSUPPORT => LINUX_EPROTONOSUPPORT,
+        libc::EAFNOSUPPORT => LINUX_EAFNOSUPPORT,
+        libc::EADDRINUSE => LINUX_EADDRINUSE,
+        libc::EADDRNOTAVAIL => LINUX_EADDRNOTAVAIL,
+        libc::ENETDOWN => LINUX_ENETDOWN,
+        libc::ENETUNREACH => LINUX_ENETUNREACH,
+        libc::ENETRESET => LINUX_ENETRESET,
+        libc::ECONNABORTED => LINUX_ECONNABORTED,
+        libc::ECONNRESET => LINUX_ECONNRESET,
+        libc::ENOBUFS => LINUX_ENOBUFS,
+        libc::EISCONN => LINUX_EISCONN,
+        libc::ENOTCONN => LINUX_ENOTCONN,
+        libc::ETIMEDOUT => LINUX_ETIMEDOUT,
+        libc::ECONNREFUSED => LINUX_ECONNREFUSED,
+        libc::ELOOP => LINUX_ELOOP,
+        libc::ENAMETOOLONG => LINUX_ENAMETOOLONG,
+        libc::EHOSTUNREACH => LINUX_EHOSTUNREACH,
+        libc::ENOTEMPTY => LINUX_ENOTEMPTY,
+        libc::ENOLCK => LINUX_ENOLCK,
+        libc::ENOSYS => LINUX_ENOSYS,
+        libc::EOVERFLOW => LINUX_EOVERFLOW,
+        libc::ECANCELED => LINUX_ECANCELED,
+        _ => LINUX_EIO,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
 pub fn linux_errno_raw(errno: i32) -> i32 {
     match errno {
         libc::EPERM => LINUX_EPERM,

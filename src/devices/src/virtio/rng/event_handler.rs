@@ -1,5 +1,3 @@
-use std::os::unix::io::AsRawFd;
-
 use polly::event_manager::{EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
 

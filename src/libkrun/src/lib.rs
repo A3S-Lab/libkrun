@@ -26,11 +26,16 @@ use std::env;
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
 use std::ffi::{c_void, CStr};
+#[cfg(not(target_os = "windows"))]
 use std::fs::File;
+#[cfg(not(target_os = "windows"))]
 use std::io::IsTerminal;
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "windows"))]
 use std::os::fd::AsRawFd;
+#[cfg(not(target_os = "windows"))]
 use std::os::fd::{BorrowedFd, FromRawFd, RawFd};
+#[cfg(target_os = "windows")]
+type RawFd = i32;
 use std::path::PathBuf;
 use std::slice;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -80,6 +85,17 @@ const KRUNFW_NAME: &str = "libkrunfw-sev.so.5";
 const KRUNFW_NAME: &str = "libkrunfw-tdx.so.5";
 #[cfg(target_os = "macos")]
 const KRUNFW_NAME: &str = "libkrunfw.5.dylib";
+#[cfg(target_os = "windows")]
+const KRUNFW_NAME: &str = "libkrunfw.dll";
+
+#[cfg(not(target_os = "windows"))]
+type KrunUid = libc::uid_t;
+#[cfg(not(target_os = "windows"))]
+type KrunGid = libc::gid_t;
+#[cfg(target_os = "windows")]
+type KrunUid = u32;
+#[cfg(target_os = "windows")]
+type KrunGid = u32;
 
 #[cfg(feature = "nitro")]
 static KRUN_NITRO_DEBUG: Mutex<bool> = Mutex::new(false);
@@ -162,8 +178,8 @@ struct ContextConfig {
     gpu_shm_size: Option<usize>,
     enable_snd: bool,
     console_output: Option<PathBuf>,
-    vmm_uid: Option<libc::uid_t>,
-    vmm_gid: Option<libc::gid_t>,
+    vmm_uid: Option<KrunUid>,
+    vmm_gid: Option<KrunGid>,
 }
 
 impl ContextConfig {
@@ -324,11 +340,11 @@ impl ContextConfig {
         self.gpu_shm_size = Some(shm_size);
     }
 
-    fn set_vmm_uid(&mut self, vmm_uid: libc::uid_t) {
+    fn set_vmm_uid(&mut self, vmm_uid: KrunUid) {
         self.vmm_uid = Some(vmm_uid);
     }
 
-    fn set_vmm_gid(&mut self, vmm_gid: libc::gid_t) {
+    fn set_vmm_gid(&mut self, vmm_gid: KrunGid) {
         self.vmm_gid = Some(vmm_gid);
     }
 }
@@ -475,7 +491,10 @@ pub unsafe extern "C" fn krun_init_log(target: RawFd, level: u32, style: u32, op
         0 /* stdin */ => return -libc::EINVAL,
         1 /* stdout */ => Target::Stdout,
         2 /* stderr */ => Target::Stderr,
+        #[cfg(not(target_os = "windows"))]
         fd => Target::Pipe(Box::new(File::from_raw_fd(fd))),
+        #[cfg(target_os = "windows")]
+        _ => return -libc::EINVAL,
     };
 
     let filter = log_level_to_filter_str(level);
@@ -1784,6 +1803,8 @@ pub extern "C" fn krun_get_shutdown_eventfd(ctx_id: u32) -> i32 {
                 return efd.get_write_fd();
                 #[cfg(target_os = "linux")]
                 return efd.as_raw_fd();
+                #[cfg(target_os = "windows")]
+                return efd.as_raw_fd();
             } else {
                 -libc::EINVAL
             }
@@ -1945,7 +1966,11 @@ fn create_virtio_net(
         .expect("Failed to create network interface");
 }
 
-#[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+#[cfg(all(
+    target_arch = "x86_64",
+    not(feature = "tee"),
+    not(target_os = "windows")
+))]
 fn map_kernel(ctx_id: u32, kernel_path: &PathBuf) -> i32 {
     let file = match File::options().read(true).write(false).open(kernel_path) {
         Ok(file) => file,
@@ -2021,8 +2046,14 @@ pub unsafe extern "C" fn krun_set_kernel(
     let format = match kernel_format {
         // For raw kernels in x86_64, we map the kernel into the
         // process and treat it as a bundled kernel.
-        #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+        #[cfg(all(
+            target_arch = "x86_64",
+            not(feature = "tee"),
+            not(target_os = "windows")
+        ))]
         0 => return map_kernel(ctx_id, &path),
+        #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+        0 => KernelFormat::Raw,
         #[cfg(target_arch = "aarch64")]
         0 => KernelFormat::Raw,
         1 => KernelFormat::Elf,
@@ -2153,7 +2184,7 @@ unsafe fn load_krunfw_payload(
 }
 
 #[no_mangle]
-pub extern "C" fn krun_setuid(ctx_id: u32, uid: libc::uid_t) -> i32 {
+pub extern "C" fn krun_setuid(ctx_id: u32, uid: KrunUid) -> i32 {
     match CTX_MAP.lock().unwrap().entry(ctx_id) {
         Entry::Occupied(mut ctx_cfg) => {
             let cfg = ctx_cfg.get_mut();
@@ -2166,7 +2197,7 @@ pub extern "C" fn krun_setuid(ctx_id: u32, uid: libc::uid_t) -> i32 {
 }
 
 #[no_mangle]
-pub extern "C" fn krun_setgid(ctx_id: u32, gid: libc::gid_t) -> i32 {
+pub extern "C" fn krun_setgid(ctx_id: u32, gid: KrunGid) -> i32 {
     match CTX_MAP.lock().unwrap().entry(ctx_id) {
         Entry::Occupied(mut ctx_cfg) => {
             let cfg = ctx_cfg.get_mut();
@@ -2380,6 +2411,7 @@ pub unsafe extern "C" fn krun_add_console_port_tty(
         }
     };
 
+    #[cfg(not(target_os = "windows"))]
     if !BorrowedFd::borrow_raw(tty_fd).is_terminal() {
         return -libc::ENOTTY;
     }
@@ -2637,6 +2669,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         ctx_cfg.vmr.set_console_output(console_output);
     }
 
+    #[cfg(not(target_os = "windows"))]
     if let Some(gid) = ctx_cfg.vmm_gid {
         if unsafe { libc::setgid(gid) } != 0 {
             error!("Failed to set gid {gid}");
@@ -2644,6 +2677,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     if let Some(uid) = ctx_cfg.vmm_uid {
         if unsafe { libc::setuid(uid) } != 0 {
             error!("Failed to set uid {uid}");

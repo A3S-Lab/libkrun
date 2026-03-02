@@ -73,3 +73,99 @@ Optional cleanup of rootfs directory after run:
 ```powershell
 ./tests/windows/run_whpx_smoke.ps1 -CleanupRootfs
 ```
+
+## WHPX HLT boot test
+
+`test_whpx_vm_hlt_boot` validates the full WHPX vCPU execution path end-to-end:
+writes a single `HLT` instruction at guest address `0x10000`, sets up long-mode
+boot state via `configure_x86_64`, runs the vCPU, and asserts `VcpuEmulation::Halted`
+is returned.
+
+### Prerequisites
+
+- Windows 10/11 or Windows Server 2016+ with Hyper-V and Windows Hypervisor Platform enabled:
+
+```powershell
+# Check feature status
+Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
+
+# Enable if not already on (requires reboot)
+Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All
+Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
+```
+
+- Rust toolchain with the MSVC target:
+
+```powershell
+rustup target add x86_64-pc-windows-msvc
+```
+
+### Run the test locally
+
+```powershell
+# Clone and switch to the branch
+git clone https://github.com/A3S-Lab/libkrun.git
+cd libkrun
+git checkout chore/windows-ci-smoke-validation
+
+# Create the fake init required by the build
+New-Item -ItemType File -Path "init/init" -Force
+
+# Run only the HLT boot test
+cargo test -p vmm --target x86_64-pc-windows-msvc --lib test_whpx_vm_hlt_boot -- --ignored
+```
+
+Expected output:
+
+```
+running 1 test
+test windows::tests::test_whpx_vm_hlt_boot ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+### Run all WHPX smoke tests locally
+
+```powershell
+cargo test -p vmm --target x86_64-pc-windows-msvc --lib test_whpx_vm_ -- --ignored
+```
+
+### Run via the smoke script
+
+```powershell
+./tests/windows/run_whpx_smoke.ps1 -TestFilter "test_whpx_vm_hlt_boot"
+```
+
+Results are written to `$env:TEMP\libkrun-whpx-smoke\`:
+
+| File | Contents |
+|------|----------|
+| `whpx-smoke.log` | Full `cargo test` output |
+| `phases.log` | Phase timeline with timestamps |
+| `summary.txt` | Key=value result summary |
+| `summary.json` | Machine-readable result summary |
+
+### Run via GitHub Actions (requires self-hosted runner)
+
+The `windows-whpx-smoke` job in `.github/workflows/windows_ci.yml` requires a
+self-hosted runner with labels `[self-hosted, windows, hyperv]`.
+
+Register a runner on a Hyper-V capable Windows machine:
+
+```powershell
+# Generate registration token
+gh api -X POST repos/A3S-Lab/libkrun/actions/runners/registration-token --jq '.token'
+
+# Configure the runner (on the Windows machine)
+./config.cmd --url https://github.com/A3S-Lab/libkrun --token <TOKEN> \
+  --labels self-hosted,windows,hyperv
+```
+
+Then trigger the job:
+
+```bash
+gh workflow run windows_ci.yml \
+  --ref chore/windows-ci-smoke-validation \
+  -f run_whpx_smoke=true \
+  -f whpx_test_filter=test_whpx_vm_hlt_boot
+```

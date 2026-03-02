@@ -7,7 +7,6 @@
 use std::fs::File;
 #[cfg(feature = "tee")]
 use std::io::BufReader;
-use std::os::fd::RawFd;
 use std::path::PathBuf;
 
 #[cfg(feature = "tee")]
@@ -85,14 +84,14 @@ impl Default for TeeConfig {
 }
 
 pub struct SerialConsoleConfig {
-    pub input_fd: RawFd,
-    pub output_fd: RawFd,
+    pub input_fd: i32,
+    pub output_fd: i32,
 }
 
 pub struct DefaultVirtioConsoleConfig {
-    pub input_fd: RawFd,
-    pub output_fd: RawFd,
-    pub err_fd: RawFd,
+    pub input_fd: i32,
+    pub output_fd: i32,
+    pub err_fd: i32,
 }
 
 pub enum VirtioConsoleConfigMode {
@@ -103,12 +102,12 @@ pub enum VirtioConsoleConfigMode {
 pub enum PortConfig {
     Tty {
         name: String,
-        tty_fd: RawFd,
+        tty_fd: i32,
     },
     InOut {
         name: String,
-        input_fd: RawFd,
-        output_fd: RawFd,
+        input_fd: i32,
+        output_fd: i32,
     },
 }
 
@@ -262,7 +261,7 @@ impl VmResources {
 
     pub fn set_kernel_bundle(&mut self, kernel_bundle: KernelBundle) -> Result<KernelBundleError> {
         // Safe because this call just returns the page size and doesn't have any side effects.
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
+        let page_size = arch::PAGE_SIZE;
 
         if kernel_bundle.host_addr == 0 || (kernel_bundle.host_addr as usize) & (page_size - 1) != 0
         {
