@@ -10,8 +10,10 @@ use std;
 use std::any::Any;
 use std::io::Error as IOError;
 
-#[cfg(not(feature = "tee"))]
+#[cfg(all(not(feature = "tee"), not(target_os = "windows")))]
 pub mod balloon;
+#[cfg(target_os = "windows")]
+mod balloon_windows;
 #[allow(dead_code)]
 #[allow(non_camel_case_types)]
 pub mod bindings;
@@ -41,8 +43,10 @@ mod mmio;
 #[cfg(feature = "net")]
 pub mod net;
 mod queue;
-#[cfg(not(feature = "tee"))]
+#[cfg(all(not(feature = "tee"), not(target_os = "windows")))]
 pub mod rng;
+#[cfg(target_os = "windows")]
+mod rng_windows;
 #[cfg(feature = "snd")]
 pub mod snd;
 #[cfg(not(target_os = "windows"))]
@@ -50,8 +54,10 @@ pub mod vsock;
 #[cfg(target_os = "windows")]
 mod vsock_windows;
 
-#[cfg(not(feature = "tee"))]
+#[cfg(all(not(feature = "tee"), not(target_os = "windows")))]
 pub use self::balloon::*;
+#[cfg(target_os = "windows")]
+pub use self::balloon_windows::*;
 #[cfg(feature = "blk")]
 pub use self::block::{Block, CacheType};
 #[cfg(not(target_os = "windows"))]
@@ -72,8 +78,10 @@ pub use self::mmio::*;
 #[cfg(feature = "net")]
 pub use self::net::Net;
 pub use self::queue::{Descriptor, DescriptorChain, Queue};
-#[cfg(not(feature = "tee"))]
+#[cfg(all(not(feature = "tee"), not(target_os = "windows")))]
 pub use self::rng::*;
+#[cfg(target_os = "windows")]
+pub use self::rng_windows::*;
 #[cfg(feature = "snd")]
 pub use self::snd::Snd;
 #[cfg(not(target_os = "windows"))]

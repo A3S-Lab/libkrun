@@ -53,6 +53,10 @@ impl Balloon {
         })
     }
 
+    pub fn id(&self) -> &str {
+        "virtio_balloon"
+    }
+
     fn process_frq(&mut self) -> bool {
         let DeviceState::Activated(ref mem, _) = self.state else {
             return false;
