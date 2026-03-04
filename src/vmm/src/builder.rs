@@ -34,6 +34,8 @@ use crate::resources::{
 use crate::vmm_config::external_kernel::{ExternalKernel, KernelFormat};
 #[cfg(feature = "net")]
 use crate::vmm_config::net::NetBuilder;
+#[cfg(target_os = "windows")]
+use crate::vmm_config::net_windows::NetWindowsBuilder;
 #[cfg(target_arch = "x86_64")]
 use devices::legacy::Cmos;
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
@@ -882,6 +884,22 @@ pub fn build_microvm(
     }
 
     #[cfg(target_os = "windows")]
+    for s in &vm_resources.serial_consoles {
+        let output: Option<Box<dyn io::Write + Send>> = if s.output_fd >= 0 {
+            // Route serial output to stdout for now.
+            // TODO: map s.output_fd as a Windows HANDLE for proper piping.
+            Some(Box::new(io::stdout()))
+        } else {
+            None
+        };
+        let input: Option<Box<dyn devices::legacy::ReadableFd + Send>> =
+            crate::windows::stdin_reader::WindowsStdinInput::new()
+                .ok()
+                .map(|r| Box::new(r) as Box<dyn devices::legacy::ReadableFd + Send>);
+        serial_devices.push(setup_serial_device(event_manager, input, output)?);
+    }
+
+    #[cfg(target_os = "windows")]
     let _ = &serial_ttys;
 
     let exit_evt = EventFd::new(utils::eventfd::EFD_NONBLOCK)
@@ -1202,6 +1220,8 @@ pub fn build_microvm(
 
     #[cfg(feature = "net")]
     attach_net_devices(&mut vmm, &vm_resources.net, intc.clone())?;
+    #[cfg(target_os = "windows")]
+    attach_net_devices_windows(&mut vmm, &vm_resources.net_windows, intc.clone())?;
     #[cfg(feature = "snd")]
     if vm_resources.snd_device {
         attach_snd_device(&mut vmm, intc.clone())?;
@@ -2280,7 +2300,7 @@ fn autoconfigure_console_ports(
     _creating_implicit_console: bool,
 ) -> std::result::Result<Vec<PortDescription>, StartMicrovmError> {
     Ok(vec![PortDescription::console(
-        Some(port_io::input_empty().unwrap()),
+        port_io::input_to_raw_fd_dup(0).ok(),
         Some(port_io::output_to_log_as_err()),
         port_io::term_fixed_size(0, 0),
     )])
@@ -2376,14 +2396,18 @@ fn create_explicit_ports(
         let port_desc = match port_cfg {
             PortConfig::Tty { name, .. } => PortDescription {
                 name: name.clone().into(),
-                input: Some(port_io::input_empty().unwrap()),
-                output: Some(port_io::output_to_log_as_err()),
+                input: port_io::input_to_raw_fd_dup(0)
+                    .ok()
+                    .map(|i| Arc::new(Mutex::new(i))),
+                output: Some(Arc::new(Mutex::new(port_io::output_to_log_as_err()))),
                 terminal: Some(port_io::term_fixed_size(0, 0)),
             },
             PortConfig::InOut { name, .. } => PortDescription {
                 name: name.clone().into(),
-                input: Some(port_io::input_empty().unwrap()),
-                output: Some(port_io::output_to_log_as_err()),
+                input: port_io::input_to_raw_fd_dup(0)
+                    .ok()
+                    .map(|i| Arc::new(Mutex::new(i))),
+                output: Some(Arc::new(Mutex::new(port_io::output_to_log_as_err()))),
                 terminal: None,
             },
         };
@@ -2446,6 +2470,20 @@ fn attach_net_devices(
     for net_device in net_devices.list.iter() {
         let id = net_device.lock().unwrap().id().to_string();
 
+        attach_mmio_device(vmm, id, intc.clone(), net_device.clone())
+            .map_err(StartMicrovmError::RegisterNetDevice)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn attach_net_devices_windows(
+    vmm: &mut Vmm,
+    net_devices: &NetWindowsBuilder,
+    intc: IrqChip,
+) -> Result<(), StartMicrovmError> {
+    for net_device in net_devices.list.iter() {
+        let id = net_device.lock().unwrap().id().to_string();
         attach_mmio_device(vmm, id, intc.clone(), net_device.clone())
             .map_err(StartMicrovmError::RegisterNetDevice)?;
     }
@@ -2624,8 +2662,10 @@ fn attach_snd_device(vmm: &mut Vmm, intc: IrqChip) -> std::result::Result<(), St
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use crate::vmm_config::kernel_bundle::KernelBundle;
 
+    #[cfg(target_os = "linux")]
     fn default_guest_memory(
         mem_size_mib: usize,
     ) -> std::result::Result<
@@ -2644,7 +2684,7 @@ pub mod tests {
     }
 
     #[test]
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     fn test_create_vcpus_x86_64() {
         let vcpu_count = 2;
 
@@ -2714,7 +2754,10 @@ pub mod tests {
         let err = Internal(Error::Serial(io::Error::from_raw_os_error(0)));
         let _ = format!("{err}{err:?}");
 
+        #[cfg(not(target_os = "windows"))]
         let err = InvalidKernelBundle(vm_memory::mmap::MmapRegionError::InvalidPointer);
+        #[cfg(target_os = "windows")]
+        let err = InvalidKernelBundle(io::Error::from_raw_os_error(0));
         let _ = format!("{err}{err:?}");
 
         let err = KernelCmdline(String::from("dummy --cmdline"));

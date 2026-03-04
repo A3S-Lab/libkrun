@@ -61,6 +61,8 @@ use vmm::vmm_config::kernel_cmdline::{KernelCmdlineConfig, DEFAULT_KERNEL_CMDLIN
 use vmm::vmm_config::machine_config::VmConfig;
 #[cfg(feature = "net")]
 use vmm::vmm_config::net::NetworkInterfaceConfig;
+#[cfg(target_os = "windows")]
+use vmm::vmm_config::net_windows::NetWindowsConfig;
 use vmm::vmm_config::vsock::VsockDeviceConfig;
 
 #[cfg(feature = "nitro")]
@@ -1120,6 +1122,64 @@ pub unsafe extern "C" fn krun_add_net_tap(
     _flags: u32,
 ) -> i32 {
     -libc::EINVAL
+}
+
+/// Add a Windows virtio-net device backed by an optional TCP socket.
+///
+/// - `c_iface_id`: null-terminated ASCII identifier used for MMIO registration.
+/// - `c_mac`: pointer to a 6-byte MAC address.
+/// - `c_tcp_addr`: null-terminated TCP address string (`"host:port"`, e.g.
+///   `"127.0.0.1:9000"`) or `NULL` for a disconnected (drop-all) device.
+///
+/// Returns `KRUN_SUCCESS` (0) on success, or a negative errno on failure.
+#[allow(clippy::missing_safety_doc)]
+#[no_mangle]
+#[cfg(target_os = "windows")]
+pub unsafe extern "C" fn krun_add_net_tcp(
+    ctx_id: u32,
+    c_iface_id: *const c_char,
+    c_mac: *const u8,
+    c_tcp_addr: *const c_char,
+) -> i32 {
+    let iface_id = if !c_iface_id.is_null() {
+        match CStr::from_ptr(c_iface_id).to_str() {
+            Ok(s) => s.to_string(),
+            Err(_) => return -libc::EINVAL,
+        }
+    } else {
+        return -libc::EINVAL;
+    };
+
+    let mac: [u8; 6] = match slice::from_raw_parts(c_mac, 6).try_into() {
+        Ok(m) => m,
+        Err(_) => return -libc::EINVAL,
+    };
+
+    let tcp_addr: Option<std::net::SocketAddr> = if c_tcp_addr.is_null() {
+        None
+    } else {
+        match CStr::from_ptr(c_tcp_addr).to_str() {
+            Ok(s) => match s.parse() {
+                Ok(addr) => Some(addr),
+                Err(_) => return -libc::EINVAL,
+            },
+            Err(_) => return -libc::EINVAL,
+        }
+    };
+
+    match CTX_MAP.lock().unwrap().entry(ctx_id) {
+        Entry::Occupied(mut ctx_cfg) => {
+            let cfg = ctx_cfg.get_mut();
+            if cfg.vmr
+                .add_net_device_windows(NetWindowsConfig { iface_id, mac, tcp_addr })
+                .is_err()
+            {
+                return -libc::EINVAL;
+            }
+        }
+        Entry::Vacant(_) => return -libc::ENOENT,
+    }
+    KRUN_SUCCESS
 }
 
 #[allow(clippy::missing_safety_doc)]

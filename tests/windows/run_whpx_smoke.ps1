@@ -1,6 +1,6 @@
 param(
     [string]$Target = "x86_64-pc-windows-msvc",
-    [string]$TestFilter = "test_whpx_vm_",
+    [string]$TestFilter = "test_whpx_",
     [string]$RootfsDir = "$env:TEMP\\libkrun-rootfs-smoke",
     [string]$LogDir = "$env:TEMP\\libkrun-whpx-smoke",
     [string]$RootfsMarkerFormat = "libkrun-windows-smoke-rootfs-v1",
@@ -228,7 +228,9 @@ try {
 
     Write-Marker -Phase "run_tests" -State "start" -Details "running cargo test" -PhaseLog $phaseLogPath
     Write-Host "Running WHPX smoke tests with filter: $TestFilter"
-    $output = & cargo test -p vmm --target $Target --lib $TestFilter -- --ignored 2>&1
+    # --test-threads=1 is required: WHPX has system-level limits on concurrent
+    # partitions/memory mappings; parallel execution causes WHvMapGpaRange failures.
+    $output = & cargo test -p vmm --target $Target --lib $TestFilter -- --ignored --test-threads=1 2>&1
     $output | Tee-Object -FilePath $logPath
 
     if ($LASTEXITCODE -ne 0) {

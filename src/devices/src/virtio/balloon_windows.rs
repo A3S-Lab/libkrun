@@ -68,15 +68,13 @@ impl Balloon {
             let index = head.index;
 
             for desc in head.into_iter() {
-                if let Some(host_addr) = mem.get_host_address(desc.addr) {
+                if let Ok(host_addr) = mem.get_host_address(desc.addr) {
                     // Use DiscardVirtualMemory (Windows 8.1+) to release pages back to host
                     unsafe {
-                        let result = DiscardVirtualMemory(
-                            host_addr as *mut std::ffi::c_void,
-                            desc.len as usize,
-                        );
+                        let slice = std::slice::from_raw_parts_mut(host_addr, desc.len as usize);
+                        let result = DiscardVirtualMemory(slice);
 
-                        if result.is_err() {
+                        if result == 0 {
                             // Fallback to VirtualAlloc with MEM_RESET
                             let _ = VirtualAlloc(
                                 Some(host_addr as *const std::ffi::c_void),
@@ -198,13 +196,17 @@ impl Subscriber for Balloon {
 
         let mut raise_irq = false;
 
+        let mut triggered_queue: Option<usize> = None;
         for (queue_index, evt) in self.queue_events.iter().enumerate() {
             if evt.as_raw_fd() != source {
                 continue;
             }
-
             let _ = evt.read();
+            triggered_queue = Some(queue_index);
+            break;
+        }
 
+        if let Some(queue_index) = triggered_queue {
             match queue_index {
                 IFQ_INDEX => {
                     debug!("balloon(windows): inflate queue event (ignored)");

@@ -3,9 +3,9 @@ use std::io;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, ResetEvent, SetEvent, WaitForSingleObject, INFINITE, WAIT_OBJECT_0,
+    CreateEventW, ResetEvent, SetEvent, WaitForSingleObject, INFINITE,
 };
 
 pub const EFD_NONBLOCK: i32 = 1;
@@ -27,13 +27,17 @@ struct SharedEventFd {
 
 impl Drop for SharedEventFd {
     fn drop(&mut self) {
-        if self.event_handle != 0 {
+        if !self.event_handle.is_null() {
             unsafe {
                 CloseHandle(self.event_handle);
             }
         }
     }
 }
+
+// SAFETY: Windows HANDLEs for event objects are valid across threads.
+unsafe impl Send for SharedEventFd {}
+unsafe impl Sync for SharedEventFd {}
 
 static NEXT_EVENTFD_ID: AtomicI32 = AtomicI32::new(1000);
 static EVENTFD_REGISTRY: OnceLock<Mutex<HashMap<i32, Weak<SharedEventFd>>>> = OnceLock::new();
@@ -95,7 +99,7 @@ pub struct EventFd {
 impl EventFd {
     pub fn new(flag: i32) -> io::Result<EventFd> {
         let event_handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
-        if event_handle == 0 {
+        if event_handle.is_null() {
             return Err(io::Error::last_os_error());
         }
 
@@ -179,6 +183,17 @@ impl EventFd {
 
     pub fn as_raw_fd(&self) -> i32 {
         self.shared.id
+    }
+
+    /// Returns the underlying Win32 event HANDLE.
+    ///
+    /// The returned value has type `windows_sys::Win32::Foundation::HANDLE`
+    /// (a `*mut c_void`).
+    ///
+    /// Callers using the `windows` crate can convert via:
+    ///   `windows::Win32::Foundation::HANDLE(raw as isize)`
+    pub fn as_raw_handle(&self) -> windows_sys::Win32::Foundation::HANDLE {
+        self.shared.event_handle
     }
 }
 

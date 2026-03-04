@@ -5,7 +5,7 @@ use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::{EventFd, EFD_NONBLOCK};
 use vm_memory::{Bytes, GuestMemoryMmap};
 use windows::Win32::Security::Cryptography::{
-    BCryptGenRandom, BCRYPT_RNG_ALGORITHM, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+    BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
 };
 
 use super::{ActivateError, ActivateResult, DeviceState, InterruptTransport, Queue, VirtioDevice};
@@ -73,9 +73,8 @@ impl Rng {
                 // Use Windows BCryptGenRandom for cryptographically secure random data
                 let result = unsafe {
                     BCryptGenRandom(
-                        BCRYPT_RNG_ALGORITHM,
-                        rand_bytes.as_mut_ptr(),
-                        rand_bytes.len() as u32,
+                        None,
+                        &mut rand_bytes,
                         BCRYPT_USE_SYSTEM_PREFERRED_RNG,
                     )
                 };

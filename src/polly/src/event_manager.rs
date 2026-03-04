@@ -4,7 +4,10 @@
 use std::collections::HashMap;
 use std::fmt::Formatter;
 use std::io;
+#[cfg(not(target_os = "windows"))]
 use std::os::unix::io::{AsRawFd, RawFd};
+#[cfg(target_os = "windows")]
+use utils::epoll::RawFd;
 use std::sync::{Arc, Mutex};
 
 use utils::epoll::{self, Epoll, EpollEvent};
@@ -68,6 +71,7 @@ pub struct EventManager {
     ready_events: Vec<EpollEvent>,
 }
 
+#[cfg(not(target_os = "windows"))]
 impl AsRawFd for EventManager {
     fn as_raw_fd(&self) -> RawFd {
         self.epoll.as_raw_fd()

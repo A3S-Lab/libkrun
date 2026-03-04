@@ -17,7 +17,7 @@ use windows::Win32::Storage::FileSystem::{
     CreateFileA, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED,
     FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
-use windows::Win32::System::Pipes::{ConnectNamedPipe, WaitNamedPipeA};
+use windows::Win32::System::Pipes::WaitNamedPipeA;
 
 use super::{ActivateError, ActivateResult, DeviceState, InterruptTransport, Queue, VirtioDevice};
 
@@ -110,7 +110,6 @@ impl VsockStream for TcpStream {
 
 struct NamedPipeStream {
     handle: HANDLE,
-    path: String,
 }
 
 impl NamedPipeStream {
@@ -138,7 +137,7 @@ impl NamedPipeStream {
         let handle = unsafe {
             CreateFileA(
                 windows::core::PCSTR(c_path.as_ptr() as *const u8),
-                (0x80000000 | 0x40000000).into(), // GENERIC_READ | GENERIC_WRITE
+                (0x80000000u32 | 0x40000000u32).into(), // GENERIC_READ | GENERIC_WRITE
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 None,
                 OPEN_EXISTING,
@@ -148,10 +147,7 @@ impl NamedPipeStream {
         };
 
         match handle {
-            Ok(h) if h != INVALID_HANDLE_VALUE => Ok(Self {
-                handle: h,
-                path: pipe_path,
-            }),
+            Ok(h) if h != INVALID_HANDLE_VALUE => Ok(Self { handle: h }),
             _ => Err(io::Error::last_os_error()),
         }
     }
@@ -164,6 +160,11 @@ impl Drop for NamedPipeStream {
         }
     }
 }
+
+// SAFETY: Named pipe handles are Win32 kernel objects. They can be used from
+// different threads as long as access is synchronized externally, which is
+// guaranteed by the &mut self / &self borrows on Read/Write/VsockStream.
+unsafe impl Send for NamedPipeStream {}
 
 impl Read for NamedPipeStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -201,15 +202,6 @@ impl VsockStream for NamedPipeStream {
 enum StreamType {
     Tcp(TcpStream),
     NamedPipe(NamedPipeStream),
-}
-
-impl StreamType {
-    fn as_stream_mut(&mut self) -> &mut dyn VsockStream {
-        match self {
-            StreamType::Tcp(s) => s,
-            StreamType::NamedPipe(s) => s,
-        }
-    }
 }
 
 impl Read for StreamType {

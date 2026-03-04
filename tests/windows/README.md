@@ -74,12 +74,104 @@ Optional cleanup of rootfs directory after run:
 ./tests/windows/run_whpx_smoke.ps1 -CleanupRootfs
 ```
 
-## WHPX HLT boot test
+## Test inventory
 
-`test_whpx_vm_hlt_boot` validates the full WHPX vCPU execution path end-to-end:
-writes a single `HLT` instruction at guest address `0x10000`, sets up long-mode
-boot state via `configure_x86_64`, runs the vCPU, and asserts `VcpuEmulation::Halted`
-is returned.
+Tests in `src/vmm/src/windows/vstate.rs` are split into two categories:
+
+### Regular tests (run on every PR, no WHPX required)
+
+These run automatically in the `windows-build-and-tests` CI job on `windows-latest`:
+
+| Test | What it validates |
+|------|-------------------|
+| `test_elf_loader_smoke` | ELF64 load via `linux_loader::Elf::load` on a 4 MiB `GuestMemoryMmap` |
+| `test_whpx_blk_init_smoke` | `BlockWindows::new()`: device type, features, config-space capacity |
+| `test_whpx_blk_read_smoke` | `BlockWindows` reads sector 0 via EventManager; verifies status byte + data |
+| `test_whpx_net_init_smoke` | `NetWindows::new()`: device type, features, MAC / link-up in config space |
+| `test_whpx_net_tx_smoke` | `NetWindows` TX: descriptor chain consumed, used ring advances to 1 |
+| `test_whpx_console_init_smoke` | `Console::new()`: device type (3), VIRTIO_F_VERSION_1 feature bit |
+| `test_whpx_console_tx_smoke` | `Console` TX (port 0): descriptor chain written to output, used ring advances to 1 |
+| `test_whpx_stdin_reader_smoke` | `WindowsStdinInput`: empty buffer returns 0 bytes; EventFd fd is valid |
+
+### WHPX smoke tests (`#[ignore]` — require Hyper-V/WHPX)
+
+These require a self-hosted runner with HyperV enabled and are only run manually
+via `workflow_dispatch`.  Run them with `--ignored --test-threads=1`.
+
+### `test_whpx_vm_hlt_boot`
+
+Validates the synchronous WHPX vCPU execution path: writes a single `HLT`
+instruction at guest address `0x10000`, sets up long-mode boot state via
+`configure_x86_64`, runs the vCPU synchronously, and asserts
+`VcpuEmulation::Halted` is returned.
+
+### `test_whpx_vm_threaded_boot`
+
+Validates the **threaded VM startup path** (`start_threaded()`), which is the
+production code path used by the VMM. The test:
+
+1. Creates a WHPX partition and maps 4 MB of guest memory.
+2. Writes a single `HLT` (`F4`) at the entry address.
+3. Calls `start_threaded()`, which spawns the vCPU thread, internally calls
+   `configure_x86_64`, then runs the vCPU loop.
+4. `VcpuEmulation::Halted` causes the thread to exit with `FC_EXIT_CODE_OK`.
+5. Asserts `VcpuResponse::Exited(FC_EXIT_CODE_OK)` is received within 5 s.
+
+### `test_whpx_vm_com1_serial_boot`
+
+Validates the **`OUT DX, AL` instruction path** used by real Linux kernels for
+COM1 serial output. Port 0x3F8 (COM1) requires the DX-register form of `OUT`
+because the address exceeds the 8-bit immediate limit.
+
+Payload (9 bytes):
+```
+BA F8 03 00 00   mov edx, 0x3F8   ; COM1 base
+B0 48            mov al, 'H'
+EE               out dx, al
+F4               hlt
+```
+
+A `CaptureDevice` registered at 0x3F8 (size 8) records the byte, which is then
+asserted to equal `'H'`. The run must end with `Halted`.
+
+### `test_whpx_io_port_write_smoke`
+
+Validates the `OUT imm8, AL` instruction path (port ≤ 0xFF, immediate port):
+
+```
+B0 48   mov al, 'H'
+E6 30   out 0x30, al
+F4      hlt
+```
+
+A `CaptureDevice` at port 0x30 captures the byte. After the `WHvEmulatorTryIoEmulation`
+fix, RIP is correctly advanced past `OUT`, so the subsequent `HLT` is reached and
+the run ends with `Halted`.
+
+### `test_whpx_minimal_kernel_boot`
+
+Full closed-loop integration test: ELF load → `configure_system` (Linux boot
+protocol zero page) → `configure_x86_64` → IO capture → HLT.
+
+Loads a 125-byte ELF64 binary with a 5-byte `PT_LOAD` payload at `p_paddr=0x1000`:
+```
+B0 48   mov al, 'H'
+E6 30   out 0x30, al   ; port outside COM ranges to avoid string-IO fallback
+F4      hlt
+```
+
+Asserts `kernel_load == GuestAddress(0x1000)`, captured byte equals `'H'`, and
+the run ends with `Halted`.
+
+### `test_whpx_vcpu_create_smoke`
+
+Validates that `Vcpu::new()` (including `WHvCreateVirtualProcessor`) succeeds
+after a partition is set up with guest memory.
+
+### `test_whpx_vcpu_configure_smoke`
+
+Validates that `Vcpu::configure_x86_64()` (`WHvSetVirtualProcessorRegisters`
+with full 64-bit boot register state) succeeds without crashing.
 
 ### Prerequisites
 
@@ -100,7 +192,7 @@ Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
 rustup target add x86_64-pc-windows-msvc
 ```
 
-### Run the test locally
+### Run individual tests locally
 
 ```powershell
 # Clone and switch to the branch
@@ -111,15 +203,18 @@ git checkout chore/windows-ci-smoke-validation
 # Create the fake init required by the build
 New-Item -ItemType File -Path "init/init" -Force
 
-# Run only the HLT boot test
-cargo test -p vmm --target x86_64-pc-windows-msvc --lib test_whpx_vm_hlt_boot -- --ignored
+# Run only the HLT boot test (synchronous path)
+cargo test -p vmm --target x86_64-pc-windows-msvc --lib test_whpx_vm_hlt_boot -- --ignored --test-threads=1
+
+# Run only the threaded boot test (start_threaded production path)
+cargo test -p vmm --target x86_64-pc-windows-msvc --lib test_whpx_vm_threaded_boot -- --ignored --test-threads=1
 ```
 
-Expected output:
+Expected output for the threaded boot test:
 
 ```
 running 1 test
-test windows::tests::test_whpx_vm_hlt_boot ... ok
+test windows::tests::test_whpx_vm_threaded_boot ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
@@ -127,8 +222,16 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ### Run all WHPX smoke tests locally
 
 ```powershell
-cargo test -p vmm --target x86_64-pc-windows-msvc --lib test_whpx_vm_ -- --ignored
+# All WHPX-dependent tests (requires Hyper-V)
+cargo test -p vmm --target x86_64-pc-windows-msvc --lib -- test_whpx_ --ignored --test-threads=1
+
+# All tests including non-ignored (blk/net) — no WHPX needed
+cargo test -p vmm --target x86_64-pc-windows-msvc --lib -- windows::
 ```
+
+> **Note:** `--test-threads=1` is required. WHPX has system-level limits on the
+> number of concurrent partitions and GPA mappings; running tests in parallel
+> causes `WHvMapGpaRange` failures and access violations.
 
 ### Run via the smoke script
 

@@ -25,6 +25,8 @@ use crate::vmm_config::kernel_cmdline::{KernelCmdlineConfig, KernelCmdlineConfig
 use crate::vmm_config::machine_config::{VmConfig, VmConfigError};
 #[cfg(feature = "net")]
 use crate::vmm_config::net::{NetBuilder, NetworkInterfaceConfig, NetworkInterfaceError};
+#[cfg(target_os = "windows")]
+use crate::vmm_config::net_windows::{NetWindowsBuilder, NetWindowsConfig, NetWindowsError};
 use crate::vmm_config::vsock::*;
 use crate::vstate::VcpuConfig;
 #[cfg(feature = "gpu")]
@@ -154,6 +156,9 @@ pub struct VmResources {
     /// The network devices builder.
     #[cfg(feature = "net")]
     pub net: NetBuilder,
+    /// Windows virtio-net devices builder.
+    #[cfg(target_os = "windows")]
+    pub net_windows: NetWindowsBuilder,
     /// TEE configuration
     #[cfg(feature = "tee")]
     pub tee_config: TeeConfig,
@@ -355,6 +360,15 @@ impl VmResources {
         self.net.insert(config)
     }
 
+    /// Adds a Windows virtio-net device to be attached when the VM starts.
+    #[cfg(target_os = "windows")]
+    pub fn add_net_device_windows(
+        &mut self,
+        config: NetWindowsConfig,
+    ) -> std::result::Result<(), NetWindowsError> {
+        self.net_windows.insert(config)
+    }
+
     #[cfg(feature = "tee")]
     pub fn tee_config(&self) -> &TeeConfig {
         &self.tee_config
@@ -412,6 +426,8 @@ mod tests {
             vsock: Default::default(),
             #[cfg(feature = "net")]
             net_builder: Default::default(),
+            #[cfg(target_os = "windows")]
+            net_windows: Default::default(),
             gpu_virgl_flags: None,
             gpu_shm_size: None,
             #[cfg(feature = "gpu")]

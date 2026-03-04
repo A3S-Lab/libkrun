@@ -12,7 +12,7 @@ on:
         description: Optional cargo test filter for WHPX smoke
         required: false
         type: string
-        default: test_whpx_vm_
+        default: test_whpx_
       rootfs_dir:
         description: Optional rootfs dir path on self-hosted runner
         required: false
@@ -73,7 +73,7 @@ jobs:
           New-Item -ItemType File -Path "init/init" -Force | Out-Null
 
       - name: Build check (Windows target)
-        run: cargo check -p utils -p polly -p vmm --target x86_64-pc-windows-msvc
+        run: cargo check -p utils -p polly -p devices -p vmm --target x86_64-pc-windows-msvc
         continue-on-error: true
 
       - name: Utils tests (Windows modules)

@@ -19,6 +19,8 @@ mod balloon_windows;
 pub mod bindings;
 #[cfg(feature = "blk")]
 pub mod block;
+#[cfg(target_os = "windows")]
+pub mod block_windows;
 #[cfg(not(target_os = "windows"))]
 pub mod console;
 #[cfg(target_os = "windows")]
@@ -42,6 +44,8 @@ pub mod linux_errno;
 mod mmio;
 #[cfg(feature = "net")]
 pub mod net;
+#[cfg(target_os = "windows")]
+pub mod net_windows;
 mod queue;
 #[cfg(all(not(feature = "tee"), not(target_os = "windows")))]
 pub mod rng;
@@ -60,6 +64,8 @@ pub use self::balloon::*;
 pub use self::balloon_windows::*;
 #[cfg(feature = "blk")]
 pub use self::block::{Block, CacheType};
+#[cfg(target_os = "windows")]
+pub use self::block_windows::Block as BlockWindows;
 #[cfg(not(target_os = "windows"))]
 pub use self::console::*;
 #[cfg(target_os = "windows")]
@@ -77,6 +83,8 @@ pub use self::gpu::*;
 pub use self::mmio::*;
 #[cfg(feature = "net")]
 pub use self::net::Net;
+#[cfg(target_os = "windows")]
+pub use self::net_windows::Net as NetWindows;
 pub use self::queue::{Descriptor, DescriptorChain, Queue};
 #[cfg(all(not(feature = "tee"), not(target_os = "windows")))]
 pub use self::rng::*;

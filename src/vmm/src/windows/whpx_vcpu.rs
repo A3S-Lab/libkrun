@@ -25,8 +25,9 @@
 //!
 //! # Example
 //!
-//! ```no_run
+//! ```ignore
 //! # use windows::Win32::System::Hypervisor::WHV_PARTITION_HANDLE;
+//! # use vmm::windows::whpx_vcpu::{WhpxVcpu, VcpuExit};
 //! # fn example(partition: WHV_PARTITION_HANDLE) -> std::io::Result<()> {
 //! let mut vcpu = WhpxVcpu::new(partition, 0)?;
 //! loop {
@@ -40,12 +41,16 @@
 //! # }
 //! ```
 
+use std::ffi::c_void;
 use std::io;
 use utils::time::timestamp_cycles;
+use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
+use windows::core::HRESULT;
 use windows::Win32::System::Hypervisor::{
-    WHvCreateVirtualProcessor, WHvDeleteVirtualProcessor, WHvGetVirtualProcessorRegisters,
-    WHvMemoryAccessRead, WHvMemoryAccessWrite, WHvRunVirtualProcessor, WHvRunVpExitReasonCanceled,
-    WHvRunVpExitReasonException, WHvRunVpExitReasonHypercall,
+    WHvCreateVirtualProcessor, WHvDeleteVirtualProcessor, WHvEmulatorCreateEmulator,
+    WHvEmulatorDestroyEmulator, WHvEmulatorTryIoEmulation, WHvGetVirtualProcessorRegisters,
+    WHvMemoryAccessExecute, WHvMemoryAccessRead, WHvMemoryAccessWrite, WHvRunVirtualProcessor,
+    WHvRunVpExitReasonCanceled, WHvRunVpExitReasonException, WHvRunVpExitReasonHypercall,
     WHvRunVpExitReasonInvalidVpRegisterValue, WHvRunVpExitReasonMemoryAccess,
     WHvRunVpExitReasonSynicSintDeliverable, WHvRunVpExitReasonUnrecoverableException,
     WHvRunVpExitReasonUnsupportedFeature, WHvRunVpExitReasonX64ApicEoi,
@@ -53,9 +58,12 @@ use windows::Win32::System::Hypervisor::{
     WHvRunVpExitReasonX64ApicWriteTrap, WHvRunVpExitReasonX64Cpuid, WHvRunVpExitReasonX64Halt,
     WHvRunVpExitReasonX64InterruptWindow, WHvRunVpExitReasonX64IoPortAccess,
     WHvRunVpExitReasonX64MsrAccess, WHvRunVpExitReasonX64Rdtsc, WHvSetVirtualProcessorRegisters,
-    WHvX64ExceptionTypeBreakpointTrap, WHvX64ExceptionTypeOverflowTrap, WHvX64RegisterRax,
-    WHvX64RegisterRbx, WHvX64RegisterRcx, WHvX64RegisterRdx, WHvX64RegisterRip,
-    WHV_PARTITION_HANDLE, WHV_REGISTER_NAME, WHV_REGISTER_VALUE, WHV_RUN_VP_EXIT_CONTEXT,
+    WHvTranslateGva, WHvX64ExceptionTypeBreakpointTrap, WHvX64ExceptionTypeOverflowTrap,
+    WHvX64RegisterRax, WHvX64RegisterRbx, WHvX64RegisterRcx, WHvX64RegisterRdx,
+    WHvX64RegisterRip, WHV_EMULATOR_CALLBACKS, WHV_EMULATOR_IO_ACCESS_INFO,
+    WHV_EMULATOR_MEMORY_ACCESS_INFO, WHV_PARTITION_HANDLE,
+    WHV_REGISTER_NAME, WHV_REGISTER_VALUE, WHV_RUN_VP_EXIT_CONTEXT, WHV_TRANSLATE_GVA_FLAGS,
+    WHV_TRANSLATE_GVA_RESULT, WHV_TRANSLATE_GVA_RESULT_CODE,
 };
 
 /// Represents a VM exit from the WHPX virtual CPU.
@@ -120,6 +128,8 @@ pub struct WhpxVcpu {
     partition: WHV_PARTITION_HANDLE,
     /// Index of this vCPU within the partition.
     index: u32,
+    /// WHPX software emulator handle for InstructionByteCount=0 exits.
+    emulator: *mut c_void,
     /// Buffer for MMIO/IO port data transfer.
     data_buffer: [u8; 8],
     pending_io_read: Option<PendingIoRead>,
@@ -127,6 +137,11 @@ pub struct WhpxVcpu {
     pending_mmio_read: Option<PendingMmioRead>,
     pending_mmio_write: Option<PendingMmioWrite>,
 }
+
+// SAFETY: WhpxVcpu holds a raw emulator handle (*mut c_void) that is only
+// accessed from the thread running WhpxVcpu::run(). WHV_PARTITION_HANDLE is
+// an isize and safe to send across threads.
+unsafe impl Send for WhpxVcpu {}
 
 #[derive(Debug, Clone, Copy)]
 struct PendingIoRead {
@@ -170,6 +185,135 @@ struct DecodedMmioAccess {
     next_rip: u64,
 }
 
+// ----------- WHPX hardware emulator (WHvEmulator) support --------------------
+//
+// When WHPX sets InstructionByteCount=0 on an IO port exit, the partition is in
+// "software emulation mode".  In this mode WHvSetVirtualProcessorRegisters(RIP)
+// is silently ignored and WHPX computes a corrupt next-RIP.
+//
+// WHvEmulatorTryIoEmulation is the correct remedy: it fetches the instruction
+// bytes from guest memory via the TranslateGva + Memory callbacks, decodes the
+// instruction, dispatches IO via the IoPort callback, and advances RIP through
+// the SetRegisters callback (which WHPX does respect inside the emulator).
+
+#[repr(C)]
+struct EmulatorContext {
+    partition: WHV_PARTITION_HANDLE,
+    vp_index: u32,
+    vcpu_id: u64,
+    io_bus: *const devices::Bus,
+    guest_mem: *const GuestMemoryMmap,
+}
+
+unsafe extern "system" fn emulator_io_port_cb(
+    context: *const c_void,
+    ioaccess: *mut WHV_EMULATOR_IO_ACCESS_INFO,
+) -> HRESULT {
+    let ctx = &*(context as *const EmulatorContext);
+    let io = &mut *ioaccess;
+    let port = io.Port;
+    let size = (io.AccessSize as usize).min(4);
+    let bus = &*ctx.io_bus;
+    if io.Direction == 1 {
+        // Write: data flows guest → device.
+        let data_bytes = io.Data.to_le_bytes();
+        bus.write(ctx.vcpu_id, port as u64, &data_bytes[..size]);
+    } else {
+        // Read: data flows device → guest.
+        let mut buf = [0_u8; 4];
+        bus.read(ctx.vcpu_id, port as u64, &mut buf[..size]);
+        io.Data = u32::from_le_bytes(buf);
+    }
+    HRESULT(0) // S_OK — unregistered ports silently pass
+}
+
+unsafe extern "system" fn emulator_memory_cb(
+    context: *const c_void,
+    memoryaccess: *mut WHV_EMULATOR_MEMORY_ACCESS_INFO,
+) -> HRESULT {
+    let ctx = &*(context as *const EmulatorContext);
+    let mem = &mut *memoryaccess;
+    let size = mem.AccessSize as usize;
+    let addr = GuestAddress(mem.GpaAddress);
+    let guest_mem = &*ctx.guest_mem;
+    if mem.Direction == 0 {
+        if guest_mem.read_slice(&mut mem.Data[..size], addr).is_ok() {
+            HRESULT(0)
+        } else {
+            HRESULT(0x80004005_u32 as i32) // E_FAIL
+        }
+    } else {
+        if guest_mem.write_slice(&mem.Data[..size], addr).is_ok() {
+            HRESULT(0)
+        } else {
+            HRESULT(0x80004005_u32 as i32) // E_FAIL
+        }
+    }
+}
+
+unsafe extern "system" fn emulator_get_registers_cb(
+    context: *const c_void,
+    registernames: *const WHV_REGISTER_NAME,
+    registercount: u32,
+    registervalues: *mut WHV_REGISTER_VALUE,
+) -> HRESULT {
+    let ctx = &*(context as *const EmulatorContext);
+    match WHvGetVirtualProcessorRegisters(
+        ctx.partition,
+        ctx.vp_index,
+        registernames,
+        registercount,
+        registervalues,
+    ) {
+        Ok(()) => HRESULT(0),
+        Err(e) => e.code(),
+    }
+}
+
+unsafe extern "system" fn emulator_set_registers_cb(
+    context: *const c_void,
+    registernames: *const WHV_REGISTER_NAME,
+    registercount: u32,
+    registervalues: *const WHV_REGISTER_VALUE,
+) -> HRESULT {
+    let ctx = &*(context as *const EmulatorContext);
+    match WHvSetVirtualProcessorRegisters(
+        ctx.partition,
+        ctx.vp_index,
+        registernames,
+        registercount,
+        registervalues,
+    ) {
+        Ok(()) => HRESULT(0),
+        Err(e) => e.code(),
+    }
+}
+
+unsafe extern "system" fn emulator_translate_gva_cb(
+    context: *const c_void,
+    gva: u64,
+    translateflags: WHV_TRANSLATE_GVA_FLAGS,
+    translationresult: *mut WHV_TRANSLATE_GVA_RESULT_CODE,
+    gpa: *mut u64,
+) -> HRESULT {
+    let ctx = &*(context as *const EmulatorContext);
+    let mut result: WHV_TRANSLATE_GVA_RESULT = std::mem::zeroed();
+    match WHvTranslateGva(
+        ctx.partition,
+        ctx.vp_index,
+        gva,
+        translateflags,
+        &mut result,
+        gpa,
+    ) {
+        Ok(()) => {
+            *translationresult = result.ResultCode;
+            HRESULT(0)
+        }
+        Err(e) => e.code(),
+    }
+}
+
 impl WhpxVcpu {
     fn is_legacy_prefix(byte: u8) -> bool {
         matches!(
@@ -190,8 +334,43 @@ impl WhpxVcpu {
 
     fn advance_rip(&self, next_rip: u64) -> io::Result<()> {
         let names = [WHvX64RegisterRip];
-        let values = [WHV_REGISTER_VALUE { Reg64: next_rip }];
+        let values = unsafe {
+            let mut v = [std::mem::zeroed::<WHV_REGISTER_VALUE>(); 1];
+            v[0].Reg64 = next_rip;
+            v
+        };
         self.set_registers(&names, &values)
+    }
+
+    /// Decodes the byte length of an x86 I/O port instruction from its raw bytes.
+    ///
+    /// WHPX on some Windows builds sets `InstructionByteCount = 0` for I/O port
+    /// exits instead of the actual instruction length.  When that happens the
+    /// caller must fall back to opcode-level decoding.
+    ///
+    /// Handles prefix bytes (REX 0x40–0x4F, legacy 0x66/0x67/0xF2/0xF3/0x26 …)
+    /// followed by the I/O opcode:
+    ///   * `E4`/`E5`/`E6`/`E7` (IN/OUT imm8) → opcode + 1-byte immediate = 2 bytes
+    ///   * `EC`/`ED`/`EE`/`EF`/`6C`/`6D`/`6E`/`6F` (IN/OUT DX, INS/OUTS) → 1 byte
+    fn decode_io_instr_len(instr_bytes: &[u8; 16]) -> u64 {
+        let mut skip = 0usize;
+        while skip < 15 {
+            match instr_bytes[skip] {
+                // Legacy prefixes: segment overrides, operand/address size, REP variants
+                0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x66 | 0x67 | 0xF0 | 0xF2
+                | 0xF3
+                // REX prefixes (64-bit mode)
+                | 0x40..=0x4F => skip += 1,
+                _ => break,
+            }
+        }
+        let extra: usize = match instr_bytes[skip] {
+            // IN/OUT with an immediate byte port operand (2-byte instruction)
+            0xE4 | 0xE5 | 0xE6 | 0xE7 => 2,
+            // IN/OUT via DX, INS, OUTS (1-byte opcode after any prefixes)
+            _ => 1,
+        };
+        (skip + extra) as u64
     }
 
     fn allow_string_io_fallback(port: u16) -> bool {
@@ -415,6 +594,17 @@ impl WhpxVcpu {
             };
 
             return Ok(DecodedMmioAccess { kind, next_rip });
+        }
+
+        // Reject unsupported opcodes before attempting to read the ModRM byte.
+        // Opcodes not in this list have no ModRM and are not MMIO instructions we handle.
+        if !matches!(opcode, 0x8a | 0x8b | 0x88 | 0x89 | 0x63 | 0xc6 | 0xc7) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "Unsupported MMIO instruction opcode 0x{opcode:02x} (is_write={is_write})"
+                ),
+            ));
         }
 
         let modrm = *instruction_bytes.get(idx).ok_or_else(|| {
@@ -645,9 +835,31 @@ impl WhpxVcpu {
             )?;
         }
 
+        // Create the WHPX software emulator used to handle IO exits where
+        // InstructionByteCount=0 (software-emulation mode).
+        let callbacks = WHV_EMULATOR_CALLBACKS {
+            Size: std::mem::size_of::<WHV_EMULATOR_CALLBACKS>() as u32,
+            Reserved: 0,
+            WHvEmulatorIoPortCallback: Some(emulator_io_port_cb),
+            WHvEmulatorMemoryCallback: Some(emulator_memory_cb),
+            WHvEmulatorGetVirtualProcessorRegisters: Some(emulator_get_registers_cb),
+            WHvEmulatorSetVirtualProcessorRegisters: Some(emulator_set_registers_cb),
+            WHvEmulatorTranslateGvaPage: Some(emulator_translate_gva_cb),
+        };
+        let mut emulator: *mut c_void = std::ptr::null_mut();
+        unsafe {
+            WHvEmulatorCreateEmulator(&callbacks, &mut emulator).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Failed to create WHPX emulator: {e}"),
+                )
+            })?;
+        }
+
         Ok(Self {
             partition,
             index,
+            emulator,
             data_buffer: [0; 8],
             pending_io_read: None,
             pending_io_write: None,
@@ -703,12 +915,12 @@ impl WhpxVcpu {
         };
 
         let names = [Self::gpr_name(pending.reg_index)?, WHvX64RegisterRip];
-        let values = [
-            WHV_REGISTER_VALUE { Reg64: merged },
-            WHV_REGISTER_VALUE {
-                Reg64: pending.next_rip,
-            },
-        ];
+        let values = unsafe {
+            let mut v = [std::mem::zeroed::<WHV_REGISTER_VALUE>(); 2];
+            v[0].Reg64 = merged;
+            v[1].Reg64 = pending.next_rip;
+            v
+        };
         self.set_registers(&names, &values)
     }
 
@@ -721,9 +933,11 @@ impl WhpxVcpu {
         })?;
 
         let names = [WHvX64RegisterRip];
-        let values = [WHV_REGISTER_VALUE {
-            Reg64: pending.next_rip,
-        }];
+        let values = unsafe {
+            let mut v = [std::mem::zeroed::<WHV_REGISTER_VALUE>(); 1];
+            v[0].Reg64 = pending.next_rip;
+            v
+        };
         self.set_registers(&names, &values)
     }
 
@@ -752,12 +966,12 @@ impl WhpxVcpu {
         let merged_rax = Self::merge_reg_bits(current_rax, pending.size, false, value)?;
 
         let names = [WHvX64RegisterRax, WHvX64RegisterRip];
-        let values = [
-            WHV_REGISTER_VALUE { Reg64: merged_rax },
-            WHV_REGISTER_VALUE {
-                Reg64: pending.next_rip,
-            },
-        ];
+        let values = unsafe {
+            let mut v = [std::mem::zeroed::<WHV_REGISTER_VALUE>(); 2];
+            v[0].Reg64 = merged_rax;
+            v[1].Reg64 = pending.next_rip;
+            v
+        };
         self.set_registers(&names, &values)
     }
 
@@ -770,9 +984,11 @@ impl WhpxVcpu {
         })?;
 
         let names = [WHvX64RegisterRip];
-        let values = [WHV_REGISTER_VALUE {
-            Reg64: pending.next_rip,
-        }];
+        let values = unsafe {
+            let mut v = [std::mem::zeroed::<WHV_REGISTER_VALUE>(); 1];
+            v[0].Reg64 = pending.next_rip;
+            v
+        };
         self.set_registers(&names, &values)
     }
 
@@ -793,7 +1009,12 @@ impl WhpxVcpu {
     ///
     /// # Errors
     /// Returns an error if running the vCPU fails.
-    pub fn run(&mut self) -> io::Result<VcpuExit<'_>> {
+    pub fn run(
+        &mut self,
+        io_bus: *const devices::Bus,
+        guest_mem: *const GuestMemoryMmap,
+        vcpu_id: u64,
+    ) -> io::Result<VcpuExit<'_>> {
         loop {
             let mut exit_context = WHV_RUN_VP_EXIT_CONTEXT::default();
 
@@ -933,6 +1154,18 @@ impl WhpxVcpu {
                             self.pending_mmio_read = None;
                             return Ok(VcpuExit::MmioWrite(gpa, &self.data_buffer[..access_size]));
                         }
+                        x if x == WHvMemoryAccessExecute.0 => {
+                            // WHPX software emulation (InstructionByteCount=0 on a prior I/O
+                            // exit) can land execution at an unmapped GPA. Manual RIP advancement
+                            // via WHvSetVirtualProcessorRegisters is silently ignored in this mode;
+                            // the proper fix requires WHvEmulatorTryIoEmulation. Stop the vCPU
+                            // rather than looping endlessly on the same Execute exit.
+                            warn!(
+                                "WHPX Execute MemoryAccess at gpa=0x{gpa:x} (software emulation \
+                                 mode): stopping vCPU"
+                            );
+                            return Ok(VcpuExit::Shutdown);
+                        }
                         _ => {
                             warn!(
                                 "Unsupported WHPX memory access type {} at gpa=0x{gpa:x}",
@@ -957,10 +1190,55 @@ impl WhpxVcpu {
                     let is_write = (io_access_bits & 1) != 0;
                     let string_op = (io_access_bits & (1 << 4)) != 0;
                     let rep_prefix = (io_access_bits & (1 << 5)) != 0;
-                    let next_rip = exit_context
-                        .VpContext
-                        .Rip
-                        .wrapping_add(io_port.InstructionByteCount as u64);
+                    let rip = exit_context.VpContext.Rip;
+
+                    // When InstructionByteCount=0 and this is a simple (non-string,
+                    // non-rep) port IO, delegate to WHvEmulatorTryIoEmulation.
+                    // This is the only correct path: calling WHvSetVirtualProcessorRegisters(RIP)
+                    // manually is silently ignored by WHPX in software-emulation mode.
+                    if io_port.InstructionByteCount == 0 && !string_op && !rep_prefix {
+                        let mut ctx = EmulatorContext {
+                            partition: self.partition,
+                            vp_index: self.index,
+                            vcpu_id,
+                            io_bus,
+                            guest_mem,
+                        };
+                        let status = unsafe {
+                            WHvEmulatorTryIoEmulation(
+                                self.emulator as *const c_void,
+                                &mut ctx as *mut EmulatorContext as *const c_void,
+                                &exit_context.VpContext,
+                                &io_port,
+                            )
+                        }
+                        .map_err(|e| {
+                            io::Error::new(
+                                io::ErrorKind::Other,
+                                format!(
+                                    "WHvEmulatorTryIoEmulation failed on port 0x{port:04x}: {e}"
+                                ),
+                            )
+                        })?;
+                        if unsafe { status.AsUINT32 } & 1 != 0 {
+                            continue; // EmulationSuccessful — RIP advanced by emulator
+                        }
+                        warn!(
+                            "WHPX IO emulation unsuccessful on port 0x{port:04x} \
+                             (status={:#010x}): stopping vCPU",
+                            unsafe { status.AsUINT32 }
+                        );
+                        return Ok(VcpuExit::Shutdown);
+                    }
+
+                    // WHPX on some Windows builds returns InstructionByteCount=0.
+                    // Fall back to opcode-level decoding in that case.
+                    let instr_len = if io_port.InstructionByteCount > 0 {
+                        io_port.InstructionByteCount as u64
+                    } else {
+                        Self::decode_io_instr_len(&io_port.InstructionBytes)
+                    };
+                    let next_rip = rip.wrapping_add(instr_len);
 
                     if string_op || rep_prefix {
                         // Best-effort compatibility path for debug/legacy serial ports.
@@ -969,10 +1247,13 @@ impl WhpxVcpu {
                                 // Treat REP string I/O as fully consumed to avoid re-executing
                                 // the same instruction in tight debug output loops.
                                 let names = [WHvX64RegisterRip, WHvX64RegisterRcx];
-                                let values = [
-                                    WHV_REGISTER_VALUE { Reg64: next_rip },
-                                    WHV_REGISTER_VALUE { Reg64: 0 },
-                                ];
+                                let values = unsafe {
+                                    let mut v =
+                                        [std::mem::zeroed::<WHV_REGISTER_VALUE>(); 2];
+                                    v[0].Reg64 = next_rip;
+                                    v[1].Reg64 = 0;
+                                    v
+                                };
                                 self.set_registers(&names, &values)?;
                             } else {
                                 self.advance_rip(next_rip)?;
@@ -1059,8 +1340,12 @@ impl WhpxVcpu {
                     );
                     return Ok(VcpuExit::Shutdown);
                 }
-                reason if reason == WHvRunVpExitReasonX64Halt => return Ok(VcpuExit::Halted),
-                reason if reason == WHvRunVpExitReasonCanceled => return Ok(VcpuExit::Shutdown),
+                reason if reason == WHvRunVpExitReasonX64Halt => {
+                    return Ok(VcpuExit::Halted);
+                }
+                reason if reason == WHvRunVpExitReasonCanceled => {
+                    return Ok(VcpuExit::Shutdown);
+                }
                 reason if reason == WHvRunVpExitReasonException => {
                     if self.emulate_exception(&exit_context)? {
                         continue;
@@ -1082,10 +1367,11 @@ impl WhpxVcpu {
 
 impl Drop for WhpxVcpu {
     fn drop(&mut self) {
-        // SAFETY: WHvDeleteVirtualProcessor is safe to call with valid handles.
-        // We ignore errors because Drop cannot fail, and the vCPU may already be
-        // in an invalid state during cleanup.
+        // SAFETY: WHvDeleteVirtualProcessor and WHvEmulatorDestroyEmulator are safe to
+        // call with valid handles. We ignore errors because Drop cannot fail, and the
+        // vCPU may already be in an invalid state during cleanup.
         unsafe {
+            let _ = WHvEmulatorDestroyEmulator(self.emulator as *const c_void);
             let _ = WHvDeleteVirtualProcessor(self.partition, self.index);
         }
     }

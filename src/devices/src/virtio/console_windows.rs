@@ -6,7 +6,7 @@ use super::{ActivateError, ActivateResult, DeviceState, InterruptTransport, Queu
 use polly::event_manager::{EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::{EventFd, EFD_NONBLOCK};
-use vm_memory::{Bytes, GuestMemoryMmap};
+use vm_memory::{GuestMemory, GuestMemoryMmap};
 
 pub const TYPE_CONSOLE: u32 = 3;
 
@@ -43,14 +43,6 @@ pub mod port_io {
             Ok(0)
         }
         fn wait_until_readable(&self, _stopfd: Option<&utils::eventfd::EventFd>) {}
-    }
-
-    struct EmptyOutput;
-    impl PortOutput for EmptyOutput {
-        fn write_volatile(&mut self, buf: &VolatileSlice) -> io::Result<usize> {
-            Ok(buf.len())
-        }
-        fn wait_until_writable(&self) {}
     }
 
     struct FixedTerm(u16, u16);
@@ -102,6 +94,10 @@ pub mod port_io {
         }
     }
 
+    // SAFETY: HANDLE is a Win32 handle. Console handles are process-global and
+    // safe to use from multiple threads when protected by external synchronization.
+    unsafe impl Send for ConsoleInput {}
+
     impl PortInput for ConsoleInput {
         fn read_volatile(&mut self, buf: &mut VolatileSlice) -> io::Result<usize> {
             let guard = buf.ptr_guard_mut();
@@ -123,8 +119,20 @@ pub mod port_io {
             Ok(bytes_read)
         }
 
-        fn wait_until_readable(&self, _stopfd: Option<&utils::eventfd::EventFd>) {
-            // Windows console is always readable (blocking read)
+        fn wait_until_readable(&self, stopfd: Option<&utils::eventfd::EventFd>) {
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::System::Threading::{WaitForMultipleObjects, INFINITE};
+
+            let mut handles = vec![self.handle];
+            if let Some(fd) = stopfd {
+                handles.push(HANDLE(fd.as_raw_handle()));
+            }
+            // Wait until stdin or the stop signal is readable.
+            // The return value indicates which object was signalled; the caller
+            // is responsible for checking whether the stop flag is set.
+            unsafe {
+                let _ = WaitForMultipleObjects(&handles, false, INFINITE);
+            }
         }
     }
 
@@ -150,6 +158,9 @@ pub mod port_io {
             Ok(Self { handle })
         }
     }
+
+    // SAFETY: Console output handles are process-global and safe to send across threads.
+    unsafe impl Send for ConsoleOutput {}
 
     impl PortOutput for ConsoleOutput {
         fn write_volatile(&mut self, buf: &VolatileSlice) -> io::Result<usize> {
@@ -178,6 +189,10 @@ pub mod port_io {
     struct ConsoleTerm {
         handle: HANDLE,
     }
+
+    // SAFETY: Console terminal handles are process-global and safe to share/send across threads.
+    unsafe impl Send for ConsoleTerm {}
+    unsafe impl Sync for ConsoleTerm {}
 
     impl PortTerminalProperties for ConsoleTerm {
         fn get_win_size(&self) -> (u16, u16) {
@@ -394,7 +409,7 @@ impl Console {
             }
 
             if let Err(e) = self.queues[queue_index].add_used(mem, index, used_len) {
-                error!("console(windows): failed to add used entry: {e:?}\");
+                error!("console(windows): failed to add used entry: {e:?}");
             } else {
                 used_any = true;
             }
@@ -419,6 +434,7 @@ impl Console {
 
         let mut used_any = false;
         while let Some(head) = self.queues[queue_index].pop(mem) {
+            let index = head.index;
             let mut total_written = 0u32;
 
             for desc in head.into_iter() {
@@ -440,7 +456,7 @@ impl Console {
                 }
             }
 
-            if let Err(e) = self.queues[queue_index].add_used(mem, head.index, total_written) {
+            if let Err(e) = self.queues[queue_index].add_used(mem, index, total_written) {
                 error!("console(windows): failed to ack rx queue entry: {e:?}");
             } else if total_written > 0 {
                 used_any = true;

@@ -484,4 +484,42 @@ mod tests {
         )
         .is_err());
     }
+
+    #[test]
+    fn test_configure_system_zero_page() {
+        use vm_memory::Bytes;
+        use crate::x86_64::layout::{CMDLINE_START, ZERO_PAGE_START};
+
+        let mem_size = 128 << 20;
+        let (arch_mem_info, arch_mem_regions) =
+            arch_memory_regions(mem_size, Some(KERNEL_LOAD_ADDR), KERNEL_SIZE, 0, None);
+        let mem = GuestMemoryMmap::from_ranges(&arch_mem_regions).unwrap();
+
+        let cmdline = b"console=ttyS0\0";
+        mem.write_slice(cmdline, GuestAddress(CMDLINE_START)).unwrap();
+
+        configure_system(
+            &mem,
+            &arch_mem_info,
+            GuestAddress(CMDLINE_START),
+            cmdline.len(),
+            &None,
+            1,
+        )
+        .unwrap();
+
+        let magic: u16 = mem
+            .read_obj(GuestAddress(ZERO_PAGE_START + 0x1fe))
+            .unwrap();
+        assert_eq!(magic, 0xAA55, "boot_flag should be set to 0xAA55");
+
+        let cmdline_ptr: u32 = mem
+            .read_obj(GuestAddress(ZERO_PAGE_START + 0x228))
+            .unwrap();
+        assert_eq!(
+            cmdline_ptr,
+            CMDLINE_START as u32,
+            "cmdline pointer should match CMDLINE_START"
+        );
+    }
 }
