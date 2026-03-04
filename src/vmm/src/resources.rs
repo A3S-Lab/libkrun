@@ -26,6 +26,10 @@ use crate::vmm_config::machine_config::{VmConfig, VmConfigError};
 #[cfg(feature = "net")]
 use crate::vmm_config::net::{NetBuilder, NetworkInterfaceConfig, NetworkInterfaceError};
 #[cfg(target_os = "windows")]
+use crate::vmm_config::block_windows::{
+    BlockWindowsBuilder, BlockWindowsConfig, BlockWindowsError,
+};
+#[cfg(target_os = "windows")]
 use crate::vmm_config::net_windows::{NetWindowsBuilder, NetWindowsConfig, NetWindowsError};
 use crate::vmm_config::vsock::*;
 use crate::vstate::VcpuConfig;
@@ -159,6 +163,9 @@ pub struct VmResources {
     /// Windows virtio-net devices builder.
     #[cfg(target_os = "windows")]
     pub net_windows: NetWindowsBuilder,
+    /// Windows virtio-blk devices builder.
+    #[cfg(target_os = "windows")]
+    pub block_windows: BlockWindowsBuilder,
     /// TEE configuration
     #[cfg(feature = "tee")]
     pub tee_config: TeeConfig,
@@ -369,6 +376,15 @@ impl VmResources {
         self.net_windows.insert(config)
     }
 
+    /// Adds a Windows virtio-blk device to be attached when the VM starts.
+    #[cfg(target_os = "windows")]
+    pub fn add_block_device_windows(
+        &mut self,
+        config: BlockWindowsConfig,
+    ) -> std::result::Result<(), BlockWindowsError> {
+        self.block_windows.insert(config)
+    }
+
     #[cfg(feature = "tee")]
     pub fn tee_config(&self) -> &TeeConfig {
         &self.tee_config
@@ -428,6 +444,8 @@ mod tests {
             net_builder: Default::default(),
             #[cfg(target_os = "windows")]
             net_windows: Default::default(),
+            #[cfg(target_os = "windows")]
+            block_windows: Default::default(),
             gpu_virgl_flags: None,
             gpu_shm_size: None,
             #[cfg(feature = "gpu")]

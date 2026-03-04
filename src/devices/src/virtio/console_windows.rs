@@ -140,25 +140,6 @@ pub mod port_io {
         handle: HANDLE,
     }
 
-    impl ConsoleOutput {
-        fn new(handle: HANDLE) -> io::Result<Self> {
-            if handle == INVALID_HANDLE_VALUE {
-                return Err(io::Error::new(ErrorKind::NotFound, "Invalid console handle"));
-            }
-
-            // Enable VT100 processing for ANSI escape sequences
-            let mut mode = CONSOLE_MODE(0);
-            unsafe {
-                if GetConsoleMode(handle, &mut mode).is_ok() {
-                    let vt_mode = CONSOLE_MODE(mode.0 | ENABLE_VIRTUAL_TERMINAL_PROCESSING.0);
-                    let _ = SetConsoleMode(handle, vt_mode);
-                }
-            }
-
-            Ok(Self { handle })
-        }
-    }
-
     // SAFETY: Console output handles are process-global and safe to send across threads.
     unsafe impl Send for ConsoleOutput {}
 
@@ -212,31 +193,196 @@ pub mod port_io {
         Ok(Box::new(EmptyInput))
     }
 
-    pub fn input_to_raw_fd_dup(_fd: i32) -> io::Result<Box<dyn PortInput + Send>> {
-        // On Windows, fd is ignored, use stdin
-        let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) }
-            .map_err(|e| io::Error::new(ErrorKind::Other, format!("GetStdHandle failed: {e}")))?;
-        Ok(Box::new(ConsoleInput::new(handle)?))
+    pub fn input_to_raw_fd_dup(fd: i32) -> io::Result<Box<dyn PortInput + Send>> {
+        let handle = if fd == 0 {
+            unsafe { GetStdHandle(STD_INPUT_HANDLE) }
+                .map_err(|e| io::Error::new(ErrorKind::Other, format!("GetStdHandle failed: {e}")))?
+        } else {
+            // Convert CRT fd → owned HANDLE via DuplicateHandle.
+            extern "C" {
+                fn _get_osfhandle(fd: i32) -> isize;
+            }
+            let raw = unsafe { _get_osfhandle(fd) };
+            if raw == -1isize {
+                return Err(io::Error::new(ErrorKind::InvalidInput, "invalid fd"));
+            }
+            let src = HANDLE(raw as *mut _);
+            let mut dup = HANDLE::default();
+            let proc = unsafe { windows::Win32::System::Threading::GetCurrentProcess() };
+            unsafe {
+                windows::Win32::Foundation::DuplicateHandle(
+                    proc,
+                    src,
+                    proc,
+                    &mut dup,
+                    0,
+                    false,
+                    windows::Win32::Foundation::DUPLICATE_SAME_ACCESS,
+                )
+            }
+            .map_err(|e| {
+                io::Error::new(ErrorKind::Other, format!("DuplicateHandle failed: {e}"))
+            })?;
+            dup
+        };
+
+        // Console handles: use ConsoleInput (raw mode + proper wait).
+        if let Ok(ci) = ConsoleInput::new(handle) {
+            return Ok(Box::new(ci));
+        }
+
+        // Non-console (pipe / file): use File-based input.
+        // For fd=0 stdin pipe, the GetStdHandle-returned handle is NOT owned — avoid
+        // wrapping it in File (which would close it).  Return EmptyInput instead,
+        // as piped stdin in a VM-host context is rarely meaningful for guest I/O.
+        if fd == 0 {
+            return Ok(Box::new(EmptyInput));
+        }
+
+        // We own the duplicated handle — wrap as File for ReadFile + WaitForMultipleObjects.
+        use std::os::windows::io::FromRawHandle;
+        let file = unsafe { std::fs::File::from_raw_handle(handle.0 as *mut _) };
+        Ok(Box::new(FileOrPipeInput { file }))
+    }
+
+    /// Readable wrapper around an owned file/pipe handle.
+    struct FileOrPipeInput {
+        file: std::fs::File,
+    }
+
+    // SAFETY: std::fs::File is Send.
+    unsafe impl Send for FileOrPipeInput {}
+
+    impl PortInput for FileOrPipeInput {
+        fn read_volatile(&mut self, buf: &mut VolatileSlice) -> io::Result<usize> {
+            use std::io::Read;
+            let guard = buf.ptr_guard_mut();
+            let data = unsafe { std::slice::from_raw_parts_mut(guard.as_ptr(), buf.len()) };
+            let n = self.file.read(data)?;
+            buf.bitmap().mark_dirty(0, n);
+            Ok(n)
+        }
+
+        fn wait_until_readable(&self, stopfd: Option<&utils::eventfd::EventFd>) {
+            use std::os::windows::io::AsRawHandle;
+            use windows::Win32::System::Threading::{WaitForMultipleObjects, INFINITE};
+            let handle = HANDLE(self.file.as_raw_handle() as *mut _);
+            let mut handles = vec![handle];
+            if let Some(fd) = stopfd {
+                handles.push(HANDLE(fd.as_raw_handle()));
+            }
+            unsafe {
+                let _ = WaitForMultipleObjects(&handles, false, INFINITE);
+            }
+        }
     }
 
     pub fn output_to_raw_fd_dup(fd: i32) -> io::Result<Box<dyn PortOutput + Send>> {
-        let std_handle = if fd == 1 {
-            STD_OUTPUT_HANDLE
+        let std_handle_type = if fd == 1 {
+            Some(STD_OUTPUT_HANDLE)
         } else if fd == 2 {
-            STD_ERROR_HANDLE
+            Some(STD_ERROR_HANDLE)
         } else {
-            STD_OUTPUT_HANDLE
+            None
         };
 
-        let handle = unsafe { GetStdHandle(std_handle) }
-            .map_err(|e| io::Error::new(ErrorKind::Other, format!("GetStdHandle failed: {e}")))?;
-        Ok(Box::new(ConsoleOutput::new(handle)?))
+        let handle = if let Some(sht) = std_handle_type {
+            unsafe { GetStdHandle(sht) }
+                .map_err(|e| io::Error::new(ErrorKind::Other, format!("GetStdHandle failed: {e}")))?
+        } else {
+            // Convert CRT fd to HANDLE and duplicate it so we own it.
+            extern "C" {
+                fn _get_osfhandle(fd: i32) -> isize;
+            }
+            let raw = unsafe { _get_osfhandle(fd) };
+            if raw == -1isize {
+                return Err(io::Error::new(ErrorKind::InvalidInput, "invalid fd"));
+            }
+            let src_handle = HANDLE(raw as *mut _);
+            let mut dup = HANDLE::default();
+            let proc = unsafe { windows::Win32::System::Threading::GetCurrentProcess() };
+            unsafe {
+                windows::Win32::Foundation::DuplicateHandle(
+                    proc,
+                    src_handle,
+                    proc,
+                    &mut dup,
+                    0,
+                    false,
+                    windows::Win32::Foundation::DUPLICATE_SAME_ACCESS,
+                )
+            }
+            .map_err(|e| {
+                io::Error::new(ErrorKind::Other, format!("DuplicateHandle failed: {e}"))
+            })?;
+            dup
+        };
+
+        // Try console path first (enables VT100 as a side-effect).
+        let mut mode = CONSOLE_MODE(0);
+        if unsafe { GetConsoleMode(handle, &mut mode).is_ok() } {
+            let vt_mode = CONSOLE_MODE(mode.0 | ENABLE_VIRTUAL_TERMINAL_PROCESSING.0);
+            unsafe { let _ = SetConsoleMode(handle, vt_mode); }
+            return Ok(Box::new(ConsoleOutput { handle }));
+        }
+
+        // Non-console handle (pipe / file).
+        if std_handle_type.is_some() {
+            // We do NOT own handles returned by GetStdHandle — use Rust's std writers
+            // which route through the correct Win32 handle and handle buffering correctly.
+            if fd == 2 {
+                return Ok(Box::new(StdErrOutput));
+            }
+            return Ok(Box::new(StdOutOutput));
+        }
+
+        // We own the duplicated handle — wrap as a File for proper cleanup.
+        use std::os::windows::io::FromRawHandle;
+        let file = unsafe { std::fs::File::from_raw_handle(handle.0 as *mut _) };
+        Ok(Box::new(FileOutput(file)))
     }
 
-    pub fn output_file(_file: std::fs::File) -> io::Result<Box<dyn PortOutput + Send>> {
-        // For now, redirect to stdout
-        output_to_raw_fd_dup(1)
+    struct StdOutOutput;
+    impl PortOutput for StdOutOutput {
+        fn write_volatile(&mut self, buf: &VolatileSlice) -> io::Result<usize> {
+            use std::io::Write;
+            let guard = buf.ptr_guard();
+            let data = unsafe { std::slice::from_raw_parts(guard.as_ptr(), buf.len()) };
+            io::stdout().write(data)
+        }
+        fn wait_until_writable(&self) {}
     }
+
+    struct StdErrOutput;
+    impl PortOutput for StdErrOutput {
+        fn write_volatile(&mut self, buf: &VolatileSlice) -> io::Result<usize> {
+            use std::io::Write;
+            let guard = buf.ptr_guard();
+            let data = unsafe { std::slice::from_raw_parts(guard.as_ptr(), buf.len()) };
+            io::stderr().write(data)
+        }
+        fn wait_until_writable(&self) {}
+    }
+
+    pub fn output_file(file: std::fs::File) -> io::Result<Box<dyn PortOutput + Send>> {
+        Ok(Box::new(FileOutput(file)))
+    }
+
+    struct FileOutput(std::fs::File);
+
+    impl PortOutput for FileOutput {
+        fn write_volatile(&mut self, buf: &VolatileSlice) -> io::Result<usize> {
+            use std::io::Write;
+            let guard = buf.ptr_guard();
+            let data = unsafe { std::slice::from_raw_parts(guard.as_ptr(), buf.len()) };
+            self.0.write(data)
+        }
+
+        fn wait_until_writable(&self) {}
+    }
+
+    // SAFETY: std::fs::File is Send.
+    unsafe impl Send for FileOutput {}
 
     pub fn output_to_log_as_err() -> Box<dyn PortOutput + Send> {
         Box::new(LogOutput::new())

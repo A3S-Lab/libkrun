@@ -36,6 +36,8 @@ use crate::vmm_config::external_kernel::{ExternalKernel, KernelFormat};
 use crate::vmm_config::net::NetBuilder;
 #[cfg(target_os = "windows")]
 use crate::vmm_config::net_windows::NetWindowsBuilder;
+#[cfg(target_os = "windows")]
+use crate::vmm_config::block_windows::BlockWindowsBuilder;
 #[cfg(target_arch = "x86_64")]
 use devices::legacy::Cmos;
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
@@ -99,6 +101,30 @@ use krun_display::IntoDisplayBackend;
 use kvm_bindings::KVM_MAX_CPUID_ENTRIES;
 #[cfg(not(target_os = "windows"))]
 use libc::{STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO};
+
+/// On Windows, wrap a CRT file descriptor as a `Write` sink.
+///
+/// Uses the CRT `_write()` function so that any fd—including pipes and file
+/// handles obtained from `_open_osfhandle`—works correctly.  stdout / stderr
+/// are handled separately above; this wrapper covers every other fd > 2.
+#[cfg(target_os = "windows")]
+struct CrtFdWriter(i32);
+
+#[cfg(target_os = "windows")]
+impl std::io::Write for CrtFdWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = unsafe { libc::write(self.0, buf.as_ptr() as *const _, buf.len() as _) };
+        if n < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(n as usize)
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 #[cfg(target_arch = "x86_64")]
 use linux_loader::loader::{self, KernelLoader};
 #[cfg(not(target_os = "windows"))]
@@ -885,13 +911,26 @@ pub fn build_microvm(
 
     #[cfg(target_os = "windows")]
     for s in &vm_resources.serial_consoles {
-        let output: Option<Box<dyn io::Write + Send>> = if s.output_fd >= 0 {
-            // Route serial output to stdout for now.
-            // TODO: map s.output_fd as a Windows HANDLE for proper piping.
-            Some(Box::new(io::stdout()))
-        } else {
-            None
+        let output: Option<Box<dyn io::Write + Send>> = match s.output_fd {
+            1 => Some(Box::new(io::stdout())),
+            2 => Some(Box::new(io::stderr())),
+            fd if fd >= 0 => Some(Box::new(CrtFdWriter(fd))),
+            _ => None,
         };
+        let input: Option<Box<dyn devices::legacy::ReadableFd + Send>> =
+            crate::windows::stdin_reader::WindowsStdinInput::new()
+                .ok()
+                .map(|r| Box::new(r) as Box<dyn devices::legacy::ReadableFd + Send>);
+        serial_devices.push(setup_serial_device(event_manager, input, output)?);
+    }
+
+    // On Windows, if the caller did not configure any serial console, auto-add a
+    // default COM1 device (stdout output + stdin input) so that a Linux guest
+    // booting with `console=ttyS0` produces visible output.  Without this,
+    // PortIODeviceManager::register_devices() skips COM1 registration entirely.
+    #[cfg(target_os = "windows")]
+    if serial_devices.is_empty() {
+        let output: Option<Box<dyn io::Write + Send>> = Some(Box::new(io::stdout()));
         let input: Option<Box<dyn devices::legacy::ReadableFd + Send>> =
             crate::windows::stdin_reader::WindowsStdinInput::new()
                 .ok()
@@ -1221,7 +1260,9 @@ pub fn build_microvm(
     #[cfg(feature = "net")]
     attach_net_devices(&mut vmm, &vm_resources.net, intc.clone())?;
     #[cfg(target_os = "windows")]
-    attach_net_devices_windows(&mut vmm, &vm_resources.net_windows, intc.clone())?;
+    attach_net_devices_windows(&mut vmm, &vm_resources.net_windows, event_manager, intc.clone())?;
+    #[cfg(target_os = "windows")]
+    attach_block_devices_windows(&mut vmm, &vm_resources.block_windows, event_manager, intc.clone())?;
     #[cfg(feature = "snd")]
     if vm_resources.snd_device {
         attach_snd_device(&mut vmm, intc.clone())?;
@@ -2116,7 +2157,7 @@ fn attach_mmio_device(
         vmm.mmio_device_manager
             .register_mmio_device(mmio_device, type_id, id)?;
 
-    #[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
+    #[cfg(target_arch = "x86_64")]
     vmm.mmio_device_manager
         .add_device_to_cmdline(_cmdline, _mmio_base, _irq)?;
 
@@ -2295,13 +2336,43 @@ fn autoconfigure_console_ports(
 #[cfg(target_os = "windows")]
 fn autoconfigure_console_ports(
     _vmm: &mut Vmm,
-    _vm_resources: &VmResources,
-    _cfg: Option<&DefaultVirtioConsoleConfig>,
-    _creating_implicit_console: bool,
+    vm_resources: &VmResources,
+    cfg: Option<&DefaultVirtioConsoleConfig>,
+    creating_implicit_console: bool,
 ) -> std::result::Result<Vec<PortDescription>, StartMicrovmError> {
+    use self::StartMicrovmError::*;
+
+    // Redirect console output to a file if configured (implicit console only).
+    if let Some(path) = &vm_resources.console_output {
+        if !vm_resources.disable_implicit_console && creating_implicit_console {
+            let file = std::fs::File::create(path).map_err(OpenConsoleFile)?;
+            return Ok(vec![PortDescription::console(
+                port_io::input_to_raw_fd_dup(0).ok(),
+                Some(port_io::output_file(file).unwrap()),
+                port_io::term_fixed_size(0, 0),
+            )]);
+        }
+    }
+
+    let (input_fd, output_fd) = match cfg {
+        Some(c) => (c.input_fd, c.output_fd),
+        None => (0, 1), // stdin / stdout
+    };
+
     Ok(vec![PortDescription::console(
-        port_io::input_to_raw_fd_dup(0).ok(),
-        Some(port_io::output_to_log_as_err()),
+        if input_fd >= 0 {
+            port_io::input_to_raw_fd_dup(input_fd).ok()
+        } else {
+            None
+        },
+        if output_fd >= 0 {
+            Some(
+                port_io::output_to_raw_fd_dup(output_fd)
+                    .unwrap_or_else(|_| port_io::output_to_log_as_err()),
+            )
+        } else {
+            None
+        },
         port_io::term_fixed_size(0, 0),
     )])
 }
@@ -2399,15 +2470,33 @@ fn create_explicit_ports(
                 input: port_io::input_to_raw_fd_dup(0)
                     .ok()
                     .map(|i| Arc::new(Mutex::new(i))),
-                output: Some(Arc::new(Mutex::new(port_io::output_to_log_as_err()))),
+                output: Some(Arc::new(Mutex::new(
+                    port_io::output_to_raw_fd_dup(1)
+                        .unwrap_or_else(|_| port_io::output_to_log_as_err()),
+                ))),
                 terminal: Some(port_io::term_fixed_size(0, 0)),
             },
-            PortConfig::InOut { name, .. } => PortDescription {
+            PortConfig::InOut {
+                name,
+                input_fd,
+                output_fd,
+            } => PortDescription {
                 name: name.clone().into(),
-                input: port_io::input_to_raw_fd_dup(0)
-                    .ok()
-                    .map(|i| Arc::new(Mutex::new(i))),
-                output: Some(Arc::new(Mutex::new(port_io::output_to_log_as_err()))),
+                input: if *input_fd >= 0 {
+                    port_io::input_to_raw_fd_dup(*input_fd)
+                        .ok()
+                        .map(|i| Arc::new(Mutex::new(i)))
+                } else {
+                    None
+                },
+                output: if *output_fd >= 0 {
+                    Some(Arc::new(Mutex::new(
+                        port_io::output_to_raw_fd_dup(*output_fd)
+                            .unwrap_or_else(|_| port_io::output_to_log_as_err()),
+                    )))
+                } else {
+                    None
+                },
                 terminal: None,
             },
         };
@@ -2480,12 +2569,34 @@ fn attach_net_devices(
 fn attach_net_devices_windows(
     vmm: &mut Vmm,
     net_devices: &NetWindowsBuilder,
+    event_manager: &mut EventManager,
     intc: IrqChip,
 ) -> Result<(), StartMicrovmError> {
     for net_device in net_devices.list.iter() {
         let id = net_device.lock().unwrap().id().to_string();
+        event_manager
+            .add_subscriber(net_device.clone())
+            .map_err(StartMicrovmError::RegisterEvent)?;
         attach_mmio_device(vmm, id, intc.clone(), net_device.clone())
             .map_err(StartMicrovmError::RegisterNetDevice)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn attach_block_devices_windows(
+    vmm: &mut Vmm,
+    block_devices: &BlockWindowsBuilder,
+    event_manager: &mut EventManager,
+    intc: IrqChip,
+) -> Result<(), StartMicrovmError> {
+    for blk_device in block_devices.list.iter() {
+        let id = blk_device.lock().unwrap().id().to_string();
+        event_manager
+            .add_subscriber(blk_device.clone())
+            .map_err(StartMicrovmError::RegisterEvent)?;
+        attach_mmio_device(vmm, id, intc.clone(), blk_device.clone())
+            .map_err(StartMicrovmError::RegisterBlockDevice)?;
     }
     Ok(())
 }

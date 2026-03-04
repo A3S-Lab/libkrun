@@ -12,7 +12,7 @@
 //! 1. `WhpxVcpu::run()` calls `WHvRunVirtualProcessor` to execute guest code
 //! 2. When a VM exit occurs, the exit context is parsed into a `VcpuExit` enum
 //! 3. The `VcpuExit` is returned to the caller (typically `Vcpu::run()`)
-//! 4. The caller handles the exit via `Vcpu::run_emulation()`
+//! 4. The caller (`Vcpu::run()`) handles the exit in-line
 //! 5. Based on the `VcpuEmulation` result, execution continues or stops
 //!
 //! # Supported VM Exits

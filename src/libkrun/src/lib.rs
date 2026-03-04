@@ -63,6 +63,8 @@ use vmm::vmm_config::machine_config::VmConfig;
 use vmm::vmm_config::net::NetworkInterfaceConfig;
 #[cfg(target_os = "windows")]
 use vmm::vmm_config::net_windows::NetWindowsConfig;
+#[cfg(target_os = "windows")]
+use vmm::vmm_config::block_windows::BlockWindowsConfig;
 use vmm::vmm_config::vsock::VsockDeviceConfig;
 
 #[cfg(feature = "nitro")]
@@ -1182,6 +1184,52 @@ pub unsafe extern "C" fn krun_add_net_tcp(
     KRUN_SUCCESS
 }
 
+/// Add a virtio-blk disk device on Windows.
+///
+/// # Arguments
+/// - `ctx_id`: context ID returned by `krun_create_ctx`.
+/// - `c_block_id`: null-terminated device ID string.
+/// - `c_disk_path`: null-terminated path to the raw disk image on the host.
+/// - `read_only`: if `true`, the device is presented as read-only to the guest.
+///
+/// Returns `KRUN_SUCCESS` (0) on success, or a negative errno on failure.
+#[allow(clippy::missing_safety_doc)]
+#[no_mangle]
+#[cfg(target_os = "windows")]
+pub unsafe extern "C" fn krun_add_disk(
+    ctx_id: u32,
+    c_block_id: *const c_char,
+    c_disk_path: *const c_char,
+    read_only: bool,
+) -> i32 {
+    let block_id = match CStr::from_ptr(c_block_id).to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => return -libc::EINVAL,
+    };
+    let disk_path = match CStr::from_ptr(c_disk_path).to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => return -libc::EINVAL,
+    };
+
+    match CTX_MAP.lock().unwrap().entry(ctx_id) {
+        Entry::Occupied(mut ctx_cfg) => {
+            let cfg = ctx_cfg.get_mut();
+            if cfg.vmr
+                .add_block_device_windows(BlockWindowsConfig {
+                    block_id,
+                    disk_image_path: disk_path,
+                    is_disk_read_only: read_only,
+                })
+                .is_err()
+            {
+                return -libc::EINVAL;
+            }
+        }
+        Entry::Vacant(_) => return -libc::ENOENT,
+    }
+    KRUN_SUCCESS
+}
+
 #[allow(clippy::missing_safety_doc)]
 #[no_mangle]
 #[cfg(feature = "net")]
@@ -1482,6 +1530,7 @@ pub unsafe extern "C" fn krun_set_tee_config_file(ctx_id: u32, c_filepath: *cons
 
 #[allow(clippy::missing_safety_doc)]
 #[no_mangle]
+#[cfg(not(target_os = "windows"))]
 pub unsafe extern "C" fn krun_add_vsock_port(
     ctx_id: u32,
     port: u32,
@@ -1492,6 +1541,7 @@ pub unsafe extern "C" fn krun_add_vsock_port(
 
 #[allow(clippy::missing_safety_doc)]
 #[no_mangle]
+#[cfg(not(target_os = "windows"))]
 pub unsafe extern "C" fn krun_add_vsock_port2(
     ctx_id: u32,
     port: u32,
@@ -1523,6 +1573,41 @@ pub unsafe extern "C" fn krun_add_vsock_port2(
                 return -libc::ENODEV;
             }
             cfg.add_vsock_port(port, filepath, listen);
+        }
+        Entry::Vacant(_) => return -libc::ENOENT,
+    }
+
+    KRUN_SUCCESS
+}
+
+/// Map guest vsock `port` to a Windows Named Pipe.
+///
+/// When the guest connects to CID 2 (host) on `port`, the vsock device will
+/// connect to `\\.\pipe\<pipe_name>` on the host.
+#[allow(clippy::missing_safety_doc)]
+#[no_mangle]
+#[cfg(target_os = "windows")]
+pub unsafe extern "C" fn krun_add_vsock_port_windows(
+    ctx_id: u32,
+    port: u32,
+    c_pipe_name: *const c_char,
+) -> i32 {
+    let pipe_name = match CStr::from_ptr(c_pipe_name).to_str() {
+        Ok(s) if !s.is_empty() => s,
+        _ => return -libc::EINVAL,
+    };
+
+    // Store the pipe name as a PathBuf with no extension so that the Windows
+    // vsock backend's file_stem() extraction returns the full name unchanged.
+    let path = PathBuf::from(pipe_name);
+
+    match CTX_MAP.lock().unwrap().entry(ctx_id) {
+        Entry::Occupied(mut ctx_cfg) => {
+            let cfg = ctx_cfg.get_mut();
+            if cfg.vsock_config == VsockConfig::Disabled {
+                return -libc::ENODEV;
+            }
+            cfg.add_vsock_port(port, path, false);
         }
         Entry::Vacant(_) => return -libc::ENOENT,
     }
@@ -2691,7 +2776,9 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
             // Check if TSI should be enabled based on network configuration
             #[cfg(feature = "net")]
             let enable_tsi = ctx_cfg.vmr.net.list.is_empty() && ctx_cfg.legacy_net_cfg.is_none();
-            #[cfg(not(feature = "net"))]
+            #[cfg(all(not(feature = "net"), target_os = "windows"))]
+            let enable_tsi = ctx_cfg.vmr.net_windows.list.is_empty();
+            #[cfg(all(not(feature = "net"), not(target_os = "windows")))]
             let enable_tsi = true;
 
             let has_ipc_map = ctx_cfg.unix_ipc_port_map.is_some();

@@ -73,19 +73,19 @@ jobs:
           New-Item -ItemType File -Path "init/init" -Force | Out-Null
 
       - name: Build check (Windows target)
-        run: cargo check -p utils -p polly -p devices -p vmm --target x86_64-pc-windows-msvc
+        run: cargo check -p utils -p polly -p devices -p vmm -p libkrun --target x86_64-pc-windows-msvc
         continue-on-error: true
 
-      - name: Utils tests (Windows modules)
-        run: "cargo test -p utils --target x86_64-pc-windows-msvc --lib windows::"
+      - name: Utils tests (Windows)
+        run: cargo test -p utils --target x86_64-pc-windows-msvc --lib
         continue-on-error: true
 
       - name: Polly tests
         run: cargo test -p polly --target x86_64-pc-windows-msvc --lib
         continue-on-error: true
 
-      - name: VMM tests (Windows modules)
-        run: "cargo test -p vmm --target x86_64-pc-windows-msvc --lib windows::"
+      - name: VMM tests (Windows)
+        run: cargo test -p vmm --target x86_64-pc-windows-msvc --lib
         continue-on-error: true
 
   windows-whpx-smoke:

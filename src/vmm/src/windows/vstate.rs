@@ -408,86 +408,6 @@ impl Vcpu {
         }
     }
 
-    /// Handles a VM exit by delegating to the appropriate device.
-    pub fn run_emulation(&mut self, exit: VcpuExit) -> VcpuEmulation {
-        match exit {
-            VcpuExit::MmioRead(addr, data) => {
-                if let Some(mmio_bus) = &self.mmio_bus {
-                    if mmio_bus.read(self.id as u64, addr, data) {
-                        if let Err(e) = self.whpx_vcpu.complete_mmio_read(data) {
-                            error!(
-                                "Failed to complete WHPX MMIO read emulation on vCPU {}: {e}",
-                                self.id
-                            );
-                            self.whpx_vcpu.clear_pending_mmio();
-                            return VcpuEmulation::Stopped;
-                        }
-                        return VcpuEmulation::Handled;
-                    }
-                }
-                self.whpx_vcpu.clear_pending_mmio();
-                VcpuEmulation::Stopped
-            }
-            VcpuExit::MmioWrite(addr, data) => {
-                if let Some(mmio_bus) = &self.mmio_bus {
-                    if mmio_bus.write(self.id as u64, addr, data) {
-                        if let Err(e) = self.whpx_vcpu.complete_mmio_write() {
-                            error!(
-                                "Failed to complete WHPX MMIO write emulation on vCPU {}: {e}",
-                                self.id
-                            );
-                            self.whpx_vcpu.clear_pending_mmio();
-                            return VcpuEmulation::Stopped;
-                        }
-                        return VcpuEmulation::Handled;
-                    }
-                }
-                self.whpx_vcpu.clear_pending_mmio();
-                VcpuEmulation::Stopped
-            }
-            VcpuExit::IoPortRead(port, data) => {
-                if self.io_bus.read(self.id as u64, port as u64, data) {
-                    if let Err(e) = self.whpx_vcpu.complete_io_read(data) {
-                        error!(
-                            "Failed to complete WHPX I/O read emulation on vCPU {}: {e}",
-                            self.id
-                        );
-                        self.whpx_vcpu.clear_pending_io();
-                        return VcpuEmulation::Stopped;
-                    }
-                    return VcpuEmulation::Handled;
-                }
-                self.whpx_vcpu.clear_pending_io();
-                VcpuEmulation::Stopped
-            }
-            VcpuExit::IoPortWrite(port, data) => {
-                if self.io_bus.write(self.id as u64, port as u64, data) {
-                    if let Err(e) = self.whpx_vcpu.complete_io_write() {
-                        error!(
-                            "Failed to complete WHPX I/O write emulation on vCPU {}: {e}",
-                            self.id
-                        );
-                        self.whpx_vcpu.clear_pending_io();
-                        return VcpuEmulation::Stopped;
-                    }
-                    return VcpuEmulation::Handled;
-                }
-                self.whpx_vcpu.clear_pending_io();
-                VcpuEmulation::Stopped
-            }
-            VcpuExit::Halted => {
-                self.whpx_vcpu.clear_pending_mmio();
-                self.whpx_vcpu.clear_pending_io();
-                VcpuEmulation::Halted
-            }
-            VcpuExit::Shutdown => {
-                self.whpx_vcpu.clear_pending_mmio();
-                self.whpx_vcpu.clear_pending_io();
-                VcpuEmulation::Stopped
-            }
-        }
-    }
-
     /// Main vCPU run loop for x86_64.
     pub fn run(&mut self) -> result::Result<VcpuEmulation, io::Error> {
         loop {
@@ -528,92 +448,79 @@ impl Vcpu {
             let vcpu_id = self.id as u64;
             let emulation = match self.whpx_vcpu.run(io_bus_ptr, guest_mem_ptr, vcpu_id)? {
                 VcpuExit::MmioRead(addr, data) => {
+                    // Always attempt the bus read; unregistered addresses leave
+                    // data zeroed (bus default).  Mirrors the IO-port path which
+                    // always returns Handled regardless of whether a device claimed
+                    // the port.
                     if let Some(mmio_bus) = &self.mmio_bus {
-                        if mmio_bus.read(self.id as u64, addr, data) {
-                            let mut completion = [0_u8; 8];
-                            completion[..data.len()].copy_from_slice(data);
-                            let completion = &completion[..data.len()];
-                            let _ = data;
-                            if let Err(e) = self.whpx_vcpu.complete_mmio_read(completion) {
-                                error!(
-                                    "Failed to complete WHPX MMIO read emulation on vCPU {}: {e}",
-                                    self.id
-                                );
-                                self.whpx_vcpu.clear_pending_mmio();
-                                VcpuEmulation::Stopped
-                            } else {
-                                VcpuEmulation::Handled
-                            }
-                        } else {
-                            self.whpx_vcpu.clear_pending_mmio();
-                            VcpuEmulation::Stopped
-                        }
-                    } else {
+                        mmio_bus.read(self.id as u64, addr, data);
+                    }
+                    // Copy data before releasing the borrow so complete_mmio_read
+                    // can take &mut self.whpx_vcpu.
+                    let mut completion = [0_u8; 8];
+                    completion[..data.len()].copy_from_slice(data);
+                    let len = data.len();
+                    let _ = data;
+                    if let Err(e) = self.whpx_vcpu.complete_mmio_read(&completion[..len]) {
+                        error!(
+                            "Failed to complete WHPX MMIO read on vCPU {}: {e}",
+                            self.id
+                        );
                         self.whpx_vcpu.clear_pending_mmio();
                         VcpuEmulation::Stopped
+                    } else {
+                        VcpuEmulation::Handled
                     }
                 }
                 VcpuExit::MmioWrite(addr, data) => {
+                    // Always attempt the bus write; unregistered addresses are
+                    // silently ignored.  Mirrors the IO-port path.
                     if let Some(mmio_bus) = &self.mmio_bus {
-                        if mmio_bus.write(self.id as u64, addr, data) {
-                            let _ = data;
-                            if let Err(e) = self.whpx_vcpu.complete_mmio_write() {
-                                error!(
-                                    "Failed to complete WHPX MMIO write emulation on vCPU {}: {e}",
-                                    self.id
-                                );
-                                self.whpx_vcpu.clear_pending_mmio();
-                                VcpuEmulation::Stopped
-                            } else {
-                                VcpuEmulation::Handled
-                            }
-                        } else {
-                            self.whpx_vcpu.clear_pending_mmio();
-                            VcpuEmulation::Stopped
-                        }
-                    } else {
+                        mmio_bus.write(self.id as u64, addr, data);
+                    }
+                    let _ = data;
+                    if let Err(e) = self.whpx_vcpu.complete_mmio_write() {
+                        error!(
+                            "Failed to complete WHPX MMIO write on vCPU {}: {e}",
+                            self.id
+                        );
                         self.whpx_vcpu.clear_pending_mmio();
                         VcpuEmulation::Stopped
+                    } else {
+                        VcpuEmulation::Handled
                     }
                 }
                 VcpuExit::IoPortRead(port, data) => {
-                    if self.io_bus.read(self.id as u64, port as u64, data) {
-                        let mut completion = [0_u8; 8];
-                        completion[..data.len()].copy_from_slice(data);
-                        let completion = &completion[..data.len()];
-                        let _ = data;
-                        if let Err(e) = self.whpx_vcpu.complete_io_read(completion) {
-                            error!(
-                                "Failed to complete WHPX I/O read emulation on vCPU {}: {e}",
-                                self.id
-                            );
-                            self.whpx_vcpu.clear_pending_io();
-                            VcpuEmulation::Stopped
-                        } else {
-                            VcpuEmulation::Handled
-                        }
-                    } else {
+                    self.io_bus.read(self.id as u64, port as u64, data);
+                    // Copy data to release the borrow on self.whpx_vcpu before
+                    // calling complete_io_read.
+                    let mut completion = [0_u8; 8];
+                    completion[..data.len()].copy_from_slice(data);
+                    let len = data.len();
+                    let _ = data;
+                    if let Err(e) = self.whpx_vcpu.complete_io_read(&completion[..len]) {
+                        error!(
+                            "Failed to complete WHPX I/O read emulation on vCPU {}: {e}",
+                            self.id
+                        );
                         self.whpx_vcpu.clear_pending_io();
                         VcpuEmulation::Stopped
+                    } else {
+                        VcpuEmulation::Handled
                     }
                 }
                 VcpuExit::IoPortWrite(port, data) => {
-                    let write_ok = self.io_bus.write(self.id as u64, port as u64, data);
-                    if write_ok {
-                        let _ = data;
-                        if let Err(e) = self.whpx_vcpu.complete_io_write() {
-                            error!(
-                                "Failed to complete WHPX I/O write emulation on vCPU {}: {e}",
-                                self.id
-                            );
-                            self.whpx_vcpu.clear_pending_io();
-                            VcpuEmulation::Stopped
-                        } else {
-                            VcpuEmulation::Handled
-                        }
-                    } else {
+                    self.io_bus.write(self.id as u64, port as u64, data);
+                    let _ = data;
+                    if let Err(e) = self.whpx_vcpu.complete_io_write() {
+                        error!(
+                            "Failed to complete WHPX I/O write emulation on vCPU {}: {e}",
+                            self.id
+                        );
                         self.whpx_vcpu.clear_pending_io();
                         VcpuEmulation::Stopped
+                    } else {
+                        VcpuEmulation::Handled
                     }
                 }
                 VcpuExit::Halted => {
@@ -1691,5 +1598,351 @@ mod tests {
         use devices::legacy::ReadableFd;
         let fd = reader.as_raw_fd();
         assert!(fd > 0, "EventFd synthetic fd should be > 0");
+    }
+
+    /// Verify `Vsock::new()` creates a device with the correct type, features,
+    /// and CID config space.  Also checks Named Pipe port mapping conversion.
+    /// Does NOT require WHPX — runs in the regular PR CI job.
+    #[test]
+    fn test_whpx_vsock_init_smoke() {
+        use devices::virtio::{TsiFlags, VirtioDevice, Vsock};
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        const GUEST_CID: u64 = 3;
+
+        // No port maps — simplest creation.
+        let vsock = Vsock::new(GUEST_CID, None, None, TsiFlags::empty())
+            .expect("Vsock::new failed");
+
+        // TYPE_VSOCK = 19
+        assert_eq!(vsock.device_type(), 19, "expected TYPE_VSOCK=19");
+
+        // VIRTIO_F_VERSION_1 (bit 32) must be set.
+        let features = vsock.avail_features();
+        assert_ne!(features & (1u64 << 32), 0, "VIRTIO_F_VERSION_1 not set");
+
+        // Config space at offset 0 encodes the guest CID as little-endian u64.
+        let mut cfg = [0u8; 8];
+        vsock.read_config(0, &mut cfg);
+        let cid_from_config = u64::from_le_bytes(cfg);
+        assert_eq!(cid_from_config, GUEST_CID, "CID mismatch in config space");
+
+        // Verify Named Pipe name conversion: PathBuf("myservice") → pipe name "myservice".
+        let mut port_map: HashMap<u32, (PathBuf, bool)> = HashMap::new();
+        port_map.insert(1234, (PathBuf::from("myservice"), false));
+        let vsock2 = Vsock::new(GUEST_CID, None, Some(port_map), TsiFlags::empty())
+            .expect("Vsock::new with port_map failed");
+        // The device should accept the port map without error; cid is still correct.
+        let mut cfg2 = [0u8; 8];
+        vsock2.read_config(0, &mut cfg2);
+        assert_eq!(u64::from_le_bytes(cfg2), GUEST_CID, "CID mismatch in vsock2");
+    }
+
+    /// Verify that `Vsock` processes a TX queue entry (a CONNECT packet) end-to-end:
+    /// the descriptor chain is consumed and the used ring index advances to 1,
+    /// even when no Named Pipe server is available (connect fails gracefully).
+    /// Does NOT require WHPX — runs in the regular PR CI job.
+    #[test]
+    fn test_whpx_vsock_tx_smoke() {
+        use devices::legacy::DummyIrqChip;
+        use devices::virtio::{InterruptTransport, TsiFlags, VirtioDevice, Vsock};
+        use polly::event_manager::EventManager;
+        use std::sync::{Arc, Mutex};
+        use vm_memory::{GuestAddress, GuestMemoryMmap};
+
+        // ── 1. Guest memory ───────────────────────────────────────────────
+        const MEM_SIZE: usize = 4 << 20;
+        let mem: GuestMemoryMmap =
+            GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MEM_SIZE)]).unwrap();
+
+        // ── 2. Queue layout (TX = queue 1) ────────────────────────────────
+        // One descriptor: a 44-byte virtio-vsock header (CONNECT op, no data).
+        const DESC_TABLE: u64 = 0x0000;
+        const AVAIL_RING: u64 = 0x0100;
+        const USED_RING: u64 = 0x0200;
+        const HDR_ADDR: u64 = 0x1000;
+
+        // virtio-vsock header (44 bytes): src_cid=3, dst_cid=2, src_port=5000,
+        // dst_port=9999, len=0, type=1 (STREAM), op=1 (CONNECT), flags=0,
+        // buf_alloc=0, fwd_cnt=0.
+        let mut hdr = [0u8; 44];
+        hdr[0..8].copy_from_slice(&3u64.to_le_bytes());     // src_cid
+        hdr[8..16].copy_from_slice(&2u64.to_le_bytes());    // dst_cid (host)
+        hdr[16..20].copy_from_slice(&5000u32.to_le_bytes()); // src_port
+        hdr[20..24].copy_from_slice(&9999u32.to_le_bytes()); // dst_port
+        hdr[24..28].copy_from_slice(&0u32.to_le_bytes());   // len
+        hdr[28..30].copy_from_slice(&1u16.to_le_bytes());   // type = STREAM
+        hdr[30..32].copy_from_slice(&1u16.to_le_bytes());   // op = CONNECT
+        mem.write_slice(&hdr, GuestAddress(HDR_ADDR)).unwrap();
+
+        // desc[0]: addr=HDR_ADDR, len=44, flags=0 (read-only), next=0
+        let mut desc_bytes = [0u8; 16];
+        desc_bytes[0..8].copy_from_slice(&HDR_ADDR.to_le_bytes());
+        desc_bytes[8..12].copy_from_slice(&44u32.to_le_bytes());
+        mem.write_slice(&desc_bytes, GuestAddress(DESC_TABLE)).unwrap();
+
+        // Avail ring for TX queue: flags=0, idx=1, ring[0]=0
+        mem.write_slice(&0u16.to_le_bytes(), GuestAddress(AVAIL_RING)).unwrap();
+        mem.write_slice(&1u16.to_le_bytes(), GuestAddress(AVAIL_RING + 2)).unwrap();
+        mem.write_slice(&0u16.to_le_bytes(), GuestAddress(AVAIL_RING + 4)).unwrap();
+
+        // Used ring: idx=0 initially.
+        mem.write_slice(&0u16.to_le_bytes(), GuestAddress(USED_RING)).unwrap();
+        mem.write_slice(&0u16.to_le_bytes(), GuestAddress(USED_RING + 2)).unwrap();
+
+        // ── 3. Create and configure the device ───────────────────────────
+        let vsock = Vsock::new(3, None, None, TsiFlags::empty())
+            .expect("Vsock::new failed");
+        let vsock = Arc::new(Mutex::new(vsock));
+
+        // ── 4. Wire up EventManager and activate ─────────────────────────
+        let mut evmgr = EventManager::new().unwrap();
+        evmgr.add_subscriber(vsock.clone()).unwrap();
+
+        let dummy_irq: devices::legacy::IrqChip = DummyIrqChip::new().into();
+        let interrupt =
+            InterruptTransport::new(dummy_irq, "vsock-test".into()).unwrap();
+
+        {
+            let mut dev = vsock.lock().unwrap();
+            // Configure queue 1 (TX) with our layout.
+            dev.queues_mut()[1].size = 256;
+            dev.queues_mut()[1].ready = true;
+            dev.queues_mut()[1].desc_table = GuestAddress(DESC_TABLE);
+            dev.queues_mut()[1].avail_ring = GuestAddress(AVAIL_RING);
+            dev.queues_mut()[1].used_ring = GuestAddress(USED_RING);
+
+            dev.activate(mem.clone(), interrupt).unwrap();
+        }
+
+        // Pass 1: processes activate_evt → registers queue event fds.
+        let _ = evmgr.run_with_timeout(200);
+
+        // Signal TX queue event (queue index 1).
+        {
+            let dev = vsock.lock().unwrap();
+            dev.queue_events()[1].write(1).unwrap();
+        }
+
+        // Pass 2: processes TX queue event → consumes the CONNECT packet.
+        let _ = evmgr.run_with_timeout(200);
+
+        // Used ring idx should advance to 1 (packet consumed).
+        let mut used_idx = [0u8; 2];
+        mem.read_slice(&mut used_idx, GuestAddress(USED_RING + 2)).unwrap();
+        assert_eq!(
+            u16::from_le_bytes(used_idx),
+            1,
+            "expected used ring idx=1 after vsock TX processing"
+        );
+    }
+
+    // ── Real Linux kernel end-to-end boot test ─────────────────────────────
+
+    /// End-to-end real Linux kernel boot test.
+    ///
+    /// Boots an x86_64 ELF vmlinux via WHPX, captures COM1 serial output,
+    /// and asserts the Linux version banner ("Linux version") appears within
+    /// 60 seconds.
+    ///
+    /// Prerequisites:
+    ///   - WHPX/Hyper-V enabled on the host
+    ///   - `TEST_VMLINUX_PATH` env var pointing to an x86_64 ELF vmlinux
+    ///     (a raw `vmlinux` ELF, NOT a compressed bzImage)
+    ///
+    /// To obtain a suitable kernel, run:
+    ///   tests/windows/download_test_kernel.ps1
+    #[test]
+    #[ignore = "Requires WHPX and TEST_VMLINUX_PATH env var pointing to an x86_64 ELF vmlinux"]
+    fn test_whpx_real_kernel_e2e() {
+        use std::sync::{Arc, Mutex};
+
+        use devices::{Bus, BusDevice};
+        use linux_loader::loader::{Elf, KernelLoader};
+
+        // ── 1. Kernel path from env var — skip gracefully if not set ───────
+        let vmlinux_path = match std::env::var("TEST_VMLINUX_PATH") {
+            Ok(p) => std::path::PathBuf::from(p),
+            Err(_) => {
+                eprintln!(
+                    "[SKIP] TEST_VMLINUX_PATH not set; \
+                     point it to an x86_64 ELF vmlinux to run this test.\n\
+                     Run tests/windows/download_test_kernel.ps1 to fetch one."
+                );
+                return;
+            }
+        };
+
+        // ── 2. Shared COM1 capture buffer ──────────────────────────────────
+        // The vCPU thread writes captured bytes via the Bus; the main thread
+        // polls the buffer for the Linux version banner.
+        let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+
+        struct Com1Capture {
+            buf: Arc<Mutex<Vec<u8>>>,
+        }
+        impl BusDevice for Com1Capture {
+            // Capture characters written to the UART transmit register (offset 0).
+            fn write(&mut self, _vcpuid: u64, offset: u64, data: &[u8]) {
+                if offset == 0 {
+                    self.buf.lock().unwrap().extend_from_slice(data);
+                }
+            }
+            // Emulate UART LSR (offset 5): always report TX ready (THRE | TEMT).
+            // Without this the kernel's earlycon busy-waits on bit 5 and stalls.
+            fn read(&mut self, _vcpuid: u64, offset: u64, data: &mut [u8]) {
+                if offset == 5 && !data.is_empty() {
+                    data[0] = 0x60; // UART_LSR_THRE | UART_LSR_TEMT
+                }
+            }
+        }
+
+        // ── 3. Create 256 MB guest memory ─────────────────────────────────
+        const MEM_SIZE: usize = 256 << 20;
+        let (arch_mem_info, arch_mem_regions) =
+            arch::arch_memory_regions(MEM_SIZE, None, 0, 0, None);
+        let guest_mem = GuestMemoryMmap::from_ranges(&arch_mem_regions).unwrap();
+
+        // ── 4. Load the kernel ELF ────────────────────────────────────────
+        // linux_loader resolves the virtual→physical mapping and returns the
+        // physical GPA entry point via kernel_load.
+        let mut kernel_file = std::fs::File::open(&vmlinux_path)
+            .unwrap_or_else(|e| panic!("Cannot open {:?}: {}", vmlinux_path, e));
+        let load_result = Elf::load(&guest_mem, None, &mut kernel_file, None).expect(
+            "ELF load failed — ensure TEST_VMLINUX_PATH is a raw ELF vmlinux, not a bzImage",
+        );
+        let kernel_entry = load_result.kernel_load;
+        eprintln!("[e2e] Kernel entry GPA: 0x{:x}", kernel_entry.0);
+
+        // ── 5. Write kernel command line ──────────────────────────────────
+        // earlycon=uart8250,io,0x3f8 wires the very first printk — including
+        // the "Linux version" banner — directly to the UART before the full
+        // 8250 driver initialises, giving us immediate COM1 output.
+        let cmdline =
+            b"console=ttyS0,115200n8 earlycon=uart8250,io,0x3f8 reboot=t panic=1 nokaslr\0";
+        guest_mem
+            .write_slice(cmdline, GuestAddress(arch::x86_64::layout::CMDLINE_START))
+            .unwrap();
+
+        // ── 6. Populate the Linux x86_64 zero page (boot_params @ 0x7000) ─
+        arch::configure_system(
+            &guest_mem,
+            &arch_mem_info,
+            GuestAddress(arch::x86_64::layout::CMDLINE_START),
+            cmdline.len(),
+            &None, // no initrd
+            1,     // single vCPU
+        )
+        .unwrap();
+
+        // ── 7. Create WHPX partition and map guest memory ─────────────────
+        let mut vm = Vm::new(false, 1).unwrap();
+        vm.memory_init(&guest_mem).unwrap();
+
+        // ── 8. IO bus: COM1 capture device at ports 0x3F8–0x3FF ──────────
+        let mut io_bus = Bus::new();
+        io_bus
+            .insert(
+                Arc::new(Mutex::new(Com1Capture {
+                    buf: captured.clone(),
+                })),
+                0x3F8,
+                0x8,
+            )
+            .unwrap();
+
+        // ── 9. Create vCPU ────────────────────────────────────────────────
+        let exit_evt =
+            utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
+        let vcpu = Vcpu::new(
+            0,
+            vm.partition(),
+            guest_mem.clone(),
+            kernel_entry,
+            io_bus,
+            exit_evt,
+        )
+        .unwrap();
+
+        // ── 10. Launch vCPU thread ────────────────────────────────────────
+        // start_threaded() calls configure_x86_64() (RIP=kernel_entry,
+        // RSI=0x7000 zero page) then drives the WHPX run loop.
+        let handle = vcpu.start_threaded().unwrap();
+
+        // ── 11. Poll until vCPU exits or 90 s deadline ───────────────────
+        // Do NOT early-return on banner discovery: Vm must outlive the vCPU
+        // thread to avoid WHvDeletePartition racing with WHvRunVirtualProcessor.
+        // Instead, track the banner flag and keep looping until the thread
+        // exits naturally (kernel panic) or we cancel it below.
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(90);
+        let mut found_banner = false;
+        let mut last_len = 0usize;
+        let mut vcpu_exited = false;
+        loop {
+            // Non-blocking check for vCPU thread exit.
+            if let Ok(resp) = handle.response_receiver().try_recv() {
+                eprintln!("[e2e] vCPU thread exited: {:?}", resp);
+                vcpu_exited = true;
+                break;
+            }
+
+            // Stream newly captured bytes to stderr for live progress.
+            let snapshot = captured.lock().unwrap().clone();
+            if snapshot.len() > last_len {
+                eprint!("{}", String::from_utf8_lossy(&snapshot[last_len..]));
+                last_len = snapshot.len();
+            }
+
+            if !found_banner
+                && String::from_utf8_lossy(&snapshot).contains("Linux version")
+            {
+                found_banner = true;
+                eprintln!(
+                    "\n[e2e] 'Linux version' found — waiting for vCPU to exit..."
+                );
+            }
+
+            if std::time::Instant::now() >= deadline {
+                eprintln!("[e2e] deadline reached");
+                break;
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        // ── 12. Cancel vCPU if it has not yet exited ──────────────────────
+        // WHvCancelRunVirtualProcessor interrupts any in-flight
+        // WHvRunVirtualProcessor, causing it to return WHvRunVpExitReasonCanceled
+        // → VcpuExit::Shutdown → VcpuEmulation::Stopped → thread exits.
+        // This ensures Vm::drop (WHvDeletePartition) does not race the thread.
+        if !vcpu_exited {
+            unsafe {
+                let _ = windows::Win32::System::Hypervisor::WHvCancelRunVirtualProcessor(
+                    vm.partition(),
+                    0, // vCPU index
+                    0, // flags (reserved, must be 0)
+                );
+            }
+            let _ = handle
+                .response_receiver()
+                .recv_timeout(std::time::Duration::from_secs(5));
+        }
+
+        // ── 13. Assert the Linux version banner appeared ───────────────────
+        let snapshot = captured.lock().unwrap().clone();
+        let text = String::from_utf8_lossy(&snapshot);
+        eprintln!(
+            "[e2e] Serial output ({} bytes total):\n{}",
+            snapshot.len(),
+            &text[..text.len().min(5000)]
+        );
+        assert!(
+            found_banner,
+            "[e2e] FAIL: 'Linux version' not found in serial output.\nGot:\n{}",
+            &text[..text.len().min(2000)]
+        );
+        eprintln!("[e2e] PASS");
     }
 }

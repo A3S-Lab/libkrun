@@ -36,3 +36,6 @@ pub mod net;
 /// Wrapper for configuring the Windows virtio-net devices.
 #[cfg(target_os = "windows")]
 pub mod net_windows;
+/// Wrapper for configuring the Windows virtio-blk devices.
+#[cfg(target_os = "windows")]
+pub mod block_windows;
