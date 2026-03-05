@@ -47,9 +47,9 @@ const VSOCK_TYPE_STREAM: u16 = 1;
 const VSOCK_TYPE_DGRAM: u16 = 3;
 
 const DEFAULT_BUF_ALLOC: u32 = 256 * 1024;
-const MAX_PENDING_RX: usize = 1024;
-const MAX_PENDING_PER_PORT: usize = 128;
-const MAX_STREAMS: usize = 1024;
+const MAX_PENDING_RX: usize = 4096; // Increased from 1024
+const MAX_PENDING_PER_PORT: usize = 512; // Increased from 128
+const MAX_STREAMS: usize = 4096; // Increased from 1024
 const CONNECT_TIMEOUT_MS: u64 = 100;
 const MAX_RW_PAYLOAD: usize = 64 * 1024;
 const MAX_READ_BURST_PER_STREAM: usize = 8;
@@ -398,17 +398,25 @@ impl Vsock {
             .unwrap_or(0);
         if per_port_pending >= MAX_PENDING_PER_PORT {
             warn!(
-                "vsock(windows): pending RX per-port full (port={}, max={}), dropping response op={}",
+                "vsock(windows): pending RX per-port full (port={}, max={}), sending RST for op={}",
                 guest_port, MAX_PENDING_PER_PORT, op
             );
+            // Send RST to signal backpressure to the peer
+            if op != VSOCK_OP_RST && op != VSOCK_OP_SHUTDOWN {
+                self.queue_rst(&hdr);
+            }
             return;
         }
 
         if self.pending_rx.len() >= MAX_PENDING_RX {
             warn!(
-                "vsock(windows): pending RX queue full ({}), dropping response op={}",
+                "vsock(windows): pending RX queue full ({}), sending RST for op={}",
                 MAX_PENDING_RX, op
             );
+            // Send RST to signal backpressure to the peer
+            if op != VSOCK_OP_RST && op != VSOCK_OP_SHUTDOWN {
+                self.queue_rst(&hdr);
+            }
             return;
         }
         self.pending_rx.push_back(PendingRx { hdr, payload });

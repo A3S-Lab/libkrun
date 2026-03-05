@@ -3,6 +3,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 
 use bitflags::bitflags;
+use log::error;
 use windows_sys::Win32::Foundation::{HANDLE, WAIT_FAILED, WAIT_TIMEOUT};
 use windows_sys::Win32::System::Threading::{WaitForMultipleObjects, INFINITE};
 
@@ -159,9 +160,15 @@ impl Epoll {
         }
 
         if handles.len() > 64 {
+            error!(
+                "epoll(windows): Too many registered fds ({} > 64). \
+                 Windows WaitForMultipleObjects has a hard limit of 64 handles. \
+                 Consider reducing the number of concurrent devices or connections.",
+                handles.len()
+            );
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Too many registered fds (max 64)",
+                format!("Too many registered fds ({} > 64)", handles.len()),
             ));
         }
 
