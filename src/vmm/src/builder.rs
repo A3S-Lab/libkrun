@@ -1183,10 +1183,7 @@ pub fn build_microvm(
         console_id += 1;
     }
 
-    #[cfg(all(
-        not(any(feature = "tee", feature = "nitro")),
-        not(target_os = "windows")
-    ))]
+    #[cfg(not(any(feature = "tee", feature = "nitro")))]
     let export_table: Option<ExportTable> = if cfg!(feature = "gpu") {
         Some(Default::default())
     } else {

@@ -94,3 +94,17 @@ impl FileReadWriteAtVolatile for File {
         FileReadWriteVolatile::write_volatile(&mut cloned, slice)
     }
 }
+
+impl FileReadWriteAtVolatile for &File {
+    fn read_at_volatile(&self, slice: VolatileSlice, offset: u64) -> Result<usize> {
+        let mut cloned = self.try_clone()?;
+        cloned.seek(SeekFrom::Start(offset))?;
+        FileReadWriteVolatile::read_volatile(&mut cloned, slice)
+    }
+
+    fn write_at_volatile(&self, slice: VolatileSlice, offset: u64) -> Result<usize> {
+        let mut cloned = self.try_clone()?;
+        cloned.seek(SeekFrom::Start(offset))?;
+        FileReadWriteVolatile::write_volatile(&mut cloned, slice)
+    }
+}

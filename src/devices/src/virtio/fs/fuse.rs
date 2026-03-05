@@ -668,6 +668,22 @@ impl From<bindings::statvfs64> for Kstatfs {
         }
     }
 }
+#[cfg(target_os = "windows")]
+impl From<bindings::statvfs64> for Kstatfs {
+    fn from(st: bindings::statvfs64) -> Self {
+        Kstatfs {
+            blocks: st.f_blocks,
+            bfree: st.f_bfree,
+            bavail: st.f_bavail,
+            files: st.f_files,
+            ffree: st.f_ffree,
+            bsize: st.f_bsize as u32,
+            namelen: st.f_namemax as u32,
+            frsize: st.f_frsize as u32,
+            ..Default::default()
+        }
+    }
+}
 
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
