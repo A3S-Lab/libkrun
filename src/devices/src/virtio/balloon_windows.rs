@@ -104,6 +104,53 @@ impl Balloon {
         have_used
     }
 
+    /// Process page-hinting queue: guest hints that pages can be reclaimed.
+    /// Unlike inflate, this is a soft hint - pages remain accessible but can be
+    /// reclaimed by the OS if needed. Uses MEM_RESET for lazy reclamation.
+    fn process_phq(&mut self) -> bool {
+        let DeviceState::Activated(ref mem, _) = self.state else {
+            return false;
+        };
+
+        let mut have_used = false;
+
+        while let Some(head) = self.queues[PHQ_INDEX].pop(mem) {
+            let index = head.index;
+
+            for desc in head.into_iter() {
+                // Each PFN is 4 bytes (u32)
+                let pfn_count = (desc.len as usize) / 4;
+                let mut pfn_bytes = vec![0u8; pfn_count * 4];
+
+                if mem.read_slice(&mut pfn_bytes, desc.addr).is_ok() {
+                    // Convert bytes to u32 PFNs (little-endian)
+                    for chunk in pfn_bytes.chunks_exact(4) {
+                        let pfn = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                        let gpa = GuestAddress((pfn as u64) << 12); // PFN to GPA (4KB pages)
+                        if let Ok(host_addr) = mem.get_host_address(gpa) {
+                            // Use MEM_RESET for soft hinting - pages remain valid but can be reclaimed
+                            unsafe {
+                                let _ = VirtualAlloc(
+                                    Some(host_addr as *const _),
+                                    4096,
+                                    MEM_RESET,
+                                    PAGE_READWRITE,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            have_used = true;
+            if let Err(e) = self.queues[PHQ_INDEX].add_used(mem, index, 0) {
+                error!("balloon(windows): failed to add used (PHQ): {e:?}");
+            }
+        }
+
+        have_used
+    }
+
     /// Process inflate queue: guest is giving memory back to the host.
     /// Each descriptor contains an array of u32 page frame numbers (PFNs).
     fn process_ifq(&mut self) -> bool {
@@ -306,7 +353,8 @@ impl Subscriber for Balloon {
                     debug!("balloon(windows): stats queue event (ignored)");
                 }
                 PHQ_INDEX => {
-                    debug!("balloon(windows): page-hinting queue event (ignored)");
+                    debug!("balloon(windows): page-hinting queue event");
+                    raise_irq |= self.process_phq();
                 }
                 FRQ_INDEX => {
                     debug!("balloon(windows): free-page reporting queue event");
