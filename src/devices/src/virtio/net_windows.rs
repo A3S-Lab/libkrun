@@ -55,7 +55,9 @@ const VIRTIO_NET_HDR_F_DATA_VALID: u8 = 2;
 
 // virtio-net GSO types
 const VIRTIO_NET_HDR_GSO_NONE: u8 = 0;
+#[allow(dead_code)] // Reserved for future TSO implementation
 const VIRTIO_NET_HDR_GSO_TCPV4: u8 = 1;
+#[allow(dead_code)] // Reserved for future TSO implementation
 const VIRTIO_NET_HDR_GSO_TCPV6: u8 = 4;
 
 // ── virtio-net header ─────────────────────────────────────────────────────────

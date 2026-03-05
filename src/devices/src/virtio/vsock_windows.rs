@@ -55,8 +55,9 @@ const MAX_RW_PAYLOAD: usize = 64 * 1024;
 const MAX_READ_BURST_PER_STREAM: usize = 8;
 
 const AVAIL_FEATURES: u64 = (1 << VIRTIO_F_VERSION_1 as u64)
-    | (1 << VIRTIO_F_IN_ORDER as u64)
-    | (1 << VIRTIO_VSOCK_F_DGRAM as u64);
+    | (1 << VIRTIO_F_IN_ORDER as u64);
+    // Note: VIRTIO_VSOCK_F_DGRAM is not yet implemented
+    // | (1 << VIRTIO_VSOCK_F_DGRAM as u64);
 
 bitflags! {
     pub struct TsiFlags: u32 {
