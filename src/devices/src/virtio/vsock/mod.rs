@@ -18,6 +18,8 @@ mod reaper;
 mod timesync;
 mod tsi_dgram;
 mod tsi_stream;
+#[cfg(target_os = "windows")]
+pub mod tsi_windows;
 mod unix;
 
 pub use self::defs::uapi::VIRTIO_ID_VSOCK as TYPE_VSOCK;
