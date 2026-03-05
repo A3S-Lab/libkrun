@@ -2447,15 +2447,23 @@ fn create_explicit_ports(
     let mut ports = Vec::with_capacity(port_configs.len());
     for port_cfg in port_configs {
         let port_desc = match port_cfg {
-            PortConfig::Tty { name, .. } => PortDescription {
+            PortConfig::Tty { name, tty_fd } => PortDescription {
                 name: name.clone().into(),
-                input: port_io::input_to_raw_fd_dup(0)
-                    .ok()
-                    .map(|i| Arc::new(Mutex::new(i))),
-                output: Some(Arc::new(Mutex::new(
-                    port_io::output_to_raw_fd_dup(1)
-                        .unwrap_or_else(|_| port_io::output_to_log_as_err()),
-                ))),
+                input: if *tty_fd >= 0 {
+                    port_io::input_to_raw_fd_dup(*tty_fd)
+                        .ok()
+                        .map(|i| Arc::new(Mutex::new(i)))
+                } else {
+                    None
+                },
+                output: if *tty_fd >= 0 {
+                    Some(Arc::new(Mutex::new(
+                        port_io::output_to_raw_fd_dup(*tty_fd)
+                            .unwrap_or_else(|_| port_io::output_to_log_as_err()),
+                    )))
+                } else {
+                    None
+                },
                 terminal: Some(port_io::term_fixed_size(0, 0)),
             },
             PortConfig::InOut {
