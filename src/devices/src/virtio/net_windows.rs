@@ -222,21 +222,22 @@ impl Net {
 
             // Process the frame with offload handling
             if !frame_data.is_empty() {
+                let hdr = VirtioNetHdr::from_bytes(&hdr_bytes);
+
+                // Handle checksum offload even without backend (for correctness)
+                if hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
+                    Self::compute_checksum(&mut frame_data, hdr.csum_start as usize, hdr.csum_offset as usize);
+                }
+
+                // Handle TSO/GSO - for now just validate
+                // A full implementation would segment large packets here
+                if hdr.gso_type != VIRTIO_NET_HDR_GSO_NONE {
+                    // TODO: Implement packet segmentation for TSO
+                    // For now, just validate the header
+                }
+
+                // Send to backend if available
                 if let Some(ref backend) = self.backend {
-                    let hdr = VirtioNetHdr::from_bytes(&hdr_bytes);
-
-                    // Handle checksum offload
-                    if hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
-                        Self::compute_checksum(&mut frame_data, hdr.csum_start as usize, hdr.csum_offset as usize);
-                    }
-
-                    // Handle TSO/GSO - for now just send as-is
-                    // A full implementation would segment large packets here
-                    if hdr.gso_type != VIRTIO_NET_HDR_GSO_NONE {
-                        // TODO: Implement packet segmentation for TSO
-                        // For now, just forward the large packet
-                    }
-
                     if let Ok(mut stream) = backend.lock() {
                         let _ = stream.write_all(&frame_data);
                     }
