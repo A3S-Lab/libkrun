@@ -11,6 +11,23 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::sync::Mutex;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::io::AsRawHandle;
+#[cfg(target_os = "windows")]
+use windows::Win32::System::IO::DeviceIoControl;
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::BOOLEAN;
+
+#[cfg(target_os = "windows")]
+const FSCTL_SET_SPARSE: u32 = 0x000900c4; // CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 49, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+#[allow(non_snake_case)]
+struct FILE_SET_SPARSE_BUFFER {
+    SetSparse: BOOLEAN,
+}
+
 use polly::event_manager::{EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::{EventFd, EFD_NONBLOCK};
@@ -79,6 +96,15 @@ impl Block {
         let disk_size = file.metadata()?.len();
         let nsectors = disk_size / SECTOR_SIZE;
 
+        // Enable sparse file support on Windows for better disk space efficiency
+        #[cfg(target_os = "windows")]
+        if !read_only {
+            if let Err(e) = Self::set_sparse(&file) {
+                log::warn!("block(windows): Failed to set sparse file attribute: {}", e);
+                // Continue anyway - sparse files are an optimization, not required
+            }
+        }
+
         Ok(Self {
             id: id.into(),
             disk: Mutex::new(file),
@@ -90,6 +116,37 @@ impl Block {
             state: DeviceState::Inactive,
             acked_features: 0,
         })
+    }
+
+    /// Set the sparse file attribute on Windows.
+    /// This allows the filesystem to deallocate zero-filled regions.
+    #[cfg(target_os = "windows")]
+    fn set_sparse(file: &File) -> io::Result<()> {
+        use windows::Win32::Foundation::HANDLE;
+
+        let handle = HANDLE(file.as_raw_handle() as *mut _);
+
+        // Set the sparse file attribute using FSCTL_SET_SPARSE
+        let mut bytes_returned = 0u32;
+        let set_sparse = FILE_SET_SPARSE_BUFFER {
+            SetSparse: true.into(),
+        };
+
+        unsafe {
+            DeviceIoControl(
+                handle,
+                FSCTL_SET_SPARSE,
+                Some(&set_sparse as *const _ as *const _),
+                std::mem::size_of::<FILE_SET_SPARSE_BUFFER>() as u32,
+                None,
+                0,
+                Some(&mut bytes_returned),
+                None,
+            )
+        }
+        .map_err(|e| io::Error::other(format!("FSCTL_SET_SPARSE failed: {}", e)))?;
+
+        Ok(())
     }
 
     /// Returns the device id used for registration in the MMIO manager.
