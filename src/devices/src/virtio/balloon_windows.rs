@@ -69,13 +69,21 @@ impl Balloon {
 
             for desc in head.into_iter() {
                 if let Ok(host_addr) = mem.get_host_address(desc.addr) {
-                    // Use DiscardVirtualMemory (Windows 8.1+) to release pages back to host
+                    // Use DiscardVirtualMemory (Windows 8.1+) to release pages back to host.
+                    // This API tells the OS that the memory contents are no longer needed,
+                    // allowing the OS to reclaim the physical pages. The virtual address
+                    // range remains valid but will be zero-filled on next access.
+                    //
+                    // Fallback: If DiscardVirtualMemory fails (e.g., on Windows 7 or older),
+                    // use VirtualAlloc with MEM_RESET. This is less efficient as it only
+                    // marks pages as "can be discarded" rather than immediately releasing them,
+                    // but provides compatible behavior on older Windows versions.
                     unsafe {
                         let slice = std::slice::from_raw_parts_mut(host_addr, desc.len as usize);
                         let result = DiscardVirtualMemory(slice);
 
                         if result == 0 {
-                            // Fallback to VirtualAlloc with MEM_RESET
+                            // Fallback to VirtualAlloc with MEM_RESET for Windows 7 compatibility
                             let _ = VirtualAlloc(
                                 Some(host_addr as *const _),
                                 desc.len as usize,
@@ -119,12 +127,13 @@ impl Balloon {
                         let pfn = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                         let gpa = GuestAddress((pfn as u64) << 12); // PFN to GPA (4KB pages)
                         if let Ok(host_addr) = mem.get_host_address(gpa) {
+                            // Same DiscardVirtualMemory + MEM_RESET fallback as deflate queue
                             unsafe {
                                 let slice = std::slice::from_raw_parts_mut(host_addr, 4096);
                                 let result = DiscardVirtualMemory(slice);
 
                                 if result == 0 {
-                                    // Fallback to VirtualAlloc with MEM_RESET
+                                    // Fallback to VirtualAlloc with MEM_RESET for Windows 7 compatibility
                                     let _ = VirtualAlloc(
                                         Some(host_addr as *const _),
                                         4096,
