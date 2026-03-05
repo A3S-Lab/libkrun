@@ -2,6 +2,7 @@
 // Phase 1: Core data structures and basic read-only operations (completed)
 // Phase 2: File read operations (completed)
 // Phase 3: Write operations (completed)
+// Phase 4: Advanced features (completed)
 
 use std::collections::BTreeMap;
 use std::ffi::CStr;
@@ -891,56 +892,177 @@ impl FileSystem for PassthroughFs {
     fn symlink(
         &self,
         _ctx: Context,
-        _linkname: &CStr,
-        _parent: Self::Inode,
-        _name: &CStr,
+        linkname: &CStr,
+        parent: Self::Inode,
+        name: &CStr,
         _extensions: Extensions,
     ) -> io::Result<Entry> {
-        // TODO: Implement symlink
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+        let parent_path = self.get_path(parent)?;
+        let name_str = name.to_str().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let link_path = parent_path.join(name_str);
+
+        let target_str = linkname.to_str().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let target_path = Path::new(target_str);
+
+        // Create symbolic link using std::os::windows::fs::symlink_file or symlink_dir
+        // We need to determine if target is a file or directory
+        use std::os::windows::fs::{symlink_file, symlink_dir};
+
+        // Try to determine if target is a directory
+        let is_dir = if target_path.is_absolute() {
+            target_path.is_dir()
+        } else {
+            parent_path.join(target_path).is_dir()
+        };
+
+        if is_dir {
+            symlink_dir(target_path, &link_path)?;
+        } else {
+            symlink_file(target_path, &link_path)?;
+        }
+
+        // Get or create inode for the symlink
+        let inode = self.get_or_create_inode(&link_path)?;
+
+        // Get metadata
+        let metadata = fs::symlink_metadata(&link_path)?;
+        let st = self.metadata_to_stat(&metadata, inode);
+
+        Ok(Entry {
+            inode,
+            generation: 0,
+            attr: st,
+            attr_flags: 0,
+            attr_timeout: self.cfg.attr_timeout,
+            entry_timeout: self.cfg.entry_timeout,
+        })
     }
 
-    fn readlink(&self, _ctx: Context, _inode: Self::Inode) -> io::Result<Vec<u8>> {
-        // TODO: Implement readlink
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+    fn readlink(&self, _ctx: Context, inode: Self::Inode) -> io::Result<Vec<u8>> {
+        let path = self.get_path(inode)?;
+
+        // Read the symlink target
+        let target = fs::read_link(&path)?;
+
+        // Convert to bytes
+        let target_str = target.to_string_lossy();
+        Ok(target_str.as_bytes().to_vec())
     }
 
     fn flush(
         &self,
         _ctx: Context,
         _inode: Self::Inode,
-        _handle: Self::Handle,
+        handle: Self::Handle,
         _lock_owner: u64,
     ) -> io::Result<()> {
-        // TODO: Implement flush
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+        // Get the path from the handle
+        let handles = self.handles.read().unwrap();
+        let handle_data = handles
+            .get(&handle)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))?;
+
+        let path = &handle_data.path;
+
+        // Open the file and sync it
+        use std::fs::File;
+        let file = File::open(path)?;
+        file.sync_all()?;
+
+        Ok(())
     }
 
     fn fsync(
         &self,
         _ctx: Context,
         _inode: Self::Inode,
-        _datasync: bool,
-        _handle: Self::Handle,
+        datasync: bool,
+        handle: Self::Handle,
     ) -> io::Result<()> {
-        // TODO: Implement fsync
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+        // Get the path from the handle
+        let handles = self.handles.read().unwrap();
+        let handle_data = handles
+            .get(&handle)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))?;
+
+        let path = &handle_data.path;
+
+        // Open the file and sync it
+        use std::fs::File;
+        let file = File::open(path)?;
+
+        if datasync {
+            // Sync only data, not metadata
+            file.sync_data()?;
+        } else {
+            // Sync both data and metadata
+            file.sync_all()?;
+        }
+
+        Ok(())
     }
 
     fn fsyncdir(
         &self,
         _ctx: Context,
-        _inode: Self::Inode,
+        inode: Self::Inode,
         _datasync: bool,
         _handle: Self::Handle,
     ) -> io::Result<()> {
-        // TODO: Implement fsyncdir
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+        // Windows doesn't require explicit directory sync
+        // Directory metadata is updated automatically
+        // Just verify the directory exists
+        let path = self.get_path(inode)?;
+        let metadata = fs::metadata(&path)?;
+
+        if !metadata.is_dir() {
+            return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
+        }
+
+        Ok(())
     }
 
-    fn access(&self, _ctx: Context, _inode: Self::Inode, _mask: u32) -> io::Result<()> {
-        // TODO: Implement access
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+    fn access(&self, _ctx: Context, inode: Self::Inode, mask: u32) -> io::Result<()> {
+        let path = self.get_path(inode)?;
+
+        // Check if file exists
+        let metadata = fs::metadata(&path)?;
+
+        // Windows doesn't have POSIX permissions, so we do basic checks
+        // R_OK (4), W_OK (2), X_OK (1), F_OK (0)
+        const R_OK: u32 = 4;
+        const W_OK: u32 = 2;
+        const X_OK: u32 = 1;
+
+        // Check read access
+        if mask & R_OK != 0 {
+            // On Windows, if we can get metadata, we can read
+            // More sophisticated check would use Windows ACLs
+        }
+
+        // Check write access
+        if mask & W_OK != 0 {
+            if metadata.permissions().readonly() {
+                return Err(io::Error::from_raw_os_error(libc::EACCES));
+            }
+        }
+
+        // Check execute access
+        if mask & X_OK != 0 {
+            // On Windows, check if it's a directory or has .exe/.bat/.cmd extension
+            if !metadata.is_dir() {
+                if let Some(ext) = path.extension() {
+                    let ext_str = ext.to_string_lossy().to_lowercase();
+                    if ext_str != "exe" && ext_str != "bat" && ext_str != "cmd" {
+                        return Err(io::Error::from_raw_os_error(libc::EACCES));
+                    }
+                } else {
+                    return Err(io::Error::from_raw_os_error(libc::EACCES));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn setxattr(
@@ -985,25 +1107,69 @@ impl FileSystem for PassthroughFs {
         &self,
         _ctx: Context,
         _inode: Self::Inode,
-        _handle: Self::Handle,
+        handle: Self::Handle,
         _mode: u32,
-        _offset: u64,
-        _length: u64,
+        offset: u64,
+        length: u64,
     ) -> io::Result<()> {
-        // TODO: Implement fallocate
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+        // Get the path from the handle
+        let handles = self.handles.read().unwrap();
+        let handle_data = handles
+            .get(&handle)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))?;
+
+        let path = &handle_data.path;
+
+        // Open the file and set its length
+        use std::fs::OpenOptions as StdOpenOptions;
+
+        let file = StdOpenOptions::new()
+            .write(true)
+            .open(path)?;
+
+        let new_size = offset + length;
+        file.set_len(new_size)?;
+
+        Ok(())
     }
 
     fn lseek(
         &self,
         _ctx: Context,
         _inode: Self::Inode,
-        _handle: Self::Handle,
-        _offset: u64,
-        _whence: u32,
+        handle: Self::Handle,
+        offset: u64,
+        whence: u32,
     ) -> io::Result<u64> {
-        // TODO: Implement lseek
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+        // Get the path from the handle
+        let handles = self.handles.read().unwrap();
+        let handle_data = handles
+            .get(&handle)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))?;
+
+        let path = &handle_data.path;
+
+        // Open the file
+        use std::fs::File;
+        use std::io::{Seek, SeekFrom};
+
+        let mut file = File::open(path)?;
+
+        // SEEK_SET = 0, SEEK_CUR = 1, SEEK_END = 2
+        // SEEK_DATA = 3, SEEK_HOLE = 4 (not supported on Windows)
+        const SEEK_SET: u32 = 0;
+        const SEEK_CUR: u32 = 1;
+        const SEEK_END: u32 = 2;
+
+        let seek_from = match whence {
+            SEEK_SET => SeekFrom::Start(offset),
+            SEEK_CUR => SeekFrom::Current(offset as i64),
+            SEEK_END => SeekFrom::End(offset as i64),
+            _ => return Err(io::Error::from_raw_os_error(libc::EINVAL)),
+        };
+
+        let new_offset = file.seek(seek_from)?;
+        Ok(new_offset)
     }
 
     fn copyfilerange(
