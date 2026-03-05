@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::mem::size_of;
+#[cfg(not(target_os = "windows"))]
 use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex, RwLock};
 use std::{result, thread};
@@ -83,7 +84,7 @@ impl SndWorker {
         let chmaps: Arc<RwLock<Vec<VirtioSoundChmapInfo>>> = Arc::new(RwLock::new(chmaps_info));
 
         let audio_backend =
-            RwLock::new(alloc_audio_backend(BackendType::Pipewire, streams.clone()).unwrap());
+            RwLock::new(alloc_audio_backend(BackendType::Null, streams.clone()).unwrap());
 
         let mut vrings: Vec<Arc<Mutex<Vring>>> = Vec::new();
 

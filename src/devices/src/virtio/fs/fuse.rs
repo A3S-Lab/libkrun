@@ -563,18 +563,33 @@ impl From<bindings::stat64> for Attr {
 impl Attr {
     pub fn with_flags(st: bindings::stat64, flags: u32) -> Attr {
         Attr {
+            #[cfg(not(target_os = "windows"))]
             ino: st.st_ino,
+            #[cfg(target_os = "windows")]
+            ino: st.st_ino as u64,
             size: st.st_size as u64,
+            #[cfg(not(target_os = "windows"))]
             blocks: st.st_blocks as u64,
+            #[cfg(target_os = "windows")]
+            blocks: 0, // Windows stat doesn't have st_blocks
             atime: st.st_atime as u64,
             mtime: st.st_mtime as u64,
             ctime: st.st_ctime as u64,
+            #[cfg(not(target_os = "windows"))]
             atimensec: st.st_atime_nsec as u32,
+            #[cfg(target_os = "windows")]
+            atimensec: 0, // Windows stat doesn't have nanosecond precision
+            #[cfg(not(target_os = "windows"))]
             mtimensec: st.st_mtime_nsec as u32,
+            #[cfg(target_os = "windows")]
+            mtimensec: 0,
+            #[cfg(not(target_os = "windows"))]
             ctimensec: st.st_ctime_nsec as u32,
+            #[cfg(target_os = "windows")]
+            ctimensec: 0,
             #[cfg(target_os = "linux")]
             mode: st.st_mode,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             mode: st.st_mode as u32,
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             nlink: st.st_nlink as u32,
@@ -585,10 +600,21 @@ impl Attr {
             nlink: st.st_nlink,
             #[cfg(target_os = "macos")]
             nlink: st.st_nlink as u32,
+            #[cfg(target_os = "windows")]
+            nlink: st.st_nlink as u32,
+            #[cfg(not(target_os = "windows"))]
             uid: st.st_uid,
+            #[cfg(target_os = "windows")]
+            uid: st.st_uid as u32,
+            #[cfg(not(target_os = "windows"))]
             gid: st.st_gid,
+            #[cfg(target_os = "windows")]
+            gid: st.st_gid as u32,
             rdev: st.st_rdev as u32,
+            #[cfg(not(target_os = "windows"))]
             blksize: st.st_blksize as u32,
+            #[cfg(target_os = "windows")]
+            blksize: 4096, // Default block size for Windows
             flags,
         }
     }
@@ -841,15 +867,26 @@ impl From<SetattrIn> for bindings::stat64 {
         let mut out: bindings::stat64 = unsafe { mem::zeroed() };
         // We need this conversion on macOS.
         out.st_mode = sai.mode.try_into().unwrap();
-        out.st_uid = sai.uid;
-        out.st_gid = sai.gid;
+        #[cfg(not(target_os = "windows"))]
+        {
+            out.st_uid = sai.uid;
+            out.st_gid = sai.gid;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            out.st_uid = sai.uid as i16;
+            out.st_gid = sai.gid as i16;
+        }
         out.st_size = sai.size as i64;
         out.st_atime = sai.atime as i64;
         out.st_mtime = sai.mtime as i64;
         out.st_ctime = sai.ctime as i64;
-        out.st_atime_nsec = sai.atimensec.into();
-        out.st_mtime_nsec = sai.mtimensec.into();
-        out.st_ctime_nsec = sai.ctimensec.into();
+        #[cfg(not(target_os = "windows"))]
+        {
+            out.st_atime_nsec = sai.atimensec.into();
+            out.st_mtime_nsec = sai.mtimensec.into();
+            out.st_ctime_nsec = sai.ctimensec.into();
+        }
 
         out
     }

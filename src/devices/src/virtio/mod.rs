@@ -31,10 +31,7 @@ pub mod device;
 pub mod file_traits;
 #[cfg(target_os = "windows")]
 pub mod file_traits_windows;
-#[cfg(all(
-    not(any(feature = "tee", feature = "nitro")),
-    not(target_os = "windows")
-))]
+#[cfg(not(any(feature = "tee", feature = "nitro")))]
 pub mod fs;
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -73,10 +70,7 @@ pub use self::console_windows::*;
 pub use self::device::*;
 #[cfg(target_os = "windows")]
 pub use self::file_traits_windows as file_traits;
-#[cfg(all(
-    not(any(feature = "tee", feature = "nitro")),
-    not(target_os = "windows")
-))]
+#[cfg(not(any(feature = "tee", feature = "nitro")))]
 pub use self::fs::*;
 #[cfg(feature = "gpu")]
 pub use self::gpu::*;

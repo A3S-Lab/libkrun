@@ -149,6 +149,8 @@ impl<F: FileSystem + Sync> Server<F> {
                 let shm_base_addr = shm.host_addr;
                 #[cfg(target_os = "macos")]
                 let shm_base_addr = shm.guest_addr;
+                #[cfg(target_os = "windows")]
+                let shm_base_addr = shm.host_addr;
                 self.setupmapping(
                     in_header,
                     r,
@@ -165,6 +167,8 @@ impl<F: FileSystem + Sync> Server<F> {
                 let shm_base_addr = shm.host_addr;
                 #[cfg(target_os = "macos")]
                 let shm_base_addr = shm.guest_addr;
+                #[cfg(target_os = "windows")]
+                let shm_base_addr = shm.host_addr;
                 self.removemapping(
                     in_header,
                     r,
@@ -899,7 +903,10 @@ impl<F: FileSystem + Sync> Server<F> {
         let flags_64 = ((flags2 as u64) << 32) | (flags as u64);
         let capable = FsOptions::from_bits_truncate(flags_64);
 
+        #[cfg(not(target_os = "windows"))]
         let page_size: u32 = unsafe { libc::sysconf(libc::_SC_PAGESIZE).try_into().unwrap() };
+        #[cfg(target_os = "windows")]
+        let page_size: u32 = 4096; // Windows default page size
         let max_pages = ((MAX_BUFFER_SIZE - 1) / page_size) + 1;
 
         match self.fs.init(capable) {

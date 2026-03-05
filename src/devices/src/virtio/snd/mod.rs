@@ -149,6 +149,7 @@ impl From<stream::Error> for Error {
 #[derive(Clone, Copy, Default, Debug, Eq, PartialEq)]
 pub enum BackendType {
     #[default]
+    Null,
     Pipewire,
 }
 

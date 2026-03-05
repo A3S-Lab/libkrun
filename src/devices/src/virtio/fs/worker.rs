@@ -3,6 +3,7 @@ use crossbeam_channel::Sender;
 #[cfg(target_os = "macos")]
 use utils::worker_message::WorkerMessage;
 
+#[cfg(not(target_os = "windows"))]
 use std::os::fd::AsRawFd;
 use std::sync::atomic::AtomicI32;
 use std::sync::Arc;
