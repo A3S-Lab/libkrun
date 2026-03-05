@@ -270,6 +270,7 @@ cargo test -p vmm --target x86_64-pc-windows-msvc --lib -- test_whpx_ --ignored 
 | `krun_add_net_unixstream` | `krun_add_net` (TcpStream address) |
 | `krun_add_vsock_port` | `krun_add_vsock_port_windows` (Named Pipe name for AF_UNIX) |
 | `krun_add_disk` | same |
+| libkrunfw (bundled kernel) | `krun_set_kernel(ctx, path, 1/*ELF*/, NULL, cmdline)` — **required on Windows** |
 
 TSI for AF_INET/AF_INET6 (TCP and UDP) is enabled automatically when no virtio-net device is added, identical to Linux/macOS behavior.
 
@@ -278,7 +279,6 @@ TSI for AF_INET/AF_INET6 (TCP and UDP) is enabled automatically when no virtio-n
 * x86_64 only (no ARM64/WHPX support on Windows)
 * virtio-gpu is not supported
 * virtio-snd has a NullBackend only (no audio output)
-* Interrupt injection is not yet complete — full userspace Linux boot is not yet validated
 
 ## Using the library
 

@@ -797,12 +797,19 @@ int32_t krun_set_firmware(uint32_t ctx_id, const char *firmware_path);
 /**
  * Sets the path to the kernel to be loaded in the microVM.
  *
+ * On Linux and macOS, if this function is not called, libkrun will use the
+ * kernel bundled in libkrunfw (if available).
+ *
+ * On Windows, this function MUST be called before krun_start_enter(); there
+ * is no bundled kernel provider on Windows.  Use KRUN_KERNEL_FORMAT_ELF (1)
+ * for a raw ELF vmlinux image (e.g. from libkrunfw-windows or a custom build).
+ *
  * Arguments:
  *  "ctx_id"        - the configuration context ID.
  *  "kernel_path"   - the path to the kernel, relative to the host's filesystem.
- *  "kernel_format" - the kernel format.
- *  "initramfs"     - the path to the initramfs, relative to the host's filesystem.
- *  "cmdline"       - the kernel command line.
+ *  "kernel_format" - the kernel format (KRUN_KERNEL_FORMAT_* constants above).
+ *  "initramfs"     - the path to the initramfs, or NULL if not needed.
+ *  "cmdline"       - the kernel command line, or NULL to use the default.
  *
  * Returns:
  *  Zero on success or a negative error number on failure.
