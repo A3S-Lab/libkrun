@@ -1010,12 +1010,18 @@ impl VirtioDevice for Vsock {
 
     fn activate(&mut self, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> ActivateResult {
         if self.queues.len() != NUM_QUEUES {
+            error!("vsock(windows): expected {NUM_QUEUES} queues, got {}", self.queues.len());
             return Err(ActivateError::BadActivate);
         }
         self.state = DeviceState::Activated(mem, interrupt);
         self.activate_evt
             .write(1)
             .map_err(|_| ActivateError::BadActivate)?;
+
+        debug!(
+            "vsock(windows): device activated, CID={}, streams={}, pending_rx={}",
+            self.cid, self.streams.len(), self.pending_rx.len()
+        );
         Ok(())
     }
 

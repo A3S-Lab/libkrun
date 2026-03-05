@@ -460,6 +460,12 @@ impl VirtioDevice for Net {
         self.activate_evt
             .write(1)
             .map_err(|_| ActivateError::BadActivate)?;
+
+        debug!(
+            "net(windows): device activated, MAC={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, backend={}",
+            self.mac[0], self.mac[1], self.mac[2], self.mac[3], self.mac[4], self.mac[5],
+            if self.backend.is_some() { "connected" } else { "none" }
+        );
         Ok(())
     }
 

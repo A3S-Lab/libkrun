@@ -305,6 +305,13 @@ impl VirtioDevice for Balloon {
         self.activate_evt
             .write(1)
             .map_err(|_| super::ActivateError::BadActivate)?;
+
+        let num_pages = self.config.num_pages;
+        let actual = self.config.actual;
+        debug!(
+            "balloon(windows): device activated, num_pages={}, actual={}",
+            num_pages, actual
+        );
         Ok(())
     }
 
