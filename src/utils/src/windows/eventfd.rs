@@ -195,6 +195,22 @@ impl EventFd {
     pub fn as_raw_handle(&self) -> windows_sys::Win32::Foundation::HANDLE {
         self.shared.event_handle
     }
+
+    /// Waits up to `ms` milliseconds for the event to be signaled.
+    ///
+    /// Returns `true` if the event was signaled, `false` on timeout.
+    /// On signal, consumes the pending write so the event resets.
+    pub fn wait_timeout(&self, ms: u32) -> bool {
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        let result = unsafe { WaitForSingleObject(self.shared.event_handle, ms) };
+        if result == WAIT_OBJECT_0 {
+            // Drain the signal so the Win32 event is reset before next wait.
+            let _ = self.read();
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]

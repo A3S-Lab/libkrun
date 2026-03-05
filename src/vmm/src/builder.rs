@@ -153,12 +153,19 @@ static EDK2_BINARY: &[u8] = include_bytes!("../../../edk2/KRUN_EFI.silent.fd");
 #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
 struct WhpxIrqChip {
     partition: windows::Win32::System::Hypervisor::WHV_PARTITION_HANDLE,
+    irq_pending_evt: Arc<utils::eventfd::EventFd>,
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
 impl WhpxIrqChip {
-    fn new(partition: windows::Win32::System::Hypervisor::WHV_PARTITION_HANDLE) -> Self {
-        Self { partition }
+    fn new(
+        partition: windows::Win32::System::Hypervisor::WHV_PARTITION_HANDLE,
+        irq_pending_evt: Arc<utils::eventfd::EventFd>,
+    ) -> Self {
+        Self {
+            partition,
+            irq_pending_evt,
+        }
     }
 
     fn irq_to_vector(irq_line: u32) -> u32 {
@@ -220,6 +227,10 @@ impl IrqChipT for WhpxIrqChip {
                 ))
             })?;
         }
+
+        // Signal the vCPU thread so it can re-enter WHvRunVirtualProcessor and
+        // deliver the queued interrupt if the guest is currently in HLT state.
+        let _ = self.irq_pending_evt.write(1);
 
         Ok(())
     }
@@ -1010,8 +1021,13 @@ pub fn build_microvm(
 
     #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
     {
+        let irq_notify = Arc::new(
+            utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)
+                .map_err(|e| StartMicrovmError::Internal(Error::EventFd(e)))?,
+        );
         intc = Arc::new(Mutex::new(IrqChipDevice::new(Box::new(WhpxIrqChip::new(
             vm.partition(),
+            irq_notify.clone(),
         )))));
 
         attach_legacy_devices(&mut pio_device_manager)?;
@@ -1023,6 +1039,7 @@ pub fn build_microvm(
             payload_config.entry_addr,
             &pio_device_manager.io_bus,
             &exit_evt,
+            Some(irq_notify),
         )
         .map_err(StartMicrovmError::Internal)?;
     }
@@ -2004,6 +2021,7 @@ fn create_vcpus_x86_64(
     entry_addr: GuestAddress,
     io_bus: &devices::Bus,
     exit_evt: &EventFd,
+    irq_pending_evt: Option<Arc<utils::eventfd::EventFd>>,
 ) -> super::Result<Vec<Vcpu>> {
     let mut vcpus = Vec::with_capacity(vcpu_config.vcpu_count as usize);
     for cpu_index in 0..vcpu_config.vcpu_count {
@@ -2014,6 +2032,7 @@ fn create_vcpus_x86_64(
             entry_addr,
             io_bus.clone(),
             exit_evt.try_clone().map_err(Error::EventFd)?,
+            irq_pending_evt.clone(),
         )
         .map_err(Error::Vcpu)?;
 

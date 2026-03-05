@@ -4,6 +4,7 @@
 use std::fmt::{Display, Formatter};
 use std::io;
 use std::result;
+use std::sync::Arc;
 
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
 use windows::Win32::System::Hypervisor::*;
@@ -193,6 +194,11 @@ pub struct Vcpu {
     io_bus: devices::Bus,
     mmio_bus: Option<devices::Bus>,
     exit_evt: utils::eventfd::EventFd,
+    /// Signaled by `WhpxIrqChip::set_irq()` after posting an interrupt via
+    /// `WHvRequestInterrupt`.  When `Some`, `start_threaded()` waits on this
+    /// instead of treating HLT as terminal, allowing the guest idle loop to
+    /// work correctly.  `None` in unit tests that expect HLT to terminate.
+    irq_pending_evt: Option<Arc<utils::eventfd::EventFd>>,
     event_receiver: crossbeam_channel::Receiver<VcpuEvent>,
     event_sender: Option<crossbeam_channel::Sender<VcpuEvent>>,
     response_receiver: Option<crossbeam_channel::Receiver<VcpuResponse>>,
@@ -213,6 +219,7 @@ impl Vcpu {
         boot_entry_addr: GuestAddress,
         io_bus: devices::Bus,
         exit_evt: utils::eventfd::EventFd,
+        irq_pending_evt: Option<Arc<utils::eventfd::EventFd>>,
     ) -> Result<Self> {
         let (event_sender, event_receiver) = crossbeam_channel::unbounded();
         let (response_sender, response_receiver) = crossbeam_channel::unbounded();
@@ -228,6 +235,7 @@ impl Vcpu {
             io_bus,
             mmio_bus: None,
             exit_evt,
+            irq_pending_evt,
             event_receiver,
             event_sender: Some(event_sender),
             response_receiver: Some(response_receiver),
@@ -369,8 +377,20 @@ impl Vcpu {
                 loop {
                     match self.run() {
                         Ok(VcpuEmulation::Halted) => {
-                            self.exit(FC_EXIT_CODE_OK);
-                            break;
+                            if let Some(ref evt) = self.irq_pending_evt {
+                                // Guest is in HLT idle loop.  An interrupt has been (or
+                                // will be) posted to the virtual APIC via
+                                // WHvRequestInterrupt.  Wait up to 5 ms for the signal,
+                                // then re-enter WHvRunVirtualProcessor so WHPX can
+                                // deliver the queued interrupt.  The short timeout keeps
+                                // host CPU usage low during guest idle while bounding
+                                // interrupt delivery latency.
+                                evt.wait_timeout(5);
+                            } else {
+                                // No IrqChip wired (smoke tests): treat HLT as terminal.
+                                self.exit(FC_EXIT_CODE_OK);
+                                break;
+                            }
                         }
                         Ok(VcpuEmulation::Stopped) => {
                             self.exit(FC_EXIT_CODE_OK);
@@ -551,8 +571,7 @@ impl Vcpu {
 pub struct VcpuHandle {
     event_sender: crossbeam_channel::Sender<VcpuEvent>,
     response_receiver: crossbeam_channel::Receiver<VcpuResponse>,
-    #[allow(dead_code)]
-    vcpu_thread: std::thread::JoinHandle<()>,
+    vcpu_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl VcpuHandle {
@@ -564,7 +583,18 @@ impl VcpuHandle {
         Self {
             event_sender,
             response_receiver,
-            vcpu_thread,
+            vcpu_thread: Some(vcpu_thread),
+        }
+    }
+
+    /// Waits for the vCPU thread to finish.
+    ///
+    /// Must be called before dropping the `Vm` to avoid a race between
+    /// `WHvDeleteVirtualProcessor` (vCPU thread cleanup) and
+    /// `WHvDeletePartition` (Vm::drop).
+    pub fn join(mut self) {
+        if let Some(t) = self.vcpu_thread.take() {
+            let _ = t.join();
         }
     }
 
@@ -723,6 +753,7 @@ mod tests {
             GuestAddress(0x10000),
             io_bus,
             exit_evt,
+            None,
         )
         .unwrap();
     }
@@ -744,6 +775,7 @@ mod tests {
             GuestAddress(0x10000),
             io_bus,
             exit_evt,
+            None,
         )
         .unwrap();
         vcpu.configure_x86_64(&guest_mem, GuestAddress(0x10000))
@@ -777,6 +809,7 @@ mod tests {
             GuestAddress(ENTRY_ADDR),
             io_bus,
             exit_evt,
+            None,
         )
         .unwrap();
 
@@ -819,6 +852,7 @@ mod tests {
             GuestAddress(ENTRY_ADDR),
             io_bus,
             exit_evt,
+            None,
         )
         .unwrap();
 
@@ -835,6 +869,10 @@ mod tests {
             .expect("vCPU thread did not respond within timeout");
 
         assert_eq!(response, VcpuResponse::Exited(FC_EXIT_CODE_OK));
+
+        // Join the thread before vm is dropped to avoid a race between
+        // WHvDeleteVirtualProcessor (thread cleanup) and WHvDeletePartition (Vm::drop).
+        handle.join();
     }
 
     #[test]
@@ -938,6 +976,7 @@ mod tests {
             GuestAddress(ENTRY_ADDR),
             io_bus,
             exit_evt,
+            None,
         )
         .unwrap();
         vcpu.configure_x86_64(&guest_mem, GuestAddress(ENTRY_ADDR))
@@ -1069,6 +1108,7 @@ mod tests {
             kernel_entry,
             io_bus,
             exit_evt,
+            None,
         )
         .unwrap();
 
@@ -1157,6 +1197,7 @@ mod tests {
             GuestAddress(ENTRY_ADDR),
             io_bus,
             exit_evt,
+            None,
         )
         .unwrap();
         vcpu.configure_x86_64(&guest_mem, GuestAddress(ENTRY_ADDR))
@@ -1887,6 +1928,7 @@ mod tests {
             kernel_entry,
             io_bus,
             exit_evt,
+            None,
         )
         .unwrap();
 
@@ -1941,7 +1983,6 @@ mod tests {
         // WHvCancelRunVirtualProcessor interrupts any in-flight
         // WHvRunVirtualProcessor, causing it to return WHvRunVpExitReasonCanceled
         // → VcpuExit::Shutdown → VcpuEmulation::Stopped → thread exits.
-        // This ensures Vm::drop (WHvDeletePartition) does not race the thread.
         if !vcpu_exited {
             unsafe {
                 let _ = windows::Win32::System::Hypervisor::WHvCancelRunVirtualProcessor(
@@ -1954,6 +1995,10 @@ mod tests {
                 .response_receiver()
                 .recv_timeout(std::time::Duration::from_secs(5));
         }
+
+        // Join the vCPU thread before vm is dropped to ensure WHvDeleteVirtualProcessor
+        // (thread cleanup) completes before WHvDeletePartition (Vm::drop).
+        handle.join();
 
         // ── 13. Assert the Linux version banner appeared ───────────────────
         let snapshot = captured.lock().unwrap().clone();
