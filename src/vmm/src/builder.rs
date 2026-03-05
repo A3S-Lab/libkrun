@@ -1030,7 +1030,7 @@ pub fn build_microvm(
             irq_notify.clone(),
         )))));
 
-        attach_legacy_devices(&mut pio_device_manager)?;
+        attach_legacy_devices(&mut pio_device_manager, intc.clone())?;
 
         vcpus = create_vcpus_x86_64(
             &vm,
@@ -1907,11 +1907,57 @@ fn attach_legacy_devices(
 #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
 fn attach_legacy_devices(
     pio_device_manager: &mut PortIODeviceManager,
+    intc: IrqChip,
 ) -> std::result::Result<(), StartMicrovmError> {
     pio_device_manager
         .register_devices()
         .map_err(Error::LegacyIOBus)
         .map_err(StartMicrovmError::Internal)?;
+
+    // PIT 8254 at 0x40–0x43.
+    // Provides realistic counter read-back for TSC calibration.
+    let pit = Arc::new(Mutex::new(devices::legacy::Pit::new()));
+    pio_device_manager
+        .io_bus
+        .insert(pit, 0x40, 0x4)
+        .map_err(device_manager::legacy::Error::BusError)
+        .map_err(Error::LegacyIOBus)
+        .map_err(StartMicrovmError::Internal)?;
+
+    // Primary 8259A PIC at 0x20–0x21.
+    let pic_primary = Arc::new(Mutex::new(devices::legacy::Pic::new()));
+    pio_device_manager
+        .io_bus
+        .insert(pic_primary, 0x20, 0x2)
+        .map_err(device_manager::legacy::Error::BusError)
+        .map_err(Error::LegacyIOBus)
+        .map_err(StartMicrovmError::Internal)?;
+
+    // Secondary (cascaded) 8259A PIC at 0xA0–0xA1.
+    let pic_secondary = Arc::new(Mutex::new(devices::legacy::Pic::new()));
+    pio_device_manager
+        .io_bus
+        .insert(pic_secondary, 0xA0, 0x2)
+        .map_err(device_manager::legacy::Error::BusError)
+        .map_err(Error::LegacyIOBus)
+        .map_err(StartMicrovmError::Internal)?;
+
+    // PIT IRQ 0 timer thread (100 Hz).
+    // Injects IRQ 0 (vector 0x20) periodically so the kernel's jiffies counter
+    // advances during early-boot TSC calibration and scheduling setup.
+    std::thread::Builder::new()
+        .name("pit-timer".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                if let Err(e) = intc.lock().unwrap().set_irq(Some(0), None) {
+                    warn!("PIT IRQ0 injection failed: {e:?}");
+                    break;
+                }
+            }
+        })
+        .map_err(|e| StartMicrovmError::Internal(Error::EventFd(e)))?;
+
     Ok(())
 }
 

@@ -32,6 +32,10 @@ mod x86_64;
 #[cfg(target_arch = "x86_64")]
 use x86_64::cmos;
 #[cfg(target_arch = "x86_64")]
+use x86_64::pic;
+#[cfg(target_arch = "x86_64")]
+use x86_64::pit;
+#[cfg(target_arch = "x86_64")]
 use x86_64::serial;
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
@@ -46,6 +50,10 @@ use riscv64::serial;
 
 #[cfg(target_arch = "x86_64")]
 pub use self::cmos::Cmos;
+#[cfg(target_arch = "x86_64")]
+pub use self::pic::Pic;
+#[cfg(target_arch = "x86_64")]
+pub use self::pit::Pit;
 #[cfg(target_os = "macos")]
 pub use self::gicv3::GicV3;
 #[cfg(target_arch = "aarch64")]
