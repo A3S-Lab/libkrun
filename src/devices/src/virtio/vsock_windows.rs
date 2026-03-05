@@ -443,7 +443,17 @@ impl Vsock {
     }
 
     /// Calculate available TX credit for a stream.
-    /// Returns the number of bytes we can send to the peer.
+    ///
+    /// Credit-based flow control ensures we don't overflow the peer's receive buffer.
+    /// The formula is: available_credit = peer_buf_alloc - (tx_cnt - peer_fwd_cnt)
+    ///
+    /// Where:
+    /// - peer_buf_alloc: Total buffer space the peer has allocated
+    /// - tx_cnt: Total bytes we've sent to the peer
+    /// - peer_fwd_cnt: Total bytes the peer has consumed (forwarded to application)
+    /// - in_flight: Bytes sent but not yet consumed by peer (tx_cnt - peer_fwd_cnt)
+    ///
+    /// Returns the number of bytes we can safely send without overflowing peer's buffer.
     fn available_tx_credit(state: &StreamState) -> u32 {
         // Credit = peer_buf_alloc - (tx_cnt - peer_fwd_cnt)
         // This represents how much buffer space the peer has available
@@ -511,6 +521,15 @@ impl Vsock {
             .or_insert(1);
     }
 
+    /// Read data from all active streams and queue RX packets to the guest.
+    ///
+    /// This function implements credit-based flow control:
+    /// - Checks available TX credit before reading from each stream
+    /// - Only reads up to the available credit amount
+    /// - Updates tx_cnt to track bytes sent to the peer
+    ///
+    /// For each stream, reads up to MAX_READ_BURST_PER_STREAM times or until
+    /// no more data is available or credit is exhausted.
     fn harvest_stream_reads(&mut self) {
         let mut responses: Vec<([u8; 44], Vec<u8>)> = Vec::new();
         let mut closed_ports: Vec<u32> = Vec::new();
