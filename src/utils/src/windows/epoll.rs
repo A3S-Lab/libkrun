@@ -69,6 +69,10 @@ struct Registration {
     handle: HANDLE,
 }
 
+// SAFETY: Windows HANDLE is safe to send between threads (it's an opaque kernel object handle)
+unsafe impl Send for Registration {}
+unsafe impl Sync for Registration {}
+
 #[derive(Debug)]
 struct EpollInner {
     registrations: HashMap<RawFd, Registration>,

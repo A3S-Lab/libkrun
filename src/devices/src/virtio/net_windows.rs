@@ -222,11 +222,9 @@ impl Net {
                         Ok(mut s) => s.read(&mut buf).unwrap_or(0),
                         Err(_) => 0,
                     };
-                    if n > 0 {
-                        if mem.write_slice(&buf[..n], desc.addr).is_ok() {
-                            frame_written = frame_written.saturating_add(n as u32);
-                            frame_ready = true;
-                        }
+                    if n > 0 && mem.write_slice(&buf[..n], desc.addr).is_ok() {
+                        frame_written = frame_written.saturating_add(n as u32);
+                        frame_ready = true;
                     }
                 }
             }

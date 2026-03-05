@@ -66,7 +66,7 @@ pub mod port_io {
             let mut mode = CONSOLE_MODE(0);
             unsafe {
                 GetConsoleMode(handle, &mut mode)
-                    .map_err(|e| io::Error::new(ErrorKind::Other, format!("GetConsoleMode failed: {e}")))?;
+                    .map_err(|e| io::Error::other(format!("GetConsoleMode failed: {e}")))?;
             }
 
             // Disable line input, echo, and processed input for raw mode
@@ -76,7 +76,7 @@ pub mod port_io {
 
             unsafe {
                 SetConsoleMode(handle, raw_mode)
-                    .map_err(|e| io::Error::new(ErrorKind::Other, format!("SetConsoleMode failed: {e}")))?;
+                    .map_err(|e| io::Error::other(format!("SetConsoleMode failed: {e}")))?;
             }
 
             Ok(Self {
@@ -111,7 +111,7 @@ pub mod port_io {
                     Some(&mut bytes_read),
                     None,
                 )
-                .map_err(|e| io::Error::new(ErrorKind::Other, format!("ReadFile failed: {e}")))?;
+                .map_err(|e| io::Error::other(format!("ReadFile failed: {e}")))?;
             }
 
             let bytes_read = bytes_read as usize;
@@ -156,7 +156,7 @@ pub mod port_io {
                     Some(&mut bytes_written),
                     None,
                 )
-                .map_err(|e| io::Error::new(ErrorKind::Other, format!("WriteFile failed: {e}")))?;
+                .map_err(|e| io::Error::other(format!("WriteFile failed: {e}")))?;
             }
 
             Ok(bytes_written as usize)
@@ -196,7 +196,7 @@ pub mod port_io {
     pub fn input_to_raw_fd_dup(fd: i32) -> io::Result<Box<dyn PortInput + Send>> {
         let handle = if fd == 0 {
             unsafe { GetStdHandle(STD_INPUT_HANDLE) }
-                .map_err(|e| io::Error::new(ErrorKind::Other, format!("GetStdHandle failed: {e}")))?
+                .map_err(|e| io::Error::other(format!("GetStdHandle failed: {e}")))?
         } else {
             // Convert CRT fd → owned HANDLE via DuplicateHandle.
             extern "C" {
@@ -221,7 +221,7 @@ pub mod port_io {
                 )
             }
             .map_err(|e| {
-                io::Error::new(ErrorKind::Other, format!("DuplicateHandle failed: {e}"))
+                io::Error::other(format!("DuplicateHandle failed: {e}"))
             })?;
             dup
         };
@@ -288,7 +288,7 @@ pub mod port_io {
 
         let handle = if let Some(sht) = std_handle_type {
             unsafe { GetStdHandle(sht) }
-                .map_err(|e| io::Error::new(ErrorKind::Other, format!("GetStdHandle failed: {e}")))?
+                .map_err(|e| io::Error::other(format!("GetStdHandle failed: {e}")))?
         } else {
             // Convert CRT fd to HANDLE and duplicate it so we own it.
             extern "C" {
@@ -313,7 +313,7 @@ pub mod port_io {
                 )
             }
             .map_err(|e| {
-                io::Error::new(ErrorKind::Other, format!("DuplicateHandle failed: {e}"))
+                io::Error::other(format!("DuplicateHandle failed: {e}"))
             })?;
             dup
         };
@@ -390,7 +390,7 @@ pub mod port_io {
 
     pub fn term_fd(_fd: i32) -> io::Result<Box<dyn PortTerminalProperties>> {
         let handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
-            .map_err(|e| io::Error::new(ErrorKind::Other, format!("GetStdHandle failed: {e}")))?;
+            .map_err(|e| io::Error::other(format!("GetStdHandle failed: {e}")))?;
         Ok(Box::new(ConsoleTerm { handle }))
     }
 

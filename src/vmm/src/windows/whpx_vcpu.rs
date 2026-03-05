@@ -242,12 +242,10 @@ unsafe extern "system" fn emulator_memory_cb(
         } else {
             HRESULT(0x80004005_u32 as i32) // E_FAIL
         }
+    } else if guest_mem.write_slice(&mem.Data[..size], addr).is_ok() {
+        HRESULT(0)
     } else {
-        if guest_mem.write_slice(&mem.Data[..size], addr).is_ok() {
-            HRESULT(0)
-        } else {
-            HRESULT(0x80004005_u32 as i32) // E_FAIL
-        }
+        HRESULT(0x80004005_u32 as i32) // E_FAIL
     }
 }
 
@@ -366,7 +364,7 @@ impl WhpxVcpu {
         }
         let extra: usize = match instr_bytes[skip] {
             // IN/OUT with an immediate byte port operand (2-byte instruction)
-            0xE4 | 0xE5 | 0xE6 | 0xE7 => 2,
+            0xE4..=0xE7 => 2,
             // IN/OUT via DX, INS, OUTS (1-byte opcode after any prefixes)
             _ => 1,
         };
@@ -406,8 +404,7 @@ impl WhpxVcpu {
                 value.as_mut_ptr(),
             )
             .map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
+                io::Error::other(
                     format!("Failed to get vCPU register {}: {}", reg_index, e),
                 )
             })?;
@@ -541,8 +538,8 @@ impl WhpxVcpu {
                 )
             })?;
 
-            let reg_base = ((modrm >> 3) & 0x7) as u8;
-            let rex_r = ((rex >> 2) & 1) as u8;
+            let reg_base = (modrm >> 3) & 0x7;
+            let rex_r = (rex >> 2) & 1;
             let reg_index = reg_base + (rex_r << 3);
             let next_rip =
                 rip.wrapping_add(instruction_bytes.len().try_into().map_err(|_| {
@@ -568,7 +565,7 @@ impl WhpxVcpu {
         }
 
         // moffs forms: mov AL/AX/EAX/RAX, moffs and mov moffs, AL/AX/EAX/RAX.
-        if matches!(opcode, 0xa0 | 0xa1 | 0xa2 | 0xa3) {
+        if matches!(opcode, 0xa0..=0xa3) {
             let next_rip =
                 rip.wrapping_add(instruction_bytes.len().try_into().map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidData, "Bad instruction len")
@@ -615,8 +612,8 @@ impl WhpxVcpu {
         })?;
         idx += 1;
 
-        let reg_base = ((modrm >> 3) & 0x7) as u8;
-        let rex_r = ((rex >> 2) & 1) as u8;
+        let reg_base = (modrm >> 3) & 0x7;
+        let rex_r = (rex >> 2) & 1;
         let reg_extended = reg_base + (rex_r << 3);
 
         let next_rip = rip.wrapping_add(
@@ -711,8 +708,7 @@ impl WhpxVcpu {
                 values.as_ptr(),
             )
             .map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
+                io::Error::other(
                     format!("Failed to set vCPU registers: {}", e),
                 )
             })
@@ -827,8 +823,7 @@ impl WhpxVcpu {
         unsafe {
             WHvCreateVirtualProcessor(partition, index, 0 /* flags: default behavior */).map_err(
                 |e| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
+                    io::Error::other(
                         format!("Failed to create vCPU: {}", e),
                     )
                 },
@@ -849,8 +844,7 @@ impl WhpxVcpu {
         let mut emulator: *mut c_void = std::ptr::null_mut();
         unsafe {
             WHvEmulatorCreateEmulator(&callbacks, &mut emulator).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
+                io::Error::other(
                     format!("Failed to create WHPX emulator: {e}"),
                 )
             })?;
@@ -1028,7 +1022,7 @@ impl WhpxVcpu {
                     std::mem::size_of::<WHV_RUN_VP_EXIT_CONTEXT>() as u32,
                 )
                 .map_err(|e| {
-                    io::Error::new(io::ErrorKind::Other, format!("Failed to run vCPU: {}", e))
+                    io::Error::other(format!("Failed to run vCPU: {}", e))
                 })?;
             }
 
@@ -1213,8 +1207,7 @@ impl WhpxVcpu {
                             )
                         }
                         .map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::Other,
+                            io::Error::other(
                                 format!(
                                     "WHvEmulatorTryIoEmulation failed on port 0x{port:04x}: {e}"
                                 ),

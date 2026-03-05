@@ -56,7 +56,7 @@ impl NetWindowsBuilder {
     pub fn insert(&mut self, config: NetWindowsConfig) -> Result<(), NetWindowsError> {
         let backend = config
             .tcp_addr
-            .map(|addr| std::net::TcpStream::connect(addr))
+            .map(std::net::TcpStream::connect)
             .transpose()
             .map_err(NetWindowsError::ConnectBackend)?;
 

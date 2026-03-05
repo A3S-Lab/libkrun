@@ -137,7 +137,7 @@ impl NamedPipeStream {
         let handle = unsafe {
             CreateFileA(
                 windows::core::PCSTR(c_path.as_ptr() as *const u8),
-                (0x80000000u32 | 0x40000000u32).into(), // GENERIC_READ | GENERIC_WRITE
+                0x80000000u32 | 0x40000000u32, // GENERIC_READ | GENERIC_WRITE
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 None,
                 OPEN_EXISTING,
@@ -171,7 +171,7 @@ impl Read for NamedPipeStream {
         let mut bytes_read = 0u32;
         unsafe {
             ReadFile(self.handle, Some(buf), Some(&mut bytes_read), None)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("ReadFile failed: {}", e)))?;
+                .map_err(|e| io::Error::other(format!("ReadFile failed: {}", e)))?;
         }
         Ok(bytes_read as usize)
     }
@@ -182,7 +182,7 @@ impl Write for NamedPipeStream {
         let mut bytes_written = 0u32;
         unsafe {
             WriteFile(self.handle, Some(buf), Some(&mut bytes_written), None)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("WriteFile failed: {}", e)))?;
+                .map_err(|e| io::Error::other(format!("WriteFile failed: {}", e)))?;
         }
         Ok(bytes_written as usize)
     }

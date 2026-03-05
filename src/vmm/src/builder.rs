@@ -197,12 +197,13 @@ impl IrqChipT for WhpxIrqChip {
             ))
         })?;
 
-        let mut interrupt = WHV_INTERRUPT_CONTROL::default();
-        interrupt._bitfield = (WHvX64InterruptTypeFixed.0 as u64)
-            | ((WHvX64InterruptDestinationModePhysical.0 as u64) << 8)
-            | ((WHvX64InterruptTriggerModeEdge.0 as u64) << 9);
-        interrupt.Destination = 0;
-        interrupt.Vector = Self::irq_to_vector(irq_line);
+        let interrupt = WHV_INTERRUPT_CONTROL {
+            _bitfield: (WHvX64InterruptTypeFixed.0 as u64)
+                | ((WHvX64InterruptDestinationModePhysical.0 as u64) << 8)
+                | ((WHvX64InterruptTriggerModeEdge.0 as u64) << 9),
+            Destination: 0,
+            Vector: Self::irq_to_vector(irq_line),
+        };
 
         unsafe {
             WHvRequestInterrupt(
@@ -211,8 +212,7 @@ impl IrqChipT for WhpxIrqChip {
                 std::mem::size_of::<WHV_INTERRUPT_CONTROL>() as u32,
             )
             .map_err(|e| {
-                devices::Error::FailedSignalingUsedQueue(io::Error::new(
-                    io::ErrorKind::Other,
+                devices::Error::FailedSignalingUsedQueue(io::Error::other(
                     format!(
                         "WHPX interrupt injection failed for irq {} (vector {}): {}",
                         irq_line, interrupt.Vector, e

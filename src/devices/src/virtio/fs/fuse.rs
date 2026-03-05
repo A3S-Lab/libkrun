@@ -610,7 +610,7 @@ impl Attr {
             gid: st.st_gid,
             #[cfg(target_os = "windows")]
             gid: st.st_gid as u32,
-            rdev: st.st_rdev as u32,
+            rdev: st.st_rdev,
             #[cfg(not(target_os = "windows"))]
             blksize: st.st_blksize as u32,
             #[cfg(target_os = "windows")]
