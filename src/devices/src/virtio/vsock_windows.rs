@@ -233,8 +233,11 @@ impl Write for StreamType {
 struct StreamState {
     stream: StreamType,
     request_hdr: [u8; 44],
-    fwd_cnt: u32,
+    fwd_cnt: u32,           // Bytes we've forwarded to the stream
     guest_dst_port: u32,
+    peer_buf_alloc: u32,    // Peer's buffer allocation
+    peer_fwd_cnt: u32,      // Peer's forward count (bytes consumed)
+    tx_cnt: u32,            // Bytes we've sent to peer
 }
 
 #[derive(Debug, Clone)]
@@ -438,6 +441,15 @@ impl Vsock {
         self.queue_response(incoming_hdr, VSOCK_OP_CREDIT_UPDATE, Vec::new());
     }
 
+    /// Calculate available TX credit for a stream.
+    /// Returns the number of bytes we can send to the peer.
+    fn available_tx_credit(state: &StreamState) -> u32 {
+        // Credit = peer_buf_alloc - (tx_cnt - peer_fwd_cnt)
+        // This represents how much buffer space the peer has available
+        let in_flight = state.tx_cnt.saturating_sub(state.peer_fwd_cnt);
+        state.peer_buf_alloc.saturating_sub(in_flight)
+    }
+
     fn purge_pending_for_guest_port(&mut self, guest_port: u32) {
         let mut removed = 0usize;
         self.pending_rx.retain(|pending| {
@@ -506,9 +518,20 @@ impl Vsock {
         for (port, state) in &mut self.streams {
             let mut should_close = false;
             for _ in 0..MAX_READ_BURST_PER_STREAM {
-                let mut rx_buf = [0_u8; 4096];
+                // Check available TX credit before reading
+                let available_credit = Self::available_tx_credit(state);
+                if available_credit == 0 {
+                    // No credit available, skip reading for now
+                    break;
+                }
+
+                // Read up to the available credit amount
+                let read_size = (available_credit as usize).min(4096);
+                let mut rx_buf = vec![0_u8; read_size];
                 match state.stream.read(&mut rx_buf) {
                     Ok(n) if n > 0 => {
+                        // Update tx_cnt to track bytes sent to peer
+                        state.tx_cnt = state.tx_cnt.saturating_add(n as u32);
                         responses.push((state.request_hdr, rx_buf[..n].to_vec()));
                     }
                     Ok(_) => {
@@ -681,6 +704,10 @@ impl Vsock {
                             });
 
                             if let Some(stream) = stream_result {
+                                // Extract peer's initial credit info from REQUEST header
+                                let peer_buf_alloc = Self::hdr_u32(&hdr, 36);
+                                let peer_fwd_cnt = Self::hdr_u32(&hdr, 40);
+
                                 self.streams.insert(
                                     src_port,
                                     StreamState {
@@ -688,6 +715,9 @@ impl Vsock {
                                         request_hdr: hdr,
                                         fwd_cnt: 0,
                                         guest_dst_port: dst_port,
+                                        peer_buf_alloc,
+                                        peer_fwd_cnt,
+                                        tx_cnt: 0,
                                     },
                                 );
                                 self.queue_response(&hdr, VSOCK_OP_RESPONSE, Vec::new());
@@ -758,12 +788,14 @@ impl Vsock {
                                 continue;
                             }
 
-                            if let Some(state) = self.streams.get(&src_port) {
+                            if let Some(state) = self.streams.get_mut(&src_port) {
                                 if state.guest_dst_port != dst_port {
                                     self.queue_rst(&hdr);
                                     continue;
                                 }
-                                // For now we only track host-side consumed bytes.
+                                // Update peer's credit information
+                                state.peer_buf_alloc = Self::hdr_u32(&hdr, 36);
+                                state.peer_fwd_cnt = Self::hdr_u32(&hdr, 40);
                             } else {
                                 self.queue_rst(&hdr);
                             }
