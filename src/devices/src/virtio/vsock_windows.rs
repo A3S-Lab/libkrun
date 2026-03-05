@@ -95,6 +95,7 @@ pub struct Vsock {
     streams: HashMap<u32, StreamState>,
     pending_rx: VecDeque<PendingRx>,
     pending_by_guest_port: HashMap<u32, usize>,
+    connect_timeout_ms: u64, // Configurable connection timeout
 }
 
 // Trait to abstract TCP streams and Named Pipes
@@ -283,7 +284,14 @@ impl Vsock {
             streams: HashMap::new(),
             pending_rx: VecDeque::new(),
             pending_by_guest_port: HashMap::new(),
+            connect_timeout_ms: CONNECT_TIMEOUT_MS, // Use default timeout
         })
+    }
+
+    /// Set the connection timeout in milliseconds.
+    /// Default is 100ms. Increase for slower services.
+    pub fn set_connect_timeout(&mut self, timeout_ms: u64) {
+        self.connect_timeout_ms = timeout_ms;
     }
 
     pub fn id(&self) -> &str {
@@ -636,7 +644,7 @@ impl Vsock {
                             let stream_result = if let Some(pipe_map) = &self.pipe_port_map {
                                 if let Some(pipe_name) = pipe_map.get(&dst_port) {
                                     // Connect to Named Pipe
-                                    match NamedPipeStream::connect(pipe_name, CONNECT_TIMEOUT_MS as u32) {
+                                    match NamedPipeStream::connect(pipe_name, self.connect_timeout_ms as u32) {
                                         Ok(pipe) => {
                                             let _ = pipe.set_nonblocking(true);
                                             Some(StreamType::NamedPipe(pipe))
@@ -658,7 +666,7 @@ impl Vsock {
                                 if let Some(addr) = self.host_socket_addr(dst_port) {
                                     match TcpStream::connect_timeout(
                                         &addr,
-                                        Duration::from_millis(CONNECT_TIMEOUT_MS),
+                                        Duration::from_millis(self.connect_timeout_ms),
                                     ) {
                                         Ok(stream) => {
                                             let _ = stream.set_nonblocking(true);

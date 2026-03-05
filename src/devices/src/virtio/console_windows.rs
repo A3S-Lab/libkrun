@@ -447,9 +447,11 @@ pub mod port_io {
             }
             log_buf.drain(0..start);
 
-            if log_buf.len() > 512 {
+            // Flush buffer if it exceeds reasonable size without newline
+            const MAX_LINE_BUFFER: usize = 4096; // Increased from 512
+            if log_buf.len() > MAX_LINE_BUFFER {
                 let line = String::from_utf8_lossy(&log_buf);
-                error!("init_or_kernel: [missing newline]{}", line);
+                error!("init_or_kernel: [line too long, flushing] {}", line);
                 log_buf.clear();
             }
 
