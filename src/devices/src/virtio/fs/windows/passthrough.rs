@@ -1,5 +1,6 @@
 // Windows passthrough filesystem implementation
-// Phase 1: Core data structures and basic read-only operations
+// Phase 1: Core data structures and basic read-only operations (completed)
+// Phase 2: File read operations (completed)
 
 use std::collections::BTreeMap;
 use std::ffi::CStr;
@@ -446,9 +447,60 @@ impl FileSystem for PassthroughFs {
     // Stub implementations for other required methods
     // These will return ENOSYS for now
 
-    fn statfs(&self, _ctx: Context, _inode: Self::Inode) -> io::Result<bindings::statvfs64> {
-        // TODO: Implement statfs
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+    fn statfs(&self, _ctx: Context, inode: Self::Inode) -> io::Result<bindings::statvfs64> {
+        let path = self.get_path(inode)?;
+
+        // Get disk space information using Windows API
+        use std::os::windows::ffi::OsStrExt;
+        use std::ffi::OsStr;
+
+        let path_wide: Vec<u16> = OsStr::new(&path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let mut free_bytes_available: u64 = 0;
+        let mut total_bytes: u64 = 0;
+        let mut total_free_bytes: u64 = 0;
+
+        unsafe {
+            use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+            use windows::core::PCWSTR;
+
+            if GetDiskFreeSpaceExW(
+                PCWSTR(path_wide.as_ptr()),
+                Some(&mut free_bytes_available),
+                Some(&mut total_bytes),
+                Some(&mut total_free_bytes),
+            ).is_err() {
+                return Err(io::Error::last_os_error());
+            }
+        }
+
+        let mut st: bindings::statvfs64 = unsafe { std::mem::zeroed() };
+
+        // Block size (use 4KB)
+        st.f_bsize = 4096;
+        st.f_frsize = 4096;
+
+        // Total blocks
+        st.f_blocks = total_bytes / 4096;
+
+        // Free blocks
+        st.f_bfree = total_free_bytes / 4096;
+        st.f_bavail = free_bytes_available / 4096;
+
+        // Inode information (synthetic)
+        st.f_files = 1000000; // Arbitrary large number
+        st.f_ffree = 1000000;
+
+        // Filesystem ID
+        st.f_fsid = self.cfg.export_fsid;
+
+        // Max filename length
+        st.f_namemax = 255;
+
+        Ok(st)
     }
 
     fn mkdir(
@@ -472,11 +524,44 @@ impl FileSystem for PassthroughFs {
     fn open(
         &self,
         _ctx: Context,
-        _inode: Self::Inode,
-        _flags: u32,
+        inode: Self::Inode,
+        flags: u32,
     ) -> io::Result<(Option<Self::Handle>, OpenOptions)> {
-        // TODO: Implement open
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+        let path = self.get_path(inode)?;
+
+        // Verify the file exists and is a regular file
+        let metadata = fs::metadata(&path)?;
+        if !metadata.is_file() {
+            return Err(io::Error::from_raw_os_error(libc::EISDIR));
+        }
+
+        // Create a new handle
+        let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
+
+        // Store handle data
+        let handle_data = Arc::new(HandleData {
+            inode,
+            path: path.clone(),
+        });
+
+        self.handles.write().unwrap().insert(handle, handle_data);
+
+        // Determine open options based on flags
+        let mut opts = OpenOptions::empty();
+
+        // Check for direct I/O flag (O_DIRECT)
+        const O_DIRECT: u32 = 0x4000;
+        if flags & O_DIRECT != 0 {
+            opts |= OpenOptions::DIRECT_IO;
+        }
+
+        // Check for keep cache flag
+        const O_SYNC: u32 = 0x101000;
+        if flags & O_SYNC == 0 {
+            opts |= OpenOptions::KEEP_CACHE;
+        }
+
+        Ok((Some(handle), opts))
     }
 
     fn release(
@@ -484,13 +569,14 @@ impl FileSystem for PassthroughFs {
         _ctx: Context,
         _inode: Self::Inode,
         _flags: u32,
-        _handle: Self::Handle,
+        handle: Self::Handle,
         _flush: bool,
         _flock_release: bool,
         _lock_owner: Option<u64>,
     ) -> io::Result<()> {
-        // TODO: Implement release
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+        // Remove the handle from our tracking
+        self.handles.write().unwrap().remove(&handle);
+        Ok(())
     }
 
     fn create(
@@ -516,15 +602,40 @@ impl FileSystem for PassthroughFs {
         &self,
         _ctx: Context,
         _inode: Self::Inode,
-        _handle: Self::Handle,
-        _w: W,
-        _size: u32,
-        _offset: u64,
+        handle: Self::Handle,
+        mut w: W,
+        size: u32,
+        offset: u64,
         _lock_owner: Option<u64>,
         _flags: u32,
     ) -> io::Result<usize> {
-        // TODO: Implement read
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+        // Get the path from the handle
+        let handles = self.handles.read().unwrap();
+        let handle_data = handles
+            .get(&handle)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))?;
+
+        let path = &handle_data.path;
+
+        // Open the file for reading
+        use std::fs::File;
+        use std::io::{Read, Seek, SeekFrom};
+
+        let mut file = File::open(path)?;
+
+        // Seek to the requested offset
+        file.seek(SeekFrom::Start(offset))?;
+
+        // Read data into a buffer
+        let mut buffer = vec![0u8; size as usize];
+        let bytes_read = file.read(&mut buffer)?;
+
+        // Write to the output writer
+        if bytes_read > 0 {
+            w.write_all(&buffer[..bytes_read])?;
+        }
+
+        Ok(bytes_read)
     }
 
     fn write<R: io::Read + ZeroCopyReader>(
