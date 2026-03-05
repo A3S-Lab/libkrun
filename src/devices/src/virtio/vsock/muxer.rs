@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+#[cfg(not(target_os = "windows"))]
 use std::os::unix::io::RawFd;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
@@ -13,8 +14,14 @@ use super::proxy::{Proxy, ProxyRemoval, ProxyUpdate};
 use super::reaper::ReaperThread;
 #[cfg(target_os = "macos")]
 use super::timesync::TimesyncThread;
+#[cfg(not(target_os = "windows"))]
 use super::tsi_dgram::TsiDgramProxy;
+#[cfg(not(target_os = "windows"))]
 use super::tsi_stream::TsiStreamProxy;
+#[cfg(target_os = "windows")]
+use super::tsi_dgram_windows::TsiDgramProxyWindowsWrapper;
+#[cfg(target_os = "windows")]
+use super::tsi_stream_windows::TsiStreamProxyWindowsWrapper;
 use super::unix::UnixProxy;
 use super::TsiFlags;
 use super::VsockError;
@@ -26,6 +33,11 @@ use crate::virtio::InterruptTransport;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 pub type ProxyMap = Arc<RwLock<HashMap<u64, Mutex<Box<dyn Proxy>>>>>;
+
+#[cfg(not(target_os = "windows"))]
+pub type RawFdType = RawFd;
+#[cfg(target_os = "windows")]
+pub type RawFdType = i32;
 
 /// A muxer RX queue item.
 #[derive(Debug)]
@@ -295,7 +307,8 @@ impl VsockMuxer {
                         warn!("rejecting stream inet proxy because HIJACK_INET is disabled");
                         return;
                     }
-                    match TsiStreamProxy::new(
+                    #[cfg(not(target_os = "windows"))]
+                    let proxy_result = TsiStreamProxy::new(
                         id,
                         self.cid,
                         req.family,
@@ -305,7 +318,20 @@ impl VsockMuxer {
                         mem.clone(),
                         queue.clone(),
                         self.rxq.clone(),
-                    ) {
+                    );
+                    #[cfg(target_os = "windows")]
+                    let proxy_result = TsiStreamProxyWindowsWrapper::new(
+                        id,
+                        self.cid,
+                        req.family,
+                        defs::TSI_PROXY_PORT,
+                        req.peer_port,
+                        pkt.src_port(),
+                        mem.clone(),
+                        queue.clone(),
+                        self.rxq.clone(),
+                    );
+                    match proxy_result {
                         Ok(proxy) => {
                             self.proxy_map
                                 .write()
@@ -330,7 +356,8 @@ impl VsockMuxer {
                         warn!("rejecting dgram inet proxy because HIJACK_INET is disabled");
                         return;
                     }
-                    match TsiDgramProxy::new(
+                    #[cfg(not(target_os = "windows"))]
+                    let proxy_result = TsiDgramProxy::new(
                         id,
                         self.cid,
                         req.family,
@@ -338,7 +365,20 @@ impl VsockMuxer {
                         mem.clone(),
                         queue.clone(),
                         self.rxq.clone(),
-                    ) {
+                    );
+                    #[cfg(target_os = "windows")]
+                    let proxy_result = TsiDgramProxyWindowsWrapper::new(
+                        id,
+                        self.cid,
+                        req.family,
+                        defs::TSI_PROXY_PORT,
+                        req.peer_port,
+                        pkt.src_port(),
+                        mem.clone(),
+                        queue.clone(),
+                        self.rxq.clone(),
+                    );
+                    match proxy_result {
                         Ok(proxy) => {
                             self.proxy_map
                                 .write()
