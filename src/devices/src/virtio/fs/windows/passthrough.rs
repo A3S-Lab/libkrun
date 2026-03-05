@@ -1,6 +1,7 @@
 // Windows passthrough filesystem implementation
 // Phase 1: Core data structures and basic read-only operations (completed)
 // Phase 2: File read operations (completed)
+// Phase 3: Write operations (completed)
 
 use std::collections::BTreeMap;
 use std::ffi::CStr;
@@ -506,19 +507,51 @@ impl FileSystem for PassthroughFs {
     fn mkdir(
         &self,
         _ctx: Context,
-        _parent: Self::Inode,
-        _name: &CStr,
+        parent: Self::Inode,
+        name: &CStr,
         _mode: u32,
         _umask: u32,
         _extensions: Extensions,
     ) -> io::Result<Entry> {
-        // TODO: Implement mkdir
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+        let parent_path = self.get_path(parent)?;
+        let name_str = name.to_str().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let new_path = parent_path.join(name_str);
+
+        // Create the directory
+        fs::create_dir(&new_path)?;
+
+        // Get or create inode for the new directory
+        let inode = self.get_or_create_inode(&new_path)?;
+
+        // Get metadata
+        let metadata = fs::metadata(&new_path)?;
+        let st = self.metadata_to_stat(&metadata, inode);
+
+        Ok(Entry {
+            inode,
+            generation: 0,
+            attr: st,
+            attr_flags: 0,
+            attr_timeout: self.cfg.attr_timeout,
+            entry_timeout: self.cfg.entry_timeout,
+        })
     }
 
-    fn rmdir(&self, _ctx: Context, _parent: Self::Inode, _name: &CStr) -> io::Result<()> {
-        // TODO: Implement rmdir
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+    fn rmdir(&self, _ctx: Context, parent: Self::Inode, name: &CStr) -> io::Result<()> {
+        let parent_path = self.get_path(parent)?;
+        let name_str = name.to_str().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let dir_path = parent_path.join(name_str);
+
+        // Remove the directory
+        fs::remove_dir(&dir_path)?;
+
+        // Remove from inode tracking
+        let inode_opt = self.path_to_inode.write().unwrap().remove(&dir_path);
+        if let Some(inode) = inode_opt {
+            self.inodes.write().unwrap().remove(&inode);
+        }
+
+        Ok(())
     }
 
     fn open(
@@ -582,20 +615,81 @@ impl FileSystem for PassthroughFs {
     fn create(
         &self,
         _ctx: Context,
-        _parent: Self::Inode,
-        _name: &CStr,
+        parent: Self::Inode,
+        name: &CStr,
         _mode: u32,
-        _flags: u32,
+        flags: u32,
         _umask: u32,
         _extensions: Extensions,
     ) -> io::Result<(Entry, Option<Self::Handle>, OpenOptions)> {
-        // TODO: Implement create
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+        let parent_path = self.get_path(parent)?;
+        let name_str = name.to_str().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let new_path = parent_path.join(name_str);
+
+        // Create the file
+        use std::fs::File;
+        File::create(&new_path)?;
+
+        // Get or create inode for the new file
+        let inode = self.get_or_create_inode(&new_path)?;
+
+        // Create a handle for the new file
+        let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
+
+        // Store handle data
+        let handle_data = Arc::new(HandleData {
+            inode,
+            path: new_path.clone(),
+        });
+
+        self.handles.write().unwrap().insert(handle, handle_data);
+
+        // Get metadata
+        let metadata = fs::metadata(&new_path)?;
+        let st = self.metadata_to_stat(&metadata, inode);
+
+        // Determine open options based on flags
+        let mut opts = OpenOptions::empty();
+
+        const O_DIRECT: u32 = 0x4000;
+        if flags & O_DIRECT != 0 {
+            opts |= OpenOptions::DIRECT_IO;
+        }
+
+        const O_SYNC: u32 = 0x101000;
+        if flags & O_SYNC == 0 {
+            opts |= OpenOptions::KEEP_CACHE;
+        }
+
+        Ok((
+            Entry {
+                inode,
+                generation: 0,
+                attr: st,
+                attr_flags: 0,
+                attr_timeout: self.cfg.attr_timeout,
+                entry_timeout: self.cfg.entry_timeout,
+            },
+            Some(handle),
+            opts,
+        ))
     }
 
-    fn unlink(&self, _ctx: Context, _parent: Self::Inode, _name: &CStr) -> io::Result<()> {
-        // TODO: Implement unlink
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+    fn unlink(&self, _ctx: Context, parent: Self::Inode, name: &CStr) -> io::Result<()> {
+        let parent_path = self.get_path(parent)?;
+        let name_str = name.to_str().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let file_path = parent_path.join(name_str);
+
+        // Remove the file
+        fs::remove_file(&file_path)?;
+
+        // Remove from inode tracking
+        let inode_opt = self.path_to_inode.write().unwrap().remove(&file_path);
+        if let Some(inode) = inode_opt {
+            self.inodes.write().unwrap().remove(&inode);
+        }
+
+        Ok(())
     }
 
     fn read<W: io::Write + ZeroCopyWriter>(
@@ -642,42 +736,131 @@ impl FileSystem for PassthroughFs {
         &self,
         _ctx: Context,
         _inode: Self::Inode,
-        _handle: Self::Handle,
-        _r: R,
-        _size: u32,
-        _offset: u64,
+        handle: Self::Handle,
+        mut r: R,
+        size: u32,
+        offset: u64,
         _lock_owner: Option<u64>,
         _delayed_write: bool,
         _kill_priv: bool,
         _flags: u32,
     ) -> io::Result<usize> {
-        // TODO: Implement write
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+        // Get the path from the handle
+        let handles = self.handles.read().unwrap();
+        let handle_data = handles
+            .get(&handle)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))?;
+
+        let path = &handle_data.path;
+
+        // Open the file for writing
+        use std::fs::OpenOptions as StdOpenOptions;
+        use std::io::{Seek, SeekFrom, Write};
+
+        let mut file = StdOpenOptions::new()
+            .write(true)
+            .open(path)?;
+
+        // Seek to the requested offset
+        file.seek(SeekFrom::Start(offset))?;
+
+        // Read data from the input reader and write to file
+        let mut buffer = vec![0u8; size as usize];
+        let bytes_read = r.read(&mut buffer)?;
+
+        if bytes_read > 0 {
+            file.write_all(&buffer[..bytes_read])?;
+        }
+
+        Ok(bytes_read)
     }
 
     fn setattr(
         &self,
         _ctx: Context,
-        _inode: Self::Inode,
-        _attr: bindings::stat64,
+        inode: Self::Inode,
+        attr: bindings::stat64,
         _handle: Option<Self::Handle>,
-        _valid: SetattrValid,
+        valid: SetattrValid,
     ) -> io::Result<(bindings::stat64, Duration)> {
-        // TODO: Implement setattr
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+        let path = self.get_path(inode)?;
+
+        // Handle size changes (truncate)
+        if valid.contains(SetattrValid::SIZE) {
+            use std::fs::OpenOptions as StdOpenOptions;
+            let file = StdOpenOptions::new()
+                .write(true)
+                .open(&path)?;
+            file.set_len(attr.st_size as u64)?;
+        }
+
+        // Handle time changes
+        if valid.contains(SetattrValid::ATIME) || valid.contains(SetattrValid::MTIME) {
+            use std::fs::File;
+            use std::time::UNIX_EPOCH;
+
+            let file = File::open(&path)?;
+
+            // Windows doesn't support setting atime/mtime separately via std::fs
+            // We would need to use Windows API (SetFileTime) for full support
+            // For now, just update the modification time if MTIME is set
+            if valid.contains(SetattrValid::MTIME) {
+                let mtime = UNIX_EPOCH + Duration::from_secs(attr.st_mtime as u64);
+                file.set_modified(mtime)?;
+            }
+        }
+
+        // Note: Windows doesn't support POSIX permissions (mode) or ownership (uid/gid)
+        // These would require mapping to Windows ACLs, which is complex
+        // For now, we ignore MODE, UID, GID changes
+
+        // Get updated metadata
+        let metadata = fs::metadata(&path)?;
+        let st = self.metadata_to_stat(&metadata, inode);
+
+        Ok((st, self.cfg.attr_timeout))
     }
 
     fn rename(
         &self,
         _ctx: Context,
-        _olddir: Self::Inode,
-        _oldname: &CStr,
-        _newdir: Self::Inode,
-        _newname: &CStr,
+        olddir: Self::Inode,
+        oldname: &CStr,
+        newdir: Self::Inode,
+        newname: &CStr,
         _flags: u32,
     ) -> io::Result<()> {
-        // TODO: Implement rename
-        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+        let olddir_path = self.get_path(olddir)?;
+        let newdir_path = self.get_path(newdir)?;
+
+        let oldname_str = oldname.to_str().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let newname_str = newname.to_str().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+
+        let old_path = olddir_path.join(oldname_str);
+        let new_path = newdir_path.join(newname_str);
+
+        // Perform the rename
+        fs::rename(&old_path, &new_path)?;
+
+        // Update inode tracking
+        let mut path_to_inode = self.path_to_inode.write().unwrap();
+        if let Some(inode) = path_to_inode.remove(&old_path) {
+            path_to_inode.insert(new_path.clone(), inode);
+
+            // Update the path in InodeData
+            if let Some(inode_data) = self.inodes.write().unwrap().get_mut(&inode) {
+                // We need to update the path, but InodeData.path is not mutable
+                // For now, we'll remove and re-insert with updated path
+                let new_inode_data = Arc::new(InodeData {
+                    inode,
+                    path: new_path,
+                    refcount: AtomicU64::new(inode_data.refcount.load(Ordering::SeqCst)),
+                });
+                self.inodes.write().unwrap().insert(inode, new_inode_data);
+            }
+        }
+
+        Ok(())
     }
 
     fn mknod(
