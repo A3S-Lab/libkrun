@@ -31,6 +31,7 @@ const QUEUE_SIZE: u16 = 256;
 
 const VIRTIO_F_VERSION_1: u32 = 32;
 const VIRTIO_F_IN_ORDER: usize = 35;
+#[allow(dead_code)] // Reserved for future DGRAM implementation
 const VIRTIO_VSOCK_F_DGRAM: u32 = 3;
 const VSOCK_HOST_CID: u64 = 2;
 
@@ -547,8 +548,8 @@ impl Vsock {
 
                 // Read up to the available credit amount
                 let read_size = (available_credit as usize).min(4096);
-                let mut rx_buf = vec![0_u8; read_size];
-                match state.stream.read(&mut rx_buf) {
+                let mut rx_buf = [0u8; 4096];
+                match state.stream.read(&mut rx_buf[..read_size]) {
                     Ok(n) if n > 0 => {
                         // Update tx_cnt to track bytes sent to peer
                         state.tx_cnt = state.tx_cnt.saturating_add(n as u32);

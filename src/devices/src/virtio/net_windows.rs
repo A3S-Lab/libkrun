@@ -20,7 +20,7 @@ use utils::eventfd::{EventFd, EFD_NONBLOCK};
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
 use super::{
-    ActivateError, ActivateResult, DescriptorChain, DeviceState, InterruptTransport, Queue,
+    ActivateError, ActivateResult, DeviceState, InterruptTransport, Queue,
     VirtioDevice, TYPE_NET,
 };
 
@@ -183,12 +183,11 @@ impl Net {
         while let Some(head) = self.queues[TX_INDEX].pop(mem) {
             let index = head.index;
             let mut total_len: u32 = 0;
-            let mut hdr_bytes = vec![0u8; VIRTIO_NET_HDR_SIZE];
+            let mut hdr_bytes = [0u8; VIRTIO_NET_HDR_SIZE];
             let mut hdr_bytes_read: usize = 0;
-            let mut frame_data = Vec::new();
+            let mut frame_data = Vec::with_capacity(1500); // Pre-allocate for typical MTU
 
-            let descs: Vec<DescriptorChain<'_>> = head.into_iter().collect();
-            for desc in &descs {
+            for desc in head.into_iter() {
                 if desc.is_write_only() {
                     continue;
                 }
