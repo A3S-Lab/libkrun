@@ -290,12 +290,22 @@ impl MmioTransport {
                 self.device_status = status;
             }
             DRIVER_OK if self.device_status == (ACKNOWLEDGE | DRIVER | FEATURES_OK) => {
-                self.device_status = status;
                 let device_activated = self.locked_device().is_activated();
                 if !device_activated {
-                    self.locked_device()
-                        .activate(self.mem.clone(), self.interrupt.clone())
-                        .expect("Failed to activate device");
+                    let activation_result = self.locked_device()
+                        .activate(self.mem.clone(), self.interrupt.clone());
+
+                    match activation_result {
+                        Ok(()) => {
+                            self.device_status = status;
+                        }
+                        Err(e) => {
+                            error!("virtio-mmio: device activation failed: {:?}", e);
+                            self.device_status |= FAILED;
+                        }
+                    }
+                } else {
+                    self.device_status = status;
                 }
             }
             _ if (status & FAILED) != 0 => {
