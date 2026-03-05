@@ -43,10 +43,12 @@ pub struct PortIODeviceManager {
     pub stdio_serial: Vec<Arc<Mutex<devices::legacy::Serial>>>,
     pub i8042: Arc<Mutex<devices::legacy::I8042Device>>,
 
+    #[allow(dead_code)]
     pub com_evt_1: EventFd,
     pub com_evt_2: EventFd,
     pub com_evt_3: EventFd,
     pub com_evt_4: EventFd,
+    #[allow(dead_code)]
     pub kbd_evt: EventFd,
 }
 

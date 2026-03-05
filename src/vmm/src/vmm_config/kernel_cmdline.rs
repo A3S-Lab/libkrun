@@ -8,7 +8,11 @@ pub const DEFAULT_KERNEL_CMDLINE: &str = "reboot=k panic=-1 panic_print=0 nomodu
                                           rootfstype=virtiofs rw quiet no-kvmapf";
 #[cfg(target_os = "macos")]
 pub const DEFAULT_KERNEL_CMDLINE: &str = "reboot=k panic=-1 panic_print=0 nomodule console=hvc0 \
-                                          rootfstype=virtiofs rw quiet no-kvmapf";
+                                           rootfstype=virtiofs rw quiet no-kvmapf";
+#[cfg(target_os = "windows")]
+pub const DEFAULT_KERNEL_CMDLINE: &str =
+    "reboot=k panic=-1 panic_print=0 nomodule console=ttyS0,115200 console=hvc0 \
+     rootfstype=virtiofs rw quiet no-kvmapf";
 
 /// Strongly typed data structure used to configure the boot source of the
 /// microvm.

@@ -45,13 +45,13 @@ krun_start_enter(ctx);
 
 libkrun 内部集成了一个完整的 VMM，包含：
 
-| 组件 | 作用 |
-|------|------|
-| vCPU 管理 | 创建、运行、销毁虚拟 CPU |
-| 内存管理 | 分配 guest 物理内存 |
-| 设备模拟 | virtio 设备（console、fs、net、block 等）|
-| 中断控制器 | 模拟 APIC/GIC |
-| 引导加载 | 将内核加载到 guest 内存并启动 |
+| 组件       | 作用                                      |
+| ---------- | ----------------------------------------- |
+| vCPU 管理  | 创建、运行、销毁虚拟 CPU                  |
+| 内存管理   | 分配 guest 物理内存                       |
+| 设备模拟   | virtio 设备（console、fs、net、block 等） |
+| 中断控制器 | 模拟 APIC/GIC                             |
+| 引导加载   | 将内核加载到 guest 内存并启动             |
 
 ---
 
@@ -92,10 +92,10 @@ libkrunfw 中的内核不是标准的发行版内核，它包含了专门的补�
 
 ### 多种变体
 
-| 变体 | 库名 | 用途 |
-|------|------|------|
-| 标准版 | `libkrunfw.so.5` | 通用虚拟化 |
-| SEV 版 | `libkrunfw-sev.so.5` | AMD 内存加密 |
+| 变体   | 库名                   | 用途             |
+| ------ | ---------------------- | ---------------- |
+| 标准版 | `libkrunfw.so.5`     | 通用虚拟化       |
+| SEV 版 | `libkrunfw-sev.so.5` | AMD 内存加密     |
 | TDX 版 | `libkrunfw-tdx.so.5` | Intel 可信域扩展 |
 
 ---
@@ -133,6 +133,7 @@ TSI 等核心功能需要 libkrunfw 中的定制内核，无法使用发行版�
 
 **2. 工作负载兼容性有限**
 libkrun 的设计目标是运行单个进程，而非通用虚拟机。不支持：
+
 - 需要特殊内核模块的工作负载
 - 需要 UEFI/BIOS 的操作系统安装（EFI 变体除外）
 - 需要 PCI 直通的场景
@@ -173,17 +174,17 @@ Hyper-V Hypervisor (内核态)
 
 ### WHPX 核心 API
 
-| API | 作用 |
-|-----|------|
-| `WHvCreatePartition` | 创建虚拟机分区 |
-| `WHvSetupPartition` | 配置分区参数 |
-| `WHvMapGpaRange` | 映射 guest 物理内存 |
-| `WHvCreateVirtualProcessor` | 创建 vCPU |
-| `WHvRunVirtualProcessor` | 运行 vCPU 直到 VM exit |
-| `WHvGetVirtualProcessorRegisters` | 读取 vCPU 寄存器 |
-| `WHvSetVirtualProcessorRegisters` | 写入 vCPU 寄存器 |
-| `WHvDeleteVirtualProcessor` | 销毁 vCPU |
-| `WHvDeletePartition` | 销毁分区 |
+| API                                 | 作用                   |
+| ----------------------------------- | ---------------------- |
+| `WHvCreatePartition`              | 创建虚拟机分区         |
+| `WHvSetupPartition`               | 配置分区参数           |
+| `WHvMapGpaRange`                  | 映射 guest 物理内存    |
+| `WHvCreateVirtualProcessor`       | 创建 vCPU              |
+| `WHvRunVirtualProcessor`          | 运行 vCPU 直到 VM exit |
+| `WHvGetVirtualProcessorRegisters` | 读取 vCPU 寄存器       |
+| `WHvSetVirtualProcessorRegisters` | 写入 vCPU 寄存器       |
+| `WHvDeleteVirtualProcessor`       | 销毁 vCPU              |
+| `WHvDeletePartition`              | 销毁分区               |
 
 ### VM Exit 处理机制
 
@@ -247,14 +248,14 @@ pub enum VcpuExit<'a> {
 
 ### 与 KVM/HVF 的对比
 
-| 特性 | KVM (Linux) | HVF (macOS) | WHPX (Windows) |
-|------|-------------|-------------|----------------|
-| API 层次 | 内核 ioctl | 用户态框架 | 用户态 DLL |
-| 内存映射 | `KVM_SET_USER_MEMORY_REGION` | `hv_vm_map` | `WHvMapGpaRange` |
-| vCPU 运行 | `KVM_RUN` ioctl | `hv_vcpu_run` | `WHvRunVirtualProcessor` |
-| Exit 信息 | `kvm_run` 共享内存 | `hv_vcpu_exit_t` | `WHV_RUN_VP_EXIT_CONTEXT` |
-| 寄存器访问 | `KVM_GET/SET_REGS` | `hv_vcpu_get/set_reg` | `WHvGet/SetVirtualProcessorRegisters` |
-| 最低系统要求 | Linux + KVM 模块 | macOS 11+ ARM64 | Windows 10 2004+ + Hyper-V |
+| 特性         | KVM (Linux)                    | HVF (macOS)             | WHPX (Windows)                          |
+| ------------ | ------------------------------ | ----------------------- | --------------------------------------- |
+| API 层次     | 内核 ioctl                     | 用户态框架              | 用户态 DLL                              |
+| 内存映射     | `KVM_SET_USER_MEMORY_REGION` | `hv_vm_map`           | `WHvMapGpaRange`                      |
+| vCPU 运行    | `KVM_RUN` ioctl              | `hv_vcpu_run`         | `WHvRunVirtualProcessor`              |
+| Exit 信息    | `kvm_run` 共享内存           | `hv_vcpu_exit_t`      | `WHV_RUN_VP_EXIT_CONTEXT`             |
+| 寄存器访问   | `KVM_GET/SET_REGS`           | `hv_vcpu_get/set_reg` | `WHvGet/SetVirtualProcessorRegisters` |
+| 最低系统要求 | Linux + KVM 模块               | macOS 11+ ARM64         | Windows 10 2004+ + Hyper-V              |
 
 ### Windows 支持的意义
 

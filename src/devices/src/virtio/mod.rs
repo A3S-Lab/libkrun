@@ -10,17 +10,27 @@ use std;
 use std::any::Any;
 use std::io::Error as IOError;
 
-#[cfg(not(feature = "tee"))]
+#[cfg(all(not(feature = "tee"), not(target_os = "windows")))]
 pub mod balloon;
+#[cfg(target_os = "windows")]
+mod balloon_windows;
 #[allow(dead_code)]
 #[allow(non_camel_case_types)]
 pub mod bindings;
 #[cfg(feature = "blk")]
 pub mod block;
+#[cfg(target_os = "windows")]
+pub mod block_windows;
+#[cfg(not(target_os = "windows"))]
 pub mod console;
+#[cfg(target_os = "windows")]
+mod console_windows;
 pub mod descriptor_utils;
 pub mod device;
+#[cfg(not(target_os = "windows"))]
 pub mod file_traits;
+#[cfg(target_os = "windows")]
+pub mod file_traits_windows;
 #[cfg(not(any(feature = "tee", feature = "nitro")))]
 pub mod fs;
 #[cfg(feature = "gpu")]
@@ -31,19 +41,35 @@ pub mod linux_errno;
 mod mmio;
 #[cfg(feature = "net")]
 pub mod net;
+#[cfg(target_os = "windows")]
+pub mod net_windows;
 mod queue;
-#[cfg(not(feature = "tee"))]
+#[cfg(all(not(feature = "tee"), not(target_os = "windows")))]
 pub mod rng;
+#[cfg(target_os = "windows")]
+mod rng_windows;
 #[cfg(feature = "snd")]
 pub mod snd;
+#[cfg(not(target_os = "windows"))]
 pub mod vsock;
+#[cfg(target_os = "windows")]
+mod vsock_windows;
 
-#[cfg(not(feature = "tee"))]
+#[cfg(all(not(feature = "tee"), not(target_os = "windows")))]
 pub use self::balloon::*;
+#[cfg(target_os = "windows")]
+pub use self::balloon_windows::*;
 #[cfg(feature = "blk")]
 pub use self::block::{Block, CacheType};
+#[cfg(target_os = "windows")]
+pub use self::block_windows::Block as BlockWindows;
+#[cfg(not(target_os = "windows"))]
 pub use self::console::*;
+#[cfg(target_os = "windows")]
+pub use self::console_windows::*;
 pub use self::device::*;
+#[cfg(target_os = "windows")]
+pub use self::file_traits_windows as file_traits;
 #[cfg(not(any(feature = "tee", feature = "nitro")))]
 pub use self::fs::*;
 #[cfg(feature = "gpu")]
@@ -51,12 +77,19 @@ pub use self::gpu::*;
 pub use self::mmio::*;
 #[cfg(feature = "net")]
 pub use self::net::Net;
+#[cfg(target_os = "windows")]
+pub use self::net_windows::Net as NetWindows;
 pub use self::queue::{Descriptor, DescriptorChain, Queue};
-#[cfg(not(feature = "tee"))]
+#[cfg(all(not(feature = "tee"), not(target_os = "windows")))]
 pub use self::rng::*;
+#[cfg(target_os = "windows")]
+pub use self::rng_windows::*;
 #[cfg(feature = "snd")]
 pub use self::snd::Snd;
+#[cfg(not(target_os = "windows"))]
 pub use self::vsock::*;
+#[cfg(target_os = "windows")]
+pub use self::vsock_windows::*;
 
 /// When the driver initializes the device, it lets the device know about the
 /// completed stages using the Device Status Field.

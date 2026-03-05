@@ -30,9 +30,9 @@ mod linux;
 use crate::linux::vstate;
 #[cfg(target_os = "macos")]
 mod macos;
+mod terminal;
 #[cfg(target_os = "windows")]
 mod windows;
-mod terminal;
 pub mod worker;
 
 #[cfg(target_os = "macos")]
@@ -46,13 +46,13 @@ use std::io;
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::time::Duration;
 
 #[cfg(target_arch = "x86_64")]
 use crate::device_manager::legacy::PortIODeviceManager;
 use crate::device_manager::mmio::MMIODeviceManager;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use crate::vstate::VcpuEvent;
 use crate::vstate::{Vcpu, VcpuHandle, VcpuResponse, Vm};
 
@@ -246,7 +246,7 @@ impl Vmm {
     }
 
     /// Sends a resume command to the vcpus.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub fn resume_vcpus(&mut self) -> Result<()> {
         for handle in self.vcpus_handles.iter() {
             handle

@@ -308,13 +308,22 @@ impl<W: ZeroCopyWriter> ZeroCopyWriter for &mut W {
 #[derive(Clone, Copy, Debug)]
 pub struct Context {
     /// The user ID of the calling process.
+    #[cfg(not(target_os = "windows"))]
     pub uid: libc::uid_t,
+    #[cfg(target_os = "windows")]
+    pub uid: super::bindings::uid_t,
 
     /// The group ID of the calling process.
+    #[cfg(not(target_os = "windows"))]
     pub gid: libc::gid_t,
+    #[cfg(target_os = "windows")]
+    pub gid: super::bindings::gid_t,
 
     /// The thread group ID of the calling process.
+    #[cfg(not(target_os = "windows"))]
     pub pid: libc::pid_t,
+    #[cfg(target_os = "windows")]
+    pub pid: super::bindings::pid_t,
 }
 
 impl From<fuse::InHeader> for Context {

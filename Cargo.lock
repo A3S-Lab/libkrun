@@ -446,6 +446,7 @@ dependencies = [
  "virtio-bindings",
  "vm-fdt",
  "vm-memory",
+ "windows",
  "zerocopy",
 ]
 
@@ -1757,6 +1758,7 @@ dependencies = [
  "log",
  "nix 0.30.1",
  "vmm-sys-util 0.14.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1802,8 +1804,6 @@ checksum = "7e21282841a059bb62627ce8441c491f09603622cd5a21c43bfedc85a2952f23"
 [[package]]
 name = "vm-memory"
 version = "0.16.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd5e56d48353c5f54ef50bd158a0452fc82f5383da840f7b8efc31695dd3b9d"
 dependencies = [
  "libc",
  "thiserror 1.0.69",

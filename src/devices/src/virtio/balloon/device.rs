@@ -1,4 +1,5 @@
 use std::cmp;
+#[cfg(not(target_os = "windows"))]
 use std::convert::TryInto;
 use std::io::Write;
 
@@ -106,6 +107,7 @@ impl Balloon {
                     "balloon: should release guest_addr={:?} host_addr={:p} len={}",
                     desc.addr, host_addr, desc.len
                 );
+                #[cfg(not(target_os = "windows"))]
                 unsafe {
                     libc::madvise(
                         host_addr as *mut libc::c_void,
@@ -113,6 +115,11 @@ impl Balloon {
                         libc::MADV_DONTNEED,
                     )
                 };
+                #[cfg(target_os = "windows")]
+                {
+                    // Windows backend currently does not punch free pages back to host.
+                    let _ = host_addr;
+                }
             }
 
             have_used = true;

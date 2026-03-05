@@ -26,11 +26,16 @@ use std::env;
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
 use std::ffi::{c_void, CStr};
+#[cfg(not(target_os = "windows"))]
 use std::fs::File;
+#[cfg(not(target_os = "windows"))]
 use std::io::IsTerminal;
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "windows"))]
 use std::os::fd::AsRawFd;
+#[cfg(not(target_os = "windows"))]
 use std::os::fd::{BorrowedFd, FromRawFd, RawFd};
+#[cfg(target_os = "windows")]
+type RawFd = i32;
 use std::path::PathBuf;
 use std::slice;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -56,6 +61,10 @@ use vmm::vmm_config::kernel_cmdline::{KernelCmdlineConfig, DEFAULT_KERNEL_CMDLIN
 use vmm::vmm_config::machine_config::VmConfig;
 #[cfg(feature = "net")]
 use vmm::vmm_config::net::NetworkInterfaceConfig;
+#[cfg(target_os = "windows")]
+use vmm::vmm_config::net_windows::NetWindowsConfig;
+#[cfg(target_os = "windows")]
+use vmm::vmm_config::block_windows::BlockWindowsConfig;
 use vmm::vmm_config::vsock::VsockDeviceConfig;
 
 #[cfg(feature = "nitro")]
@@ -80,6 +89,17 @@ const KRUNFW_NAME: &str = "libkrunfw-sev.so.5";
 const KRUNFW_NAME: &str = "libkrunfw-tdx.so.5";
 #[cfg(target_os = "macos")]
 const KRUNFW_NAME: &str = "libkrunfw.5.dylib";
+#[cfg(target_os = "windows")]
+const KRUNFW_NAME: &str = "libkrunfw.dll";
+
+#[cfg(not(target_os = "windows"))]
+type KrunUid = libc::uid_t;
+#[cfg(not(target_os = "windows"))]
+type KrunGid = libc::gid_t;
+#[cfg(target_os = "windows")]
+type KrunUid = u32;
+#[cfg(target_os = "windows")]
+type KrunGid = u32;
 
 #[cfg(feature = "nitro")]
 static KRUN_NITRO_DEBUG: Mutex<bool> = Mutex::new(false);
@@ -162,8 +182,8 @@ struct ContextConfig {
     gpu_shm_size: Option<usize>,
     enable_snd: bool,
     console_output: Option<PathBuf>,
-    vmm_uid: Option<libc::uid_t>,
-    vmm_gid: Option<libc::gid_t>,
+    vmm_uid: Option<KrunUid>,
+    vmm_gid: Option<KrunGid>,
 }
 
 impl ContextConfig {
@@ -324,11 +344,11 @@ impl ContextConfig {
         self.gpu_shm_size = Some(shm_size);
     }
 
-    fn set_vmm_uid(&mut self, vmm_uid: libc::uid_t) {
+    fn set_vmm_uid(&mut self, vmm_uid: KrunUid) {
         self.vmm_uid = Some(vmm_uid);
     }
 
-    fn set_vmm_gid(&mut self, vmm_gid: libc::gid_t) {
+    fn set_vmm_gid(&mut self, vmm_gid: KrunGid) {
         self.vmm_gid = Some(vmm_gid);
     }
 }
@@ -475,7 +495,10 @@ pub unsafe extern "C" fn krun_init_log(target: RawFd, level: u32, style: u32, op
         0 /* stdin */ => return -libc::EINVAL,
         1 /* stdout */ => Target::Stdout,
         2 /* stderr */ => Target::Stderr,
+        #[cfg(not(target_os = "windows"))]
         fd => Target::Pipe(Box::new(File::from_raw_fd(fd))),
+        #[cfg(target_os = "windows")]
+        _ => return -libc::EINVAL,
     };
 
     let filter = log_level_to_filter_str(level);
@@ -1103,6 +1126,110 @@ pub unsafe extern "C" fn krun_add_net_tap(
     -libc::EINVAL
 }
 
+/// Add a Windows virtio-net device backed by an optional TCP socket.
+///
+/// - `c_iface_id`: null-terminated ASCII identifier used for MMIO registration.
+/// - `c_mac`: pointer to a 6-byte MAC address.
+/// - `c_tcp_addr`: null-terminated TCP address string (`"host:port"`, e.g.
+///   `"127.0.0.1:9000"`) or `NULL` for a disconnected (drop-all) device.
+///
+/// Returns `KRUN_SUCCESS` (0) on success, or a negative errno on failure.
+#[allow(clippy::missing_safety_doc)]
+#[no_mangle]
+#[cfg(target_os = "windows")]
+pub unsafe extern "C" fn krun_add_net_tcp(
+    ctx_id: u32,
+    c_iface_id: *const c_char,
+    c_mac: *const u8,
+    c_tcp_addr: *const c_char,
+) -> i32 {
+    let iface_id = if !c_iface_id.is_null() {
+        match CStr::from_ptr(c_iface_id).to_str() {
+            Ok(s) => s.to_string(),
+            Err(_) => return -libc::EINVAL,
+        }
+    } else {
+        return -libc::EINVAL;
+    };
+
+    let mac: [u8; 6] = match slice::from_raw_parts(c_mac, 6).try_into() {
+        Ok(m) => m,
+        Err(_) => return -libc::EINVAL,
+    };
+
+    let tcp_addr: Option<std::net::SocketAddr> = if c_tcp_addr.is_null() {
+        None
+    } else {
+        match CStr::from_ptr(c_tcp_addr).to_str() {
+            Ok(s) => match s.parse() {
+                Ok(addr) => Some(addr),
+                Err(_) => return -libc::EINVAL,
+            },
+            Err(_) => return -libc::EINVAL,
+        }
+    };
+
+    match CTX_MAP.lock().unwrap().entry(ctx_id) {
+        Entry::Occupied(mut ctx_cfg) => {
+            let cfg = ctx_cfg.get_mut();
+            if cfg.vmr
+                .add_net_device_windows(NetWindowsConfig { iface_id, mac, tcp_addr })
+                .is_err()
+            {
+                return -libc::EINVAL;
+            }
+        }
+        Entry::Vacant(_) => return -libc::ENOENT,
+    }
+    KRUN_SUCCESS
+}
+
+/// Add a virtio-blk disk device on Windows.
+///
+/// # Arguments
+/// - `ctx_id`: context ID returned by `krun_create_ctx`.
+/// - `c_block_id`: null-terminated device ID string.
+/// - `c_disk_path`: null-terminated path to the raw disk image on the host.
+/// - `read_only`: if `true`, the device is presented as read-only to the guest.
+///
+/// Returns `KRUN_SUCCESS` (0) on success, or a negative errno on failure.
+#[allow(clippy::missing_safety_doc)]
+#[no_mangle]
+#[cfg(target_os = "windows")]
+pub unsafe extern "C" fn krun_add_disk(
+    ctx_id: u32,
+    c_block_id: *const c_char,
+    c_disk_path: *const c_char,
+    read_only: bool,
+) -> i32 {
+    let block_id = match CStr::from_ptr(c_block_id).to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => return -libc::EINVAL,
+    };
+    let disk_path = match CStr::from_ptr(c_disk_path).to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => return -libc::EINVAL,
+    };
+
+    match CTX_MAP.lock().unwrap().entry(ctx_id) {
+        Entry::Occupied(mut ctx_cfg) => {
+            let cfg = ctx_cfg.get_mut();
+            if cfg.vmr
+                .add_block_device_windows(BlockWindowsConfig {
+                    block_id,
+                    disk_image_path: disk_path,
+                    is_disk_read_only: read_only,
+                })
+                .is_err()
+            {
+                return -libc::EINVAL;
+            }
+        }
+        Entry::Vacant(_) => return -libc::ENOENT,
+    }
+    KRUN_SUCCESS
+}
+
 #[allow(clippy::missing_safety_doc)]
 #[no_mangle]
 #[cfg(feature = "net")]
@@ -1403,6 +1530,7 @@ pub unsafe extern "C" fn krun_set_tee_config_file(ctx_id: u32, c_filepath: *cons
 
 #[allow(clippy::missing_safety_doc)]
 #[no_mangle]
+#[cfg(not(target_os = "windows"))]
 pub unsafe extern "C" fn krun_add_vsock_port(
     ctx_id: u32,
     port: u32,
@@ -1413,6 +1541,7 @@ pub unsafe extern "C" fn krun_add_vsock_port(
 
 #[allow(clippy::missing_safety_doc)]
 #[no_mangle]
+#[cfg(not(target_os = "windows"))]
 pub unsafe extern "C" fn krun_add_vsock_port2(
     ctx_id: u32,
     port: u32,
@@ -1444,6 +1573,41 @@ pub unsafe extern "C" fn krun_add_vsock_port2(
                 return -libc::ENODEV;
             }
             cfg.add_vsock_port(port, filepath, listen);
+        }
+        Entry::Vacant(_) => return -libc::ENOENT,
+    }
+
+    KRUN_SUCCESS
+}
+
+/// Map guest vsock `port` to a Windows Named Pipe.
+///
+/// When the guest connects to CID 2 (host) on `port`, the vsock device will
+/// connect to `\\.\pipe\<pipe_name>` on the host.
+#[allow(clippy::missing_safety_doc)]
+#[no_mangle]
+#[cfg(target_os = "windows")]
+pub unsafe extern "C" fn krun_add_vsock_port_windows(
+    ctx_id: u32,
+    port: u32,
+    c_pipe_name: *const c_char,
+) -> i32 {
+    let pipe_name = match CStr::from_ptr(c_pipe_name).to_str() {
+        Ok(s) if !s.is_empty() => s,
+        _ => return -libc::EINVAL,
+    };
+
+    // Store the pipe name as a PathBuf with no extension so that the Windows
+    // vsock backend's file_stem() extraction returns the full name unchanged.
+    let path = PathBuf::from(pipe_name);
+
+    match CTX_MAP.lock().unwrap().entry(ctx_id) {
+        Entry::Occupied(mut ctx_cfg) => {
+            let cfg = ctx_cfg.get_mut();
+            if cfg.vsock_config == VsockConfig::Disabled {
+                return -libc::ENODEV;
+            }
+            cfg.add_vsock_port(port, path, false);
         }
         Entry::Vacant(_) => return -libc::ENOENT,
     }
@@ -1784,6 +1948,8 @@ pub extern "C" fn krun_get_shutdown_eventfd(ctx_id: u32) -> i32 {
                 return efd.get_write_fd();
                 #[cfg(target_os = "linux")]
                 return efd.as_raw_fd();
+                #[cfg(target_os = "windows")]
+                return efd.as_raw_fd();
             } else {
                 -libc::EINVAL
             }
@@ -1945,7 +2111,11 @@ fn create_virtio_net(
         .expect("Failed to create network interface");
 }
 
-#[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+#[cfg(all(
+    target_arch = "x86_64",
+    not(feature = "tee"),
+    not(target_os = "windows")
+))]
 fn map_kernel(ctx_id: u32, kernel_path: &PathBuf) -> i32 {
     let file = match File::options().read(true).write(false).open(kernel_path) {
         Ok(file) => file,
@@ -2021,8 +2191,14 @@ pub unsafe extern "C" fn krun_set_kernel(
     let format = match kernel_format {
         // For raw kernels in x86_64, we map the kernel into the
         // process and treat it as a bundled kernel.
-        #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
+        #[cfg(all(
+            target_arch = "x86_64",
+            not(feature = "tee"),
+            not(target_os = "windows")
+        ))]
         0 => return map_kernel(ctx_id, &path),
+        #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+        0 => KernelFormat::Raw,
         #[cfg(target_arch = "aarch64")]
         0 => KernelFormat::Raw,
         1 => KernelFormat::Elf,
@@ -2153,7 +2329,7 @@ unsafe fn load_krunfw_payload(
 }
 
 #[no_mangle]
-pub extern "C" fn krun_setuid(ctx_id: u32, uid: libc::uid_t) -> i32 {
+pub extern "C" fn krun_setuid(ctx_id: u32, uid: KrunUid) -> i32 {
     match CTX_MAP.lock().unwrap().entry(ctx_id) {
         Entry::Occupied(mut ctx_cfg) => {
             let cfg = ctx_cfg.get_mut();
@@ -2166,7 +2342,7 @@ pub extern "C" fn krun_setuid(ctx_id: u32, uid: libc::uid_t) -> i32 {
 }
 
 #[no_mangle]
-pub extern "C" fn krun_setgid(ctx_id: u32, gid: libc::gid_t) -> i32 {
+pub extern "C" fn krun_setgid(ctx_id: u32, gid: KrunGid) -> i32 {
     match CTX_MAP.lock().unwrap().entry(ctx_id) {
         Entry::Occupied(mut ctx_cfg) => {
             let cfg = ctx_cfg.get_mut();
@@ -2380,6 +2556,7 @@ pub unsafe extern "C" fn krun_add_console_port_tty(
         }
     };
 
+    #[cfg(not(target_os = "windows"))]
     if !BorrowedFd::borrow_raw(tty_fd).is_terminal() {
         return -libc::ENOTTY;
     }
@@ -2599,7 +2776,9 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
             // Check if TSI should be enabled based on network configuration
             #[cfg(feature = "net")]
             let enable_tsi = ctx_cfg.vmr.net.list.is_empty() && ctx_cfg.legacy_net_cfg.is_none();
-            #[cfg(not(feature = "net"))]
+            #[cfg(all(not(feature = "net"), target_os = "windows"))]
+            let enable_tsi = ctx_cfg.vmr.net_windows.list.is_empty();
+            #[cfg(all(not(feature = "net"), not(target_os = "windows")))]
             let enable_tsi = true;
 
             let has_ipc_map = ctx_cfg.unix_ipc_port_map.is_some();
@@ -2637,6 +2816,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         ctx_cfg.vmr.set_console_output(console_output);
     }
 
+    #[cfg(not(target_os = "windows"))]
     if let Some(gid) = ctx_cfg.vmm_gid {
         if unsafe { libc::setgid(gid) } != 0 {
             error!("Failed to set gid {gid}");
@@ -2644,6 +2824,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     if let Some(uid) = ctx_cfg.vmm_uid {
         if unsafe { libc::setuid(uid) } != 0 {
             error!("Failed to set uid {uid}");

@@ -33,21 +33,62 @@ pub const LINUX_XATTR_REPLACE: libc::c_int = 2;
 pub type stat64 = libc::stat;
 #[cfg(target_os = "linux")]
 pub use libc::stat64;
+#[cfg(target_os = "windows")]
+pub type stat64 = libc::stat;
 
 #[cfg(target_os = "macos")]
 pub type off64_t = libc::off_t;
 #[cfg(target_os = "linux")]
 pub use libc::off64_t;
+#[cfg(target_os = "windows")]
+pub type off64_t = i64;
 
 #[cfg(target_os = "macos")]
 pub type statvfs64 = libc::statvfs;
 #[cfg(target_os = "linux")]
 pub use libc::statvfs64;
+#[cfg(target_os = "windows")]
+pub struct statvfs64 {
+    pub f_bsize: u64,
+    pub f_frsize: u64,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    pub f_bavail: u64,
+    pub f_files: u64,
+    pub f_ffree: u64,
+    pub f_favail: u64,
+    pub f_fsid: u64,
+    pub f_flag: u64,
+    pub f_namemax: u64,
+}
 
 #[cfg(target_os = "macos")]
 pub type ino64_t = libc::ino_t;
 #[cfg(target_os = "linux")]
 pub use libc::ino64_t;
+#[cfg(target_os = "windows")]
+pub type ino64_t = u64;
+
+// Windows type aliases for POSIX types
+#[cfg(target_os = "windows")]
+pub type uid_t = u32;
+#[cfg(target_os = "windows")]
+pub type gid_t = u32;
+#[cfg(target_os = "windows")]
+pub type pid_t = i32;
+
+#[cfg(target_os = "macos")]
+pub type flock64 = libc::flock;
+#[cfg(target_os = "linux")]
+pub use libc::flock64;
+#[cfg(target_os = "windows")]
+pub struct flock64 {
+    pub l_type: i16,
+    pub l_whence: i16,
+    pub l_start: i64,
+    pub l_len: i64,
+    pub l_pid: i32,
+}
 
 #[cfg(target_os = "linux")]
 pub unsafe fn pread64(

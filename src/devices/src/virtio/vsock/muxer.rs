@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+#[cfg(not(target_os = "windows"))]
 use std::os::unix::io::RawFd;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
@@ -13,8 +14,14 @@ use super::proxy::{Proxy, ProxyRemoval, ProxyUpdate};
 use super::reaper::ReaperThread;
 #[cfg(target_os = "macos")]
 use super::timesync::TimesyncThread;
+#[cfg(not(target_os = "windows"))]
 use super::tsi_dgram::TsiDgramProxy;
+#[cfg(not(target_os = "windows"))]
 use super::tsi_stream::TsiStreamProxy;
+#[cfg(target_os = "windows")]
+use super::tsi_dgram_windows::TsiDgramProxyWindowsWrapper;
+#[cfg(target_os = "windows")]
+use super::tsi_stream_windows::TsiStreamProxyWindowsWrapper;
 use super::unix::UnixProxy;
 use super::TsiFlags;
 use super::VsockError;
@@ -26,6 +33,11 @@ use crate::virtio::InterruptTransport;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 pub type ProxyMap = Arc<RwLock<HashMap<u64, Mutex<Box<dyn Proxy>>>>>;
+
+#[cfg(not(target_os = "windows"))]
+pub type RawFdType = RawFd;
+#[cfg(target_os = "windows")]
+pub type RawFdType = i32;
 
 /// A muxer RX queue item.
 #[derive(Debug)]
@@ -295,7 +307,8 @@ impl VsockMuxer {
                         warn!("rejecting stream inet proxy because HIJACK_INET is disabled");
                         return;
                     }
-                    match TsiStreamProxy::new(
+                    #[cfg(not(target_os = "windows"))]
+                    let proxy_result = TsiStreamProxy::new(
                         id,
                         self.cid,
                         req.family,
@@ -305,7 +318,20 @@ impl VsockMuxer {
                         mem.clone(),
                         queue.clone(),
                         self.rxq.clone(),
-                    ) {
+                    );
+                    #[cfg(target_os = "windows")]
+                    let proxy_result = TsiStreamProxyWindowsWrapper::new(
+                        id,
+                        self.cid,
+                        req.family,
+                        defs::TSI_PROXY_PORT,
+                        req.peer_port,
+                        pkt.src_port(),
+                        mem.clone(),
+                        queue.clone(),
+                        self.rxq.clone(),
+                    );
+                    match proxy_result {
                         Ok(proxy) => {
                             self.proxy_map
                                 .write()
@@ -330,7 +356,8 @@ impl VsockMuxer {
                         warn!("rejecting dgram inet proxy because HIJACK_INET is disabled");
                         return;
                     }
-                    match TsiDgramProxy::new(
+                    #[cfg(not(target_os = "windows"))]
+                    let proxy_result = TsiDgramProxy::new(
                         id,
                         self.cid,
                         req.family,
@@ -338,7 +365,20 @@ impl VsockMuxer {
                         mem.clone(),
                         queue.clone(),
                         self.rxq.clone(),
-                    ) {
+                    );
+                    #[cfg(target_os = "windows")]
+                    let proxy_result = TsiDgramProxyWindowsWrapper::new(
+                        id,
+                        self.cid,
+                        req.family,
+                        defs::TSI_PROXY_PORT,
+                        req.peer_port,
+                        pkt.src_port(),
+                        mem.clone(),
+                        queue.clone(),
+                        self.rxq.clone(),
+                    );
+                    match proxy_result {
                         Ok(proxy) => {
                             self.proxy_map
                                 .write()
@@ -609,7 +649,12 @@ impl VsockMuxer {
     }
 
     fn process_op_shutdown(&self, pkt: &VsockPacket) {
-        debug!("OP_SHUTDOWN: src={} dst={} flags={}", pkt.src_port(), pkt.dst_port(), pkt.flags());
+        debug!(
+            "OP_SHUTDOWN: src={} dst={} flags={}",
+            pkt.src_port(),
+            pkt.dst_port(),
+            pkt.flags()
+        );
         let id: u64 = ((pkt.src_port() as u64) << 32) | (pkt.dst_port() as u64);
         debug!("OP_SHUTDOWN: id={:#x}", id);
         if let Some(proxy) = self.proxy_map.read().unwrap().get(&id) {
@@ -632,19 +677,39 @@ impl VsockMuxer {
     }
 
     fn process_stream_rw(&self, pkt: &VsockPacket) {
-        debug!("OP_RW: src={} dst={} len={}", pkt.src_port(), pkt.dst_port(), pkt.len());
+        debug!(
+            "OP_RW: src={} dst={} len={}",
+            pkt.src_port(),
+            pkt.dst_port(),
+            pkt.len()
+        );
         let id: u64 = ((pkt.src_port() as u64) << 32) | (pkt.dst_port() as u64);
         if let Some(proxy_lock) = self.proxy_map.read().unwrap().get(&id) {
             debug!(
                 "allowing OP_RW: id={:#x} src={} dst={} len={}",
-                id, pkt.src_port(), pkt.dst_port(), pkt.len()
+                id,
+                pkt.src_port(),
+                pkt.dst_port(),
+                pkt.len()
             );
             let mut proxy = proxy_lock.lock().unwrap();
             let update = proxy.sendmsg(pkt);
             self.process_proxy_update(id, update);
         } else {
-            let proxy_ids: Vec<String> = self.proxy_map.read().unwrap().keys().map(|k| format!("{:#x}", k)).collect();
-            warn!("invalid OP_RW: id={:#x} src={} dst={}, known proxies: {:?}", id, pkt.src_port(), pkt.dst_port(), proxy_ids);
+            let proxy_ids: Vec<String> = self
+                .proxy_map
+                .read()
+                .unwrap()
+                .keys()
+                .map(|k| format!("{:#x}", k))
+                .collect();
+            warn!(
+                "invalid OP_RW: id={:#x} src={} dst={}, known proxies: {:?}",
+                id,
+                pkt.src_port(),
+                pkt.dst_port(),
+                proxy_ids
+            );
             let mem = match self.mem.as_ref() {
                 Some(m) => m,
                 None => {

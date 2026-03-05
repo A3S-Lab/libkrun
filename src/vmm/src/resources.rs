@@ -7,7 +7,6 @@
 use std::fs::File;
 #[cfg(feature = "tee")]
 use std::io::BufReader;
-use std::os::fd::RawFd;
 use std::path::PathBuf;
 
 #[cfg(feature = "tee")]
@@ -26,6 +25,12 @@ use crate::vmm_config::kernel_cmdline::{KernelCmdlineConfig, KernelCmdlineConfig
 use crate::vmm_config::machine_config::{VmConfig, VmConfigError};
 #[cfg(feature = "net")]
 use crate::vmm_config::net::{NetBuilder, NetworkInterfaceConfig, NetworkInterfaceError};
+#[cfg(target_os = "windows")]
+use crate::vmm_config::block_windows::{
+    BlockWindowsBuilder, BlockWindowsConfig, BlockWindowsError,
+};
+#[cfg(target_os = "windows")]
+use crate::vmm_config::net_windows::{NetWindowsBuilder, NetWindowsConfig, NetWindowsError};
 use crate::vmm_config::vsock::*;
 use crate::vstate::VcpuConfig;
 #[cfg(feature = "gpu")]
@@ -85,14 +90,14 @@ impl Default for TeeConfig {
 }
 
 pub struct SerialConsoleConfig {
-    pub input_fd: RawFd,
-    pub output_fd: RawFd,
+    pub input_fd: i32,
+    pub output_fd: i32,
 }
 
 pub struct DefaultVirtioConsoleConfig {
-    pub input_fd: RawFd,
-    pub output_fd: RawFd,
-    pub err_fd: RawFd,
+    pub input_fd: i32,
+    pub output_fd: i32,
+    pub err_fd: i32,
 }
 
 pub enum VirtioConsoleConfigMode {
@@ -103,12 +108,12 @@ pub enum VirtioConsoleConfigMode {
 pub enum PortConfig {
     Tty {
         name: String,
-        tty_fd: RawFd,
+        tty_fd: i32,
     },
     InOut {
         name: String,
-        input_fd: RawFd,
-        output_fd: RawFd,
+        input_fd: i32,
+        output_fd: i32,
     },
 }
 
@@ -155,6 +160,12 @@ pub struct VmResources {
     /// The network devices builder.
     #[cfg(feature = "net")]
     pub net: NetBuilder,
+    /// Windows virtio-net devices builder.
+    #[cfg(target_os = "windows")]
+    pub net_windows: NetWindowsBuilder,
+    /// Windows virtio-blk devices builder.
+    #[cfg(target_os = "windows")]
+    pub block_windows: BlockWindowsBuilder,
     /// TEE configuration
     #[cfg(feature = "tee")]
     pub tee_config: TeeConfig,
@@ -262,7 +273,7 @@ impl VmResources {
 
     pub fn set_kernel_bundle(&mut self, kernel_bundle: KernelBundle) -> Result<KernelBundleError> {
         // Safe because this call just returns the page size and doesn't have any side effects.
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
+        let page_size = arch::PAGE_SIZE;
 
         if kernel_bundle.host_addr == 0 || (kernel_bundle.host_addr as usize) & (page_size - 1) != 0
         {
@@ -356,6 +367,24 @@ impl VmResources {
         self.net.insert(config)
     }
 
+    /// Adds a Windows virtio-net device to be attached when the VM starts.
+    #[cfg(target_os = "windows")]
+    pub fn add_net_device_windows(
+        &mut self,
+        config: NetWindowsConfig,
+    ) -> std::result::Result<(), NetWindowsError> {
+        self.net_windows.insert(config)
+    }
+
+    /// Adds a Windows virtio-blk device to be attached when the VM starts.
+    #[cfg(target_os = "windows")]
+    pub fn add_block_device_windows(
+        &mut self,
+        config: BlockWindowsConfig,
+    ) -> std::result::Result<(), BlockWindowsError> {
+        self.block_windows.insert(config)
+    }
+
     #[cfg(feature = "tee")]
     pub fn tee_config(&self) -> &TeeConfig {
         &self.tee_config
@@ -413,6 +442,10 @@ mod tests {
             vsock: Default::default(),
             #[cfg(feature = "net")]
             net_builder: Default::default(),
+            #[cfg(target_os = "windows")]
+            net_windows: Default::default(),
+            #[cfg(target_os = "windows")]
+            block_windows: Default::default(),
             gpu_virgl_flags: None,
             gpu_shm_size: None,
             #[cfg(feature = "gpu")]

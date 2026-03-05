@@ -1,0 +1,202 @@
+name: Windows CI
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_whpx_smoke:
+        description: Run WHPX smoke tests on self-hosted runner
+        required: false
+        type: boolean
+        default: false
+      whpx_test_filter:
+        description: Optional cargo test filter for WHPX smoke
+        required: false
+        type: string
+        default: test_whpx_
+      rootfs_dir:
+        description: Optional rootfs dir path on self-hosted runner
+        required: false
+        type: string
+        default: ''
+      cleanup_rootfs:
+        description: Remove rootfs directory after smoke run
+        required: false
+        type: boolean
+        default: false
+      max_rootfs_age_hours:
+        description: Rebuild rootfs if marker age exceeds this value
+        required: false
+        type: string
+        default: '168'
+      dry_run_rootfs_decision:
+        description: Only evaluate rootfs reuse/rebuild decision and exit
+        required: false
+        type: boolean
+        default: false
+      fail_if_rootfs_rebuild:
+        description: Fail run if rootfs decision is rebuild
+        required: false
+        type: boolean
+        default: false
+      rootfs_marker_format:
+        description: Rootfs marker format/version used for reuse checks
+        required: false
+        type: string
+        default: libkrun-windows-smoke-rootfs-v1
+      compatible_rootfs_marker_formats:
+        description: Additional compatible marker formats (comma-separated)
+        required: false
+        type: string
+        default: ''
+      promote_compatible_marker:
+        description: Rewrite compatible marker to primary marker format
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  windows-build-and-tests:
+    name: Windows build and tests
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Create a fake init
+        shell: pwsh
+        run: |
+          New-Item -ItemType File -Path "init/init" -Force | Out-Null
+
+      - name: Build check (Windows target)
+        run: cargo check -p utils -p polly -p devices -p vmm -p libkrun --target x86_64-pc-windows-msvc
+        continue-on-error: true
+
+      - name: Utils tests (Windows)
+        run: cargo test -p utils --target x86_64-pc-windows-msvc --lib
+        continue-on-error: true
+
+      - name: Polly tests
+        run: cargo test -p polly --target x86_64-pc-windows-msvc --lib
+        continue-on-error: true
+
+      - name: VMM tests (Windows)
+        run: cargo test -p vmm --target x86_64-pc-windows-msvc --lib
+        continue-on-error: true
+
+  windows-whpx-smoke:
+    name: Windows WHPX smoke (manual)
+    if: github.event_name == 'workflow_dispatch' && inputs.run_whpx_smoke
+    runs-on: [self-hosted, windows, hyperv]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Create a fake init
+        shell: pwsh
+        run: |
+          New-Item -ItemType File -Path "init/init" -Force | Out-Null
+
+      - name: WHPX smoke suite
+        shell: pwsh
+        run: |
+          $rootfsArgs = @()
+          $cleanupArgs = @()
+          $dryRunArgs = @()
+          $failIfRebuildArgs = @()
+          $promoteArgs = @()
+          if ("${{ inputs.rootfs_dir }}") {
+            $rootfsArgs = @("-RootfsDir", "${{ inputs.rootfs_dir }}")
+          }
+          if ("${{ inputs.cleanup_rootfs }}" -eq "true") {
+            $cleanupArgs = @("-CleanupRootfs")
+          }
+          if ("${{ inputs.dry_run_rootfs_decision }}" -eq "true") {
+            $dryRunArgs = @("-DryRunRootfsDecision")
+          }
+          if ("${{ inputs.fail_if_rootfs_rebuild }}" -eq "true") {
+            $failIfRebuildArgs = @("-FailIfRootfsRebuild")
+          }
+          if ("${{ inputs.promote_compatible_marker }}" -eq "true") {
+            $promoteArgs = @("-PromoteCompatibleMarker")
+          }
+          ./tests/windows/run_whpx_smoke.ps1 -Target x86_64-pc-windows-msvc -TestFilter "${{ inputs.whpx_test_filter }}" -LogDir "$env:RUNNER_TEMP/libkrun-whpx-smoke" -RootfsMarkerFormat "${{ inputs.rootfs_marker_format }}" -CompatibleRootfsMarkerFormats "${{ inputs.compatible_rootfs_marker_formats }}" -MaxRootfsAgeHours "${{ inputs.max_rootfs_age_hours }}" @rootfsArgs @cleanupArgs @dryRunArgs @failIfRebuildArgs @promoteArgs
+
+      - name: Publish WHPX smoke summary
+        if: always()
+        shell: pwsh
+        run: |
+          $summaryFile = "$env:RUNNER_TEMP/libkrun-whpx-smoke/summary.txt"
+          $summaryJsonFile = "$env:RUNNER_TEMP/libkrun-whpx-smoke/summary.json"
+          $phaseFile = "$env:RUNNER_TEMP/libkrun-whpx-smoke/phases.log"
+
+          if ((-not (Test-Path $summaryFile)) -and (-not (Test-Path $summaryJsonFile))) {
+            "## Windows WHPX smoke`n`nFAIL: summary artifact not found." >> $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
+
+          $summary = @{}
+          if (Test-Path $summaryJsonFile) {
+            $json = Get-Content $summaryJsonFile -Raw | ConvertFrom-Json
+            foreach ($prop in $json.PSObject.Properties) {
+              $summary[$prop.Name] = [string]$prop.Value
+            }
+          }
+          else {
+            Get-Content $summaryFile | ForEach-Object {
+              if ($_ -match "^([^=]+)=(.*)$") {
+                $summary[$matches[1]] = $matches[2]
+              }
+            }
+          }
+
+          $status = $summary["status"]
+          if (-not $status) { $status = "unknown" }
+          $icon = if ($status -eq "passed") { "OK" } else { "FAIL" }
+
+          "## Windows WHPX smoke" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "$icon status: **$status**" >> $env:GITHUB_STEP_SUMMARY
+          "- git_sha: $($summary['git_sha'])" >> $env:GITHUB_STEP_SUMMARY
+          "- runner_name: $($summary['runner_name'])" >> $env:GITHUB_STEP_SUMMARY
+          "- runner_os: $($summary['runner_os'])" >> $env:GITHUB_STEP_SUMMARY
+          "- target: $($summary['target'])" >> $env:GITHUB_STEP_SUMMARY
+          "- filter: $($summary['test_filter'])" >> $env:GITHUB_STEP_SUMMARY
+          "- cleanup_rootfs: $($summary['cleanup_rootfs'])" >> $env:GITHUB_STEP_SUMMARY
+          "- dry_run_rootfs_decision: $($summary['dry_run_rootfs_decision'])" >> $env:GITHUB_STEP_SUMMARY
+          "- fail_if_rootfs_rebuild: $($summary['fail_if_rootfs_rebuild'])" >> $env:GITHUB_STEP_SUMMARY
+          "- rootfs_marker_format: $($summary['rootfs_marker_format'])" >> $env:GITHUB_STEP_SUMMARY
+          "- compatible_rootfs_marker_formats: $($summary['compatible_rootfs_marker_formats'])" >> $env:GITHUB_STEP_SUMMARY
+          "- promote_compatible_marker: $($summary['promote_compatible_marker'])" >> $env:GITHUB_STEP_SUMMARY
+          "- max_rootfs_age_hours: $($summary['max_rootfs_age_hours'])" >> $env:GITHUB_STEP_SUMMARY
+          "- rootfs_reused: $($summary['rootfs_reused'])" >> $env:GITHUB_STEP_SUMMARY
+          "- rootfs_action: $($summary['rootfs_action'])" >> $env:GITHUB_STEP_SUMMARY
+          "- rootfs_reuse_reason: $($summary['rootfs_reuse_reason'])" >> $env:GITHUB_STEP_SUMMARY
+          "- marker_promoted: $($summary['marker_promoted'])" >> $env:GITHUB_STEP_SUMMARY
+          "- log: $($summary['log_path'])" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+
+          if (Test-Path $phaseFile) {
+            "<details><summary>Phase timeline</summary>" >> $env:GITHUB_STEP_SUMMARY
+            "" >> $env:GITHUB_STEP_SUMMARY
+            "```text" >> $env:GITHUB_STEP_SUMMARY
+            Get-Content $phaseFile | ForEach-Object { $_ >> $env:GITHUB_STEP_SUMMARY }
+            "```" >> $env:GITHUB_STEP_SUMMARY
+            "</details>" >> $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: Upload WHPX smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-whpx-smoke-logs
+          path: ${{ runner.temp }}/libkrun-whpx-smoke
+          if-no-files-found: ignore

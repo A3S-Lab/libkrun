@@ -14,3 +14,6 @@ crossbeam-channel = ">=0.5.15"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 kvm-bindings = { version = ">=0.11", features = ["fam-wrappers"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }

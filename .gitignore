@@ -18,3 +18,5 @@ examples/consoles
 examples/rootfs_fedora
 test-prefix
 /linux-sysroot
+
+.claude/settings.local.json
