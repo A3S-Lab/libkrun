@@ -531,6 +531,12 @@ impl Vcpu {
                 }
                 VcpuExit::IoPortWrite(port, data) => {
                     self.io_bus.write(self.id as u64, port as u64, data);
+                    // Check for ACPI shutdown before releasing the data borrow.
+                    // Port 0x604 (PIIX4 PM1a_CNT): any write with bit 13 set
+                    // (SLP_EN) signals a sleep/poweroff request from the guest.
+                    let acpi_shutdown = port == 0x604
+                        && data.len() >= 2
+                        && (u16::from_le_bytes([data[0], data[1]]) & 0x2000) != 0;
                     let _ = data;
                     if let Err(e) = self.whpx_vcpu.complete_io_write() {
                         error!(
@@ -538,6 +544,9 @@ impl Vcpu {
                             self.id
                         );
                         self.whpx_vcpu.clear_pending_io();
+                        VcpuEmulation::Stopped
+                    } else if acpi_shutdown {
+                        info!("Guest requested ACPI shutdown via port 0x604");
                         VcpuEmulation::Stopped
                     } else {
                         VcpuEmulation::Handled

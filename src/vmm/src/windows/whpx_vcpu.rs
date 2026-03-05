@@ -1302,28 +1302,15 @@ impl WhpxVcpu {
                     return Ok(VcpuExit::Shutdown);
                 }
                 reason if reason == WHvRunVpExitReasonX64ApicWriteTrap => {
-                    let apic_write = unsafe { exit_context.Anonymous.ApicWrite };
-                    warn!(
-                        "WHPX APIC write trap (type={}, value=0x{:x}): stopping vCPU",
-                        apic_write.Type.0, apic_write.WriteValue
-                    );
-                    return Ok(VcpuExit::Shutdown);
+                    // WHPX hardware-APIC mode: the virtual APIC has already
+                    // processed the write. No VMM action required; just resume.
                 }
                 reason if reason == WHvRunVpExitReasonX64ApicInitSipiTrap => {
-                    let init_sipi = unsafe { exit_context.Anonymous.ApicInitSipi };
-                    warn!(
-                        "WHPX APIC INIT/SIPI trap (icr=0x{:x}): stopping vCPU",
-                        init_sipi.ApicIcr
-                    );
-                    return Ok(VcpuExit::Shutdown);
+                    // Single-vCPU guest: BSP does not send INIT/SIPI to APs.
+                    // Treat as no-op; resume VP.
                 }
                 reason if reason == WHvRunVpExitReasonX64ApicSmiTrap => {
-                    let apic_smi = unsafe { exit_context.Anonymous.ApicSmi };
-                    warn!(
-                        "WHPX APIC SMI trap at GPA 0x{:x}: stopping vCPU",
-                        apic_smi.ApicIcr
-                    );
-                    return Ok(VcpuExit::Shutdown);
+                    // SMIs are not expected in the guest. Treat as no-op.
                 }
                 reason if reason == WHvRunVpExitReasonHypercall => {
                     let hypercall = unsafe { exit_context.Anonymous.Hypercall };
