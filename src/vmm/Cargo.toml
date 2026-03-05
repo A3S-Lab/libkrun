@@ -12,7 +12,7 @@ net = []
 blk = []
 efi = [ "blk", "net" ]
 gpu = ["krun_display"]
-snd = []
+snd = ["devices/snd"]
 input = ["krun_input"]
 nitro = []
 

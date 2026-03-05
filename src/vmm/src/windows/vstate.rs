@@ -1945,4 +1945,63 @@ mod tests {
         );
         eprintln!("[e2e] PASS");
     }
+
+    // ── virtio-snd Windows backend smoke tests ──────────────────────────────
+
+    /// Verify that `Snd` device can be created with NullBackend and reports
+    /// correct device type and features. This test does NOT require WHPX.
+    #[test]
+    #[cfg(feature = "snd")]
+    fn test_whpx_snd_init_smoke() {
+        use devices::virtio::{Snd, VirtioDevice};
+
+        let snd = Snd::new().expect("Snd::new failed");
+
+        // Device identity
+        assert_eq!(snd.device_type(), 25); // VIRTIO_ID_SND
+
+        // Features: should include VIRTIO_F_VERSION_1
+        let features = snd.avail_features();
+        assert_ne!(features & (1 << 32), 0, "VIRTIO_F_VERSION_1 not set");
+
+        // Config space: should have jacks, streams, chmaps counts
+        let mut cfg = [0u8; 12];
+        snd.read_config(0, &mut cfg);
+        let jacks = u32::from_le_bytes([cfg[0], cfg[1], cfg[2], cfg[3]]);
+        let streams = u32::from_le_bytes([cfg[4], cfg[5], cfg[6], cfg[7]]);
+        let chmaps = u32::from_le_bytes([cfg[8], cfg[9], cfg[10], cfg[11]]);
+
+        // Default config: 0 jacks, 2 streams (1 output + 1 input), 1 chmap
+        assert_eq!(jacks, 0, "expected 0 jacks");
+        assert_eq!(streams, 2, "expected 2 streams");
+        assert_eq!(chmaps, 1, "expected 1 chmap");
+    }
+
+    // ── virtio-fs Windows backend smoke tests ───────────────────────────────
+
+    /// Verify that `Fs` device can be created on Windows and reports correct
+    /// device type. The passthrough backend returns ENOSYS stubs.
+    #[test]
+    #[cfg(not(any(feature = "tee", feature = "nitro")))]
+    fn test_whpx_fs_init_smoke() {
+        use devices::virtio::{Fs, VirtioDevice};
+        use std::sync::atomic::AtomicI32;
+        use std::sync::Arc;
+
+        let exit_code = Arc::new(AtomicI32::new(0));
+        let fs = Fs::new(
+            "test-fs".to_string(),
+            std::env::temp_dir().to_str().unwrap().to_string(),
+            exit_code,
+        )
+        .expect("Fs::new failed");
+
+        // Device identity
+        assert_eq!(fs.device_type(), 26); // VIRTIO_ID_FS
+        assert_eq!(fs.id(), "virtio_fs");
+
+        // Features: should include VIRTIO_F_VERSION_1
+        let features = fs.avail_features();
+        assert_ne!(features & (1 << 32), 0, "VIRTIO_F_VERSION_1 not set");
+    }
 }

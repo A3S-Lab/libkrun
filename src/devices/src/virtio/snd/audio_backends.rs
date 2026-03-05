@@ -1,12 +1,12 @@
 // Manos Pitsidianakis <manos.pitsidianakis@linaro.org>
 // SPDX-License-Identifier: Apache-2.0 or BSD-3-Clause
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(feature = "pw-backend")]
 mod pipewire;
 
 use std::sync::{Arc, RwLock};
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(feature = "pw-backend")]
 use self::pipewire::PwBackend;
 use super::{stream::Stream, BackendType, Result, VirtioSndPcmSetParams};
 
@@ -66,11 +66,11 @@ pub fn alloc_audio_backend(
     log::trace!("allocating audio backend {backend:?}");
     match backend {
         BackendType::Null => Ok(Box::new(NullBackend)),
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(feature = "pw-backend")]
         BackendType::Pipewire => Ok(Box::new(PwBackend::new(streams))),
-        #[cfg(target_os = "windows")]
+        #[cfg(not(feature = "pw-backend"))]
         BackendType::Pipewire => {
-            log::warn!("Pipewire backend not available on Windows, using Null backend");
+            log::warn!("Pipewire backend not available (pw-backend feature not enabled), using Null backend");
             Ok(Box::new(NullBackend))
         }
     }
@@ -90,7 +90,7 @@ mod tests {
             let value = alloc_audio_backend(v, Default::default()).unwrap();
             assert_eq!(TypeId::of::<NullBackend>(), value.as_any().type_id());
         }
-        #[cfg(all(feature = "pw-backend", target_env = "gnu"))]
+        #[cfg(feature = "pw-backend")]
         {
             use pipewire::{test_utils::PipewireTestHarness, *};
 
