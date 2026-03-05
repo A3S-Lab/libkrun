@@ -10,6 +10,78 @@
 
 It integrates a VMM (Virtual Machine Monitor, the userspace side of an Hypervisor) with the minimum amount of emulated devices required to its purpose, abstracting most of the complexity that comes from Virtual Machine management, offering users a simple C API.
 
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                        Host Application  (C / Rust)                          │
+│                   links against libkrun.so / libkrun.dll                     │
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │  include/libkrun.h  (stable C API)
+┌────────────────────────────────▼─────────────────────────────────────────────┐
+│                    src/libkrun  ·  Public C API layer                        │
+│   krun_create_ctx · krun_set_vm_config · krun_set_root · krun_set_kernel     │
+│   krun_add_virtiofs · krun_add_disk · krun_add_net · krun_start_enter …      │
+└──────┬──────────────────┬──────────────────┬──────────────┬───────────────── ┘
+       │                  │                  │              │
+┌──────▼──────┐  ┌────────▼────────┐  ┌─────▼──────┐  ┌───▼──────────────────┐
+│  src/vmm    │  │  src/devices    │  │  src/arch  │  │  src/kernel           │
+│             │  │                 │  │            │  │                        │
+│ VM & vCPU   │  │ virtio-console  │  │ x86_64     │  │ Kernel / initrd       │
+│ lifecycle   │  │ virtio-block    │  │ aarch64    │  │ loader (ELF, Image,   │
+│             │  │ virtio-fs       │  │ riscv64    │  │ PeGz, Bz2, Gz, Zstd) │
+│ Guest memory│  │ virtio-net      │  │            │  │                        │
+│ management  │  │ virtio-vsock    │  │ Boot state │  │ Kernel command-line   │
+│             │  │   └─ TSI proxy  │  │ setup      │  │ builder               │
+│ IRQ chip    │  │ virtio-gpu      │  │            │  └────────────────────────┘
+│ (KVM IOAPIC │  │ virtio-balloon  │  │ Memory     │
+│  WHPX APIC  │  │ virtio-rng      │  │ layout     │  ┌────────────────────────┐
+│  HVF APIC)  │  │ virtio-snd      │  │ constants  │  │  src/cpuid             │
+│             │  │                 │  │            │  │  CPUID leaf emulation  │
+│ IO / MMIO   │  │ Legacy devices  │  │ configure_ │  │  and templates         │
+│ bus routing │  │  serial (8250)  │  │ system()   │  └────────────────────────┘
+│             │  │  i8042 keyboard │  │            │
+│ vCPU event  │  │  CMOS (RTC)    │  └────────────┘  ┌────────────────────────┐
+│ loop        │  │  PIT 8254       │                  │  src/smbios            │
+│             │  │  PIC 8259A      │                  │  SMBIOS table builder  │
+└──────┬──────┘  └────────┬────────┘                  └────────────────────────┘
+       │                  │
+       │         ┌────────▼────────────────────────────────────────────────────┐
+       │         │  src/rutabaga_gfx  ·  GPU virtualization                   │
+       │         │  Venus (Vulkan-over-virtio) and native-context backends     │
+       │         │  used by virtio-gpu on Linux and macOS                      │
+       │         └─────────────────────────────────────────────────────────────┘
+       │
+┌──────▼──────────────────────────────────────────────────────────────────────┐
+│               Hypervisor / Platform Backend                                  │
+│                                                                              │
+│  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐  ┌──────────────┐ │
+│  │  KVM          │  │  HVF          │  │  WHPX         │  │  Nitro       │ │
+│  │  Linux        │  │  macOS/ARM64  │  │  Windows      │  │  AWS Enclave │ │
+│  │  x86_64 +     │  │  Apple M-     │  │  x86_64       │  │  (NE API)    │ │
+│  │  aarch64 +    │  │  series SoC   │  │  (Alpha)      │  │              │ │
+│  │  riscv64      │  │               │  │               │  │              │ │
+│  └───────────────┘  └───────────────┘  └───────────────┘  └──────────────┘ │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Module summary
+
+| Crate | Role |
+|-------|------|
+| **libkrun** | Public C API surface. Translates C calls into `VmResources` configuration and calls `build_microvm`. |
+| **vmm** | Core VMM: VM and vCPU lifecycle, guest memory allocation, IO/MMIO bus, IRQ chip abstraction, platform-specific backends (KVM, WHPX, HVF, Nitro). |
+| **devices** | All virtio device implementations (console, block, fs, net, vsock/TSI, gpu, balloon, rng, snd) plus legacy PC devices (8250 serial, i8042, CMOS, PIT 8254, PIC 8259A). |
+| **arch** | Architecture-specific boot protocol: x86_64 zero-page / GDT / page tables, aarch64 FDT, RISC-V devicetree; memory region layout constants. |
+| **kernel** | Kernel image loader supporting raw, ELF, PeGz, ImageBz2/Gz/Zstd formats; kernel command-line builder. |
+| **cpuid** | x86_64 CPUID leaf emulation and per-vCPU template application. |
+| **smbios** | SMBIOS 3.0 table construction for guest firmware. |
+| **polly** | Epoll/event-manager abstraction used by virtio device backends for non-blocking IO. |
+| **utils** | Cross-platform utilities: `EventFd`, epoll wrappers, timestamps, byte helpers. |
+| **hvf** | Thin Rust bindings to Apple Hypervisor.framework (macOS). |
+| **rutabaga_gfx** | GPU virtualization via the [rutabaga](https://crates.io/crates/rutabaga_gfx) library, powering Venus (Vulkan-over-virtio) and native-context GPU acceleration. |
+| **nitro** | AWS Nitro Enclave attestation and NE API integration. |
+
 ## Use cases
 
 * [crun](https://github.com/containers/crun/blob/main/krun.1.md): Adding Virtualization-based isolation to container and confidential workloads.
@@ -238,10 +310,10 @@ sudo make [FEATURE_OPTIONS] install
 
 ### Windows (x86_64, Alpha)
 
-> **Status**: Alpha. Core virtualization (WHPX), all key virtio devices including
-> virtio-fs and TSI-based vsock networking are implemented and smoke-tested.
-> Full end-to-end userspace Linux boot is not yet validated (interrupt injection
-> is not yet complete).
+> **Status**: Alpha. Core virtualization (WHPX), all key virtio devices, TSI-based
+> vsock networking, and virtiofs are implemented. Linux 5.10 boots to userspace
+> (validated with `test_whpx_real_kernel_e2e`). Multi-vCPU and virtio-gpu are
+> not yet supported.
 
 #### Requirements
 
@@ -332,6 +404,39 @@ LD_LIBRARY_PATH=/usr/local/lib64 ./chroot_vm rootfs_fedora/ /bin/sh
 ## Status
 
 ```libkrun``` has achieved maturity and starting version ```1.0.0``` the public API is guaranteed to be stable, following [SemVer](https://semver.org/).
+
+## Roadmap
+
+The items below reflect known gaps and planned improvements. They are not
+binding commitments; priorities may shift based on upstream needs and
+contributor availability.
+
+### Near-term
+
+| Item | Platform | Notes |
+|------|----------|-------|
+| Windows multi-vCPU | Windows | WHPX supports multiple virtual processors; libkrun currently wires a single vCPU on Windows. SMP boot protocol (INIT/SIPI) needs to be implemented. |
+| Full userspace boot validation | Windows | Linux boots to the version banner today; end-to-end validation with an init process (busybox / musl) and virtio-fs rootfs is the next milestone. |
+| libkrunfw-windows | Windows | A companion library that bundles a pre-built x86_64 ELF vmlinux for Windows, eliminating the need for callers to supply their own kernel via `krun_set_kernel`. |
+| virtio-snd real backend | Windows | The current Windows backend is a NullBackend (no audio). Wiring to Windows Audio Session API (WASAPI) is planned. |
+| ACPI table generation | All | Generating a minimal ACPI table set (RSDP/RSDT/FADT/MADT) would allow guests to use ACPI power management and CPU hotplug without relying on the legacy PIC/PIT path. |
+
+### Medium-term
+
+| Item | Platform | Notes |
+|------|----------|-------|
+| virtio-gpu on Windows | Windows | Requires porting rutabaga_gfx to Windows or integrating a WGPU-based backend. Blocked on upstream rutabaga Windows support. |
+| Windows ARM64 | Windows | WHPX does not currently expose an ARM64 partition type on Windows on ARM. Tracking Microsoft's roadmap. |
+| RISC-V improvements | Linux | Expand RISC-V support beyond the current single-hart proof-of-concept: SMP, AIA interrupt controller, and a broader device set. |
+| SEV-SNP live migration | Linux | Encrypted live migration of SEV-SNP guests requires coordinating attestation across source and destination VMMs. |
+
+### Long-term / exploratory
+
+| Item | Notes |
+|------|-------|
+| Stable ABI versioning | The current C API is stable at the function level; a formal ABI stability guarantee with soname policies across all variants is planned. |
+| Confidential containers integration | Deeper integration with OCI runtime standards for confidential workloads (SEV-SNP / TDX / Nitro). |
+| Nested virtualization | Allow libkrun guests to themselves run hypervisors, gated on host KVM nested-virt support. |
 
 ## Getting in contact
 
