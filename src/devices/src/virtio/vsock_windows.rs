@@ -333,26 +333,32 @@ impl Vsock {
         mem.write_slice(hdr, addr).is_ok()
     }
 
+    #[inline]
     fn hdr_u16(hdr: &[u8; 44], off: usize) -> u16 {
         byte_order::read_le_u16(&hdr[off..off + 2])
     }
 
+    #[inline]
     fn hdr_u32(hdr: &[u8; 44], off: usize) -> u32 {
         byte_order::read_le_u32(&hdr[off..off + 4])
     }
 
+    #[inline]
     fn hdr_u64(hdr: &[u8; 44], off: usize) -> u64 {
         byte_order::read_le_u64(&hdr[off..off + 8])
     }
 
+    #[inline]
     fn set_u16(hdr: &mut [u8; 44], off: usize, value: u16) {
         byte_order::write_le_u16(&mut hdr[off..off + 2], value)
     }
 
+    #[inline]
     fn set_u32(hdr: &mut [u8; 44], off: usize, value: u32) {
         byte_order::write_le_u32(&mut hdr[off..off + 4], value)
     }
 
+    #[inline]
     fn set_u64(hdr: &mut [u8; 44], off: usize, value: u64) {
         byte_order::write_le_u64(&mut hdr[off..off + 8], value)
     }

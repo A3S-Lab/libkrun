@@ -73,6 +73,7 @@ struct VirtioNetHdr {
 }
 
 impl VirtioNetHdr {
+    #[inline]
     fn from_bytes(bytes: &[u8]) -> Self {
         if bytes.len() < VIRTIO_NET_HDR_SIZE {
             return Self::default();
@@ -87,6 +88,7 @@ impl VirtioNetHdr {
         }
     }
 
+    #[inline]
     fn to_bytes(&self) -> [u8; VIRTIO_NET_HDR_SIZE] {
         let mut bytes = [0u8; VIRTIO_NET_HDR_SIZE];
         bytes[0] = self.flags;
