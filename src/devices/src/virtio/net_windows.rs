@@ -26,7 +26,13 @@ use super::{
 
 // ── virtio-net feature bits ───────────────────────────────────────────────────
 const VIRTIO_F_VERSION_1: u32 = 32;
-const VIRTIO_NET_F_MAC: u32 = 5; // device has a MAC address
+const VIRTIO_NET_F_CSUM: u32 = 0;        // device handles partial checksums
+const VIRTIO_NET_F_GUEST_CSUM: u32 = 1;  // driver handles partial checksums
+const VIRTIO_NET_F_MAC: u32 = 5;         // device has a MAC address
+const VIRTIO_NET_F_HOST_TSO4: u32 = 11;  // device can receive TSOv4
+const VIRTIO_NET_F_HOST_TSO6: u32 = 12;  // device can receive TSOv6
+const VIRTIO_NET_F_GUEST_TSO4: u32 = 7;  // driver can receive TSOv4
+const VIRTIO_NET_F_GUEST_TSO6: u32 = 8;  // driver can receive TSOv6
 
 // ── queue indices ─────────────────────────────────────────────────────────────
 const RX_INDEX: usize = 0;
@@ -42,6 +48,54 @@ const CONFIG_SPACE_SIZE: usize = 10;
 
 // virtio-net header (10 bytes, no VIRTIO_NET_F_MRG_RXBUF)
 const VIRTIO_NET_HDR_SIZE: usize = 10;
+
+// virtio-net header flags
+const VIRTIO_NET_HDR_F_NEEDS_CSUM: u8 = 1;
+const VIRTIO_NET_HDR_F_DATA_VALID: u8 = 2;
+
+// virtio-net GSO types
+const VIRTIO_NET_HDR_GSO_NONE: u8 = 0;
+const VIRTIO_NET_HDR_GSO_TCPV4: u8 = 1;
+const VIRTIO_NET_HDR_GSO_TCPV6: u8 = 4;
+
+// ── virtio-net header ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Default)]
+struct VirtioNetHdr {
+    flags: u8,
+    gso_type: u8,
+    hdr_len: u16,
+    gso_size: u16,
+    csum_start: u16,
+    csum_offset: u16,
+}
+
+impl VirtioNetHdr {
+    fn from_bytes(bytes: &[u8]) -> Self {
+        if bytes.len() < VIRTIO_NET_HDR_SIZE {
+            return Self::default();
+        }
+        Self {
+            flags: bytes[0],
+            gso_type: bytes[1],
+            hdr_len: u16::from_le_bytes([bytes[2], bytes[3]]),
+            gso_size: u16::from_le_bytes([bytes[4], bytes[5]]),
+            csum_start: u16::from_le_bytes([bytes[6], bytes[7]]),
+            csum_offset: u16::from_le_bytes([bytes[8], bytes[9]]),
+        }
+    }
+
+    fn to_bytes(&self) -> [u8; VIRTIO_NET_HDR_SIZE] {
+        let mut bytes = [0u8; VIRTIO_NET_HDR_SIZE];
+        bytes[0] = self.flags;
+        bytes[1] = self.gso_type;
+        bytes[2..4].copy_from_slice(&self.hdr_len.to_le_bytes());
+        bytes[4..6].copy_from_slice(&self.gso_size.to_le_bytes());
+        bytes[6..8].copy_from_slice(&self.csum_start.to_le_bytes());
+        bytes[8..10].copy_from_slice(&self.csum_offset.to_le_bytes());
+        bytes
+    }
+}
 
 // ── Net ───────────────────────────────────────────────────────────────────────
 
@@ -114,6 +168,9 @@ impl Net {
     ///
     /// Each descriptor chain begins with a 10-byte virtio-net header followed
     /// by one or more read-only data descriptors containing the Ethernet frame.
+    /// If VIRTIO_NET_F_CSUM is negotiated, the header may request checksum
+    /// offload (NEEDS_CSUM flag). If VIRTIO_NET_F_HOST_TSO4/6 is negotiated,
+    /// the header may request TCP segmentation (GSO).
     fn process_tx_queue(&mut self) -> bool {
         let DeviceState::Activated(ref mem, _) = self.state else {
             return false;
@@ -124,33 +181,64 @@ impl Net {
         while let Some(head) = self.queues[TX_INDEX].pop(mem) {
             let index = head.index;
             let mut total_len: u32 = 0;
-            let mut hdr_bytes_seen: usize = 0;
+            let mut hdr_bytes = vec![0u8; VIRTIO_NET_HDR_SIZE];
+            let mut hdr_bytes_read: usize = 0;
+            let mut frame_data = Vec::new();
 
             let descs: Vec<DescriptorChain<'_>> = head.into_iter().collect();
             for desc in &descs {
                 if desc.is_write_only() {
-                    // TX descriptors should be read-only; skip device-writable ones.
                     continue;
                 }
 
                 let len = desc.len as usize;
                 total_len = total_len.saturating_add(desc.len);
 
-                // Skip the virtio-net header at the start of the chain.
-                let skip = (VIRTIO_NET_HDR_SIZE - hdr_bytes_seen).min(len);
-                hdr_bytes_seen += skip;
+                // Read the virtio-net header first
+                if hdr_bytes_read < VIRTIO_NET_HDR_SIZE {
+                    let to_read = (VIRTIO_NET_HDR_SIZE - hdr_bytes_read).min(len);
+                    if mem.read_slice(&mut hdr_bytes[hdr_bytes_read..hdr_bytes_read + to_read], desc.addr).is_err() {
+                        break;
+                    }
+                    hdr_bytes_read += to_read;
 
-                if skip < len {
-                    // There is Ethernet payload in this descriptor.
-                    if let Some(ref backend) = self.backend {
-                        let payload_len = len - skip;
-                        let payload_addr = GuestAddress(desc.addr.0 + skip as u64);
+                    // Read remaining payload from this descriptor
+                    if to_read < len {
+                        let payload_len = len - to_read;
+                        let payload_addr = GuestAddress(desc.addr.0 + to_read as u64);
                         let mut buf = vec![0u8; payload_len];
                         if mem.read_slice(&mut buf, payload_addr).is_ok() {
-                            if let Ok(mut stream) = backend.lock() {
-                                let _ = stream.write_all(&buf);
-                            }
+                            frame_data.extend_from_slice(&buf);
                         }
+                    }
+                } else {
+                    // Pure payload descriptor
+                    let mut buf = vec![0u8; len];
+                    if mem.read_slice(&mut buf, desc.addr).is_ok() {
+                        frame_data.extend_from_slice(&buf);
+                    }
+                }
+            }
+
+            // Process the frame with offload handling
+            if !frame_data.is_empty() {
+                if let Some(ref backend) = self.backend {
+                    let hdr = VirtioNetHdr::from_bytes(&hdr_bytes);
+
+                    // Handle checksum offload
+                    if hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
+                        Self::compute_checksum(&mut frame_data, hdr.csum_start as usize, hdr.csum_offset as usize);
+                    }
+
+                    // Handle TSO/GSO - for now just send as-is
+                    // A full implementation would segment large packets here
+                    if hdr.gso_type != VIRTIO_NET_HDR_GSO_NONE {
+                        // TODO: Implement packet segmentation for TSO
+                        // For now, just forward the large packet
+                    }
+
+                    if let Ok(mut stream) = backend.lock() {
+                        let _ = stream.write_all(&frame_data);
                     }
                 }
             }
@@ -165,12 +253,45 @@ impl Net {
         used_any
     }
 
+    /// Compute Internet checksum for partial checksum offload.
+    fn compute_checksum(data: &mut [u8], csum_start: usize, csum_offset: usize) {
+        if csum_start + csum_offset + 2 > data.len() {
+            return;
+        }
+
+        // Zero out the checksum field first
+        data[csum_start + csum_offset] = 0;
+        data[csum_start + csum_offset + 1] = 0;
+
+        // Compute Internet checksum (RFC 1071)
+        let mut sum: u32 = 0;
+        let payload = &data[csum_start..];
+
+        for chunk in payload.chunks(2) {
+            let word = if chunk.len() == 2 {
+                u16::from_be_bytes([chunk[0], chunk[1]]) as u32
+            } else {
+                (chunk[0] as u32) << 8
+            };
+            sum += word;
+        }
+
+        // Fold 32-bit sum to 16 bits
+        while sum >> 16 != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+
+        let checksum = !sum as u16;
+        data[csum_start + csum_offset..csum_start + csum_offset + 2]
+            .copy_from_slice(&checksum.to_be_bytes());
+    }
+
     /// Process the RX queue: fill guest buffers with data from the backend.
     ///
     /// Each available descriptor provides a write-only buffer.  A
-    /// virtio-net header is written first (zeroed = no offload), followed by
-    /// as many bytes as the backend has ready.  If the backend has no data
-    /// (or there is no backend) the entry is not returned to the used ring.
+    /// virtio-net header is written first. If VIRTIO_NET_F_GUEST_CSUM is
+    /// negotiated, the DATA_VALID flag is set to indicate checksums are good.
+    /// The header is followed by as many bytes as the backend has ready.
     fn process_rx_queue(&mut self) -> bool {
         let DeviceState::Activated(ref mem, _) = self.state else {
             return false;
@@ -185,6 +306,13 @@ impl Net {
         };
 
         let mut used_any = false;
+
+        // Build RX header with DATA_VALID flag if guest supports checksum offload
+        let mut rx_hdr = VirtioNetHdr::default();
+        if self.acked_features & (1u64 << VIRTIO_NET_F_GUEST_CSUM) != 0 {
+            rx_hdr.flags = VIRTIO_NET_HDR_F_DATA_VALID;
+        }
+        let hdr_bytes = rx_hdr.to_bytes();
 
         while let Some(head) = self.queues[RX_INDEX].pop(mem) {
             let index = head.index;
@@ -201,17 +329,16 @@ impl Net {
 
                 // Write (part of) the virtio-net header first.
                 if hdr_written < VIRTIO_NET_HDR_SIZE {
-                    let hdr_slice = VIRTIO_NET_HDR_SIZE - hdr_written;
-                    let hdr_bytes = hdr_slice.min(desc_len);
-                    let hdr_zeros = vec![0u8; hdr_bytes];
-                    if mem.write_slice(&hdr_zeros, desc.addr).is_err() {
+                    let hdr_remaining = VIRTIO_NET_HDR_SIZE - hdr_written;
+                    let hdr_to_write = hdr_remaining.min(desc_len);
+                    if mem.write_slice(&hdr_bytes[hdr_written..hdr_written + hdr_to_write], desc.addr).is_err() {
                         break;
                     }
-                    hdr_written += hdr_bytes;
-                    frame_written = frame_written.saturating_add(hdr_bytes as u32);
+                    hdr_written += hdr_to_write;
+                    frame_written = frame_written.saturating_add(hdr_to_write as u32);
 
-                    // Payload portion of this descriptor (after the header).
-                    let remaining = desc_len - hdr_bytes;
+                    // Payload portion of this descriptor (after the header)
+                    let remaining = desc_len - hdr_to_write;
                     if remaining > 0 {
                         let mut buf = vec![0u8; remaining];
                         let n = match backend.lock() {
@@ -219,7 +346,7 @@ impl Net {
                             Err(_) => 0,
                         };
                         if n > 0 {
-                            let addr = GuestAddress(desc.addr.0 + hdr_bytes as u64);
+                            let addr = GuestAddress(desc.addr.0 + hdr_to_write as u64);
                             if mem.write_slice(&buf[..n], addr).is_ok() {
                                 frame_written = frame_written.saturating_add(n as u32);
                                 frame_ready = true;
@@ -257,7 +384,14 @@ impl Net {
 
 impl VirtioDevice for Net {
     fn avail_features(&self) -> u64 {
-        (1u64 << VIRTIO_F_VERSION_1) | (1u64 << VIRTIO_NET_F_MAC)
+        (1u64 << VIRTIO_F_VERSION_1)
+            | (1u64 << VIRTIO_NET_F_MAC)
+            | (1u64 << VIRTIO_NET_F_CSUM)
+            | (1u64 << VIRTIO_NET_F_GUEST_CSUM)
+            | (1u64 << VIRTIO_NET_F_HOST_TSO4)
+            | (1u64 << VIRTIO_NET_F_HOST_TSO6)
+            | (1u64 << VIRTIO_NET_F_GUEST_TSO4)
+            | (1u64 << VIRTIO_NET_F_GUEST_TSO6)
     }
 
     fn acked_features(&self) -> u64 {

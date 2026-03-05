@@ -185,10 +185,13 @@ impl Epoll {
         };
 
         if wait_result == WAIT_FAILED {
-            return Err(io::Error::last_os_error());
+            let err = io::Error::last_os_error();
+            error!("epoll(windows): WaitForMultipleObjects failed: {}", err);
+            return Err(err);
         }
 
         if wait_result == WAIT_TIMEOUT {
+            // Timeout is not an error - return 0 events
             return Ok(0);
         }
 

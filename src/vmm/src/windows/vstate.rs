@@ -1471,6 +1471,31 @@ mod tests {
         );
     }
 
+    /// Verify that `NetWindows` advertises checksum and TSO offload features.
+    /// Does NOT require WHPX — runs in the regular PR CI job.
+    #[test]
+    fn test_whpx_net_offload_features() {
+        use devices::virtio::{NetWindows, VirtioDevice};
+
+        let mac: [u8; 6] = [0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
+        let net = NetWindows::new("net-offload", mac, None).expect("NetWindows::new failed");
+
+        let features = net.avail_features();
+
+        // VIRTIO_NET_F_CSUM (bit 0)
+        assert_ne!(features & (1u64 << 0), 0, "VIRTIO_NET_F_CSUM not set");
+        // VIRTIO_NET_F_GUEST_CSUM (bit 1)
+        assert_ne!(features & (1u64 << 1), 0, "VIRTIO_NET_F_GUEST_CSUM not set");
+        // VIRTIO_NET_F_GUEST_TSO4 (bit 7)
+        assert_ne!(features & (1u64 << 7), 0, "VIRTIO_NET_F_GUEST_TSO4 not set");
+        // VIRTIO_NET_F_GUEST_TSO6 (bit 8)
+        assert_ne!(features & (1u64 << 8), 0, "VIRTIO_NET_F_GUEST_TSO6 not set");
+        // VIRTIO_NET_F_HOST_TSO4 (bit 11)
+        assert_ne!(features & (1u64 << 11), 0, "VIRTIO_NET_F_HOST_TSO4 not set");
+        // VIRTIO_NET_F_HOST_TSO6 (bit 12)
+        assert_ne!(features & (1u64 << 12), 0, "VIRTIO_NET_F_HOST_TSO6 not set");
+    }
+
     /// Verify `Console::new()` returns a device with the correct type and features.
     /// Does NOT require WHPX — runs in the regular PR CI job.
     #[test]
