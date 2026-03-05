@@ -2029,4 +2029,24 @@ mod tests {
         let features = fs.avail_features();
         assert_ne!(features & (1 << 32), 0, "VIRTIO_F_VERSION_1 not set");
     }
+
+    /// Verify `BalloonWindows::new()` creates a device with 5 queues including
+    /// the page-hinting queue (PHQ).
+    /// Does NOT require WHPX — runs in the regular PR CI job.
+    #[test]
+    fn test_whpx_balloon_init_smoke() {
+        use devices::virtio::VirtioDevice;
+
+        let balloon = devices::virtio::Balloon::new().expect("Balloon::new failed");
+
+        // Device type: TYPE_BALLOON = 5
+        assert_eq!(balloon.device_type(), 5, "expected TYPE_BALLOON=5");
+
+        // Should have 5 queues: IFQ, DFQ, STQ, PHQ, FRQ
+        assert_eq!(balloon.queues().len(), 5, "expected 5 queues");
+
+        // Features: should include VIRTIO_F_VERSION_1
+        let features = balloon.avail_features();
+        assert_ne!(features & (1 << 32), 0, "VIRTIO_F_VERSION_1 not set");
+    }
 }
