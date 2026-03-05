@@ -303,6 +303,7 @@ mod tests {
     use super::*;
     use std::io;
     use std::io::Write;
+    #[cfg(not(target_os = "windows"))]
     use std::os::unix::io::{AsRawFd, RawFd};
     use std::sync::{Arc, Mutex};
 
@@ -343,12 +344,21 @@ mod tests {
             self.internal.lock().unwrap().read_buf.as_slice().read(buf)
         }
     }
+    #[cfg(not(target_os = "windows"))]
     impl AsRawFd for SharedBuffer {
         fn as_raw_fd(&self) -> RawFd {
             self.internal.lock().unwrap().evfd.as_raw_fd()
         }
     }
+    #[cfg(not(target_os = "windows"))]
     impl ReadableFd for SharedBuffer {}
+
+    #[cfg(target_os = "windows")]
+    impl ReadableFd for SharedBuffer {
+        fn as_raw_fd(&self) -> i32 {
+            -1
+        }
+    }
 
     static RAW_INPUT_BUF: [u8; 3] = [b'a', b'b', b'c'];
 

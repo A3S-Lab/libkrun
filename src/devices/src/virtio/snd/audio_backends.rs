@@ -61,13 +61,13 @@ impl AudioBackend for NullBackend {
 
 pub fn alloc_audio_backend(
     backend: BackendType,
-    streams: Arc<RwLock<Vec<Stream>>>,
+    _streams: Arc<RwLock<Vec<Stream>>>,
 ) -> Result<Box<dyn AudioBackend + Send + Sync>> {
     log::trace!("allocating audio backend {backend:?}");
     match backend {
         BackendType::Null => Ok(Box::new(NullBackend)),
         #[cfg(feature = "pw-backend")]
-        BackendType::Pipewire => Ok(Box::new(PwBackend::new(streams))),
+        BackendType::Pipewire => Ok(Box::new(PwBackend::new(_streams))),
         #[cfg(not(feature = "pw-backend"))]
         BackendType::Pipewire => {
             log::warn!("Pipewire backend not available (pw-backend feature not enabled), using Null backend");
