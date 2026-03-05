@@ -16,12 +16,14 @@ pub mod port_io {
     use vm_memory::{bitmap::Bitmap, VolatileSlice};
     use windows::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
     use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
+    use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
     use windows::Win32::System::Console::{
         GetConsoleMode, GetConsoleScreenBufferInfo, GetStdHandle, SetConsoleMode,
         CONSOLE_MODE, CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
         ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_ERROR_HANDLE,
         STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
+    use windows::Win32::System::Threading::GetCurrentProcess;
 
     pub trait PortInput: Send {
         fn read_volatile(&mut self, buf: &mut VolatileSlice) -> io::Result<usize>;
@@ -232,16 +234,33 @@ pub mod port_io {
         }
 
         // Non-console (pipe / file): use File-based input.
-        // For fd=0 stdin pipe, the GetStdHandle-returned handle is NOT owned — avoid
-        // wrapping it in File (which would close it).  Return EmptyInput instead,
-        // as piped stdin in a VM-host context is rarely meaningful for guest I/O.
-        if fd == 0 {
-            return Ok(Box::new(EmptyInput));
-        }
-
-        // We own the duplicated handle — wrap as File for ReadFile + WaitForMultipleObjects.
+        // For piped stdin, we can now properly support it via FileOrPipeInput.
         use std::os::windows::io::FromRawHandle;
-        let file = unsafe { std::fs::File::from_raw_handle(handle.0 as *mut _) };
+
+        // For fd=0 (stdin), we need to duplicate the handle since GetStdHandle
+        // returns a non-owned handle that shouldn't be closed.
+        let owned_handle = if fd == 0 {
+            let mut dup_handle = INVALID_HANDLE_VALUE;
+            let proc = unsafe { GetCurrentProcess() };
+            unsafe {
+                DuplicateHandle(
+                    proc,
+                    handle,
+                    proc,
+                    &mut dup_handle,
+                    0,
+                    false,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            }
+            .map_err(|e| io::Error::other(format!("DuplicateHandle failed: {e}")))?;
+            dup_handle
+        } else {
+            handle
+        };
+
+        // We own the handle — wrap as File for ReadFile + WaitForMultipleObjects.
+        let file = unsafe { std::fs::File::from_raw_handle(owned_handle.0 as *mut _) };
         Ok(Box::new(FileOrPipeInput { file }))
     }
 

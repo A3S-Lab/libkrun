@@ -65,6 +65,14 @@ impl Net {
     /// `backend` is an optional TCP stream used for packet I/O.  When `None`
     /// all TX frames are silently dropped and no RX frames are ever produced.
     pub fn new(id: impl Into<String>, mac: [u8; 6], backend: Option<TcpStream>) -> io::Result<Self> {
+        // Validate MAC address
+        if mac[0] & 0x01 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "MAC address cannot be multicast (bit 0 of first byte must be 0)",
+            ));
+        }
+
         let queue_events = (0..NUM_QUEUES)
             .map(|_| EventFd::new(EFD_NONBLOCK))
             .collect::<io::Result<Vec<_>>>()?;
