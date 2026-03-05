@@ -356,7 +356,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     impl ReadableFd for SharedBuffer {
         fn as_raw_fd(&self) -> i32 {
-            -1
+            self.internal.lock().unwrap().evfd.as_raw_fd()
         }
     }
 
