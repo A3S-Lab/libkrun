@@ -169,7 +169,10 @@ impl Net {
         };
 
         let Some(ref backend) = self.backend else {
-            // No backend — drain the avail ring but return nothing.
+            // No backend — drain the avail ring to prevent guest from blocking.
+            while self.queues[RX_INDEX].pop(mem).is_some() {
+                // Descriptors are consumed but not returned to used ring
+            }
             return false;
         };
 

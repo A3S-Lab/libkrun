@@ -66,6 +66,7 @@ impl Rng {
         while let Some(head) = self.queues[REQ_INDEX].pop(mem) {
             let index = head.index;
             let mut written = 0;
+            let mut error_occurred = false;
 
             for desc in head.into_iter() {
                 let mut rand_bytes = vec![0u8; desc.len as usize];
@@ -82,21 +83,26 @@ impl Rng {
                 if result.is_err() {
                     error!("rng(windows): BCryptGenRandom failed: {:?}", result);
                     self.queues[REQ_INDEX].go_to_previous_position();
+                    error_occurred = true;
                     break;
                 }
 
                 if let Err(e) = mem.write_slice(&rand_bytes, desc.addr) {
                     error!("rng(windows): failed to write slice: {e:?}");
                     self.queues[REQ_INDEX].go_to_previous_position();
+                    error_occurred = true;
                     break;
                 }
 
                 written += desc.len;
             }
 
-            have_used = true;
-            if let Err(e) = self.queues[REQ_INDEX].add_used(mem, index, written) {
-                error!("rng(windows): failed to add used elements: {e:?}");
+            // Only add to used ring if no error occurred
+            if !error_occurred {
+                have_used = true;
+                if let Err(e) = self.queues[REQ_INDEX].add_used(mem, index, written) {
+                    error!("rng(windows): failed to add used elements: {e:?}");
+                }
             }
         }
 

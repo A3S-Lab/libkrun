@@ -4,7 +4,7 @@ use super::{ActivateResult, DeviceState, InterruptTransport, Queue, VirtioDevice
 use polly::event_manager::{EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::{EventFd, EFD_NONBLOCK};
-use vm_memory::{ByteValued, GuestMemory, GuestMemoryMmap};
+use vm_memory::{ByteValued, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
 use windows::Win32::System::Memory::{DiscardVirtualMemory, VirtualAlloc, MEM_RESET, PAGE_READWRITE};
 
 const IFQ_INDEX: usize = 0; // Inflate queue
@@ -77,7 +77,7 @@ impl Balloon {
                         if result == 0 {
                             // Fallback to VirtualAlloc with MEM_RESET
                             let _ = VirtualAlloc(
-                                Some(host_addr as *const std::ffi::c_void),
+                                Some(host_addr as *const _),
                                 desc.len as usize,
                                 MEM_RESET,
                                 PAGE_READWRITE,
@@ -89,7 +89,84 @@ impl Balloon {
 
             have_used = true;
             if let Err(e) = self.queues[FRQ_INDEX].add_used(mem, index, 0) {
-                error!("balloon(windows): failed to add used elements: {e:?}");
+                error!("balloon(windows): failed to add used (FRQ): {e:?}");
+            }
+        }
+
+        have_used
+    }
+
+    /// Process inflate queue: guest is giving memory back to the host.
+    /// Each descriptor contains an array of u32 page frame numbers (PFNs).
+    fn process_ifq(&mut self) -> bool {
+        let DeviceState::Activated(ref mem, _) = self.state else {
+            return false;
+        };
+
+        let mut have_used = false;
+
+        while let Some(head) = self.queues[IFQ_INDEX].pop(mem) {
+            let index = head.index;
+
+            for desc in head.into_iter() {
+                // Each PFN is 4 bytes (u32)
+                let pfn_count = (desc.len as usize) / 4;
+                let mut pfn_bytes = vec![0u8; pfn_count * 4];
+
+                if mem.read_slice(&mut pfn_bytes, desc.addr).is_ok() {
+                    // Convert bytes to u32 PFNs (little-endian)
+                    for chunk in pfn_bytes.chunks_exact(4) {
+                        let pfn = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                        let gpa = GuestAddress((pfn as u64) << 12); // PFN to GPA (4KB pages)
+                        if let Ok(host_addr) = mem.get_host_address(gpa) {
+                            unsafe {
+                                let slice = std::slice::from_raw_parts_mut(host_addr, 4096);
+                                let result = DiscardVirtualMemory(slice);
+
+                                if result == 0 {
+                                    // Fallback to VirtualAlloc with MEM_RESET
+                                    let _ = VirtualAlloc(
+                                        Some(host_addr as *const _),
+                                        4096,
+                                        MEM_RESET,
+                                        PAGE_READWRITE,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            have_used = true;
+            if let Err(e) = self.queues[IFQ_INDEX].add_used(mem, index, 0) {
+                error!("balloon(windows): failed to add used (IFQ): {e:?}");
+            }
+        }
+
+        have_used
+    }
+
+    /// Process deflate queue: guest is reclaiming memory from the host.
+    /// On Windows, we don't need to do anything special - the guest will
+    /// simply start using the pages again, which will cause them to be
+    /// faulted back in.
+    fn process_dfq(&mut self) -> bool {
+        let DeviceState::Activated(ref mem, _) = self.state else {
+            return false;
+        };
+
+        let mut have_used = false;
+
+        while let Some(head) = self.queues[DFQ_INDEX].pop(mem) {
+            let index = head.index;
+
+            // Just acknowledge the deflate request - no action needed on Windows
+            // The pages will be faulted back in when the guest accesses them
+
+            have_used = true;
+            if let Err(e) = self.queues[DFQ_INDEX].add_used(mem, index, 0) {
+                error!("balloon(windows): failed to add used (DFQ): {e:?}");
             }
         }
 
@@ -209,10 +286,12 @@ impl Subscriber for Balloon {
         if let Some(queue_index) = triggered_queue {
             match queue_index {
                 IFQ_INDEX => {
-                    debug!("balloon(windows): inflate queue event (ignored)");
+                    debug!("balloon(windows): inflate queue event");
+                    raise_irq |= self.process_ifq();
                 }
                 DFQ_INDEX => {
-                    debug!("balloon(windows): deflate queue event (ignored)");
+                    debug!("balloon(windows): deflate queue event");
+                    raise_irq |= self.process_dfq();
                 }
                 STQ_INDEX => {
                     debug!("balloon(windows): stats queue event (ignored)");
