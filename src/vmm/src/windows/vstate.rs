@@ -2049,4 +2049,27 @@ mod tests {
         let features = balloon.avail_features();
         assert_ne!(features & (1 << 32), 0, "VIRTIO_F_VERSION_1 not set");
     }
+
+    /// Verify that `Vsock` device advertises DGRAM support feature.
+    /// Does NOT require WHPX — runs in the regular PR CI job.
+    #[test]
+    fn test_whpx_vsock_dgram_feature() {
+        use devices::virtio::{Vsock, VirtioDevice};
+
+        let vsock = Vsock::new(3, None, None, Default::default()).expect("Vsock::new failed");
+
+        // Device type: TYPE_VSOCK = 19
+        assert_eq!(vsock.device_type(), 19, "expected TYPE_VSOCK=19");
+
+        // Features: should include VIRTIO_VSOCK_F_DGRAM (bit 3)
+        let features = vsock.avail_features();
+        assert_ne!(
+            features & (1 << 3),
+            0,
+            "VIRTIO_VSOCK_F_DGRAM not advertised"
+        );
+
+        // Should also have VIRTIO_F_VERSION_1 (bit 32)
+        assert_ne!(features & (1 << 32), 0, "VIRTIO_F_VERSION_1 not set");
+    }
 }

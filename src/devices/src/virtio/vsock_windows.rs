@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io;
 use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -56,9 +56,8 @@ const MAX_RW_PAYLOAD: usize = 64 * 1024;
 const MAX_READ_BURST_PER_STREAM: usize = 8;
 
 const AVAIL_FEATURES: u64 = (1 << VIRTIO_F_VERSION_1 as u64)
-    | (1 << VIRTIO_F_IN_ORDER as u64);
-    // Note: VIRTIO_VSOCK_F_DGRAM is not yet implemented
-    // | (1 << VIRTIO_VSOCK_F_DGRAM as u64);
+    | (1 << VIRTIO_F_IN_ORDER as u64)
+    | (1 << VIRTIO_VSOCK_F_DGRAM as u64);
 
 bitflags! {
     pub struct TsiFlags: u32 {
@@ -95,6 +94,7 @@ pub struct Vsock {
     host_port_map: Option<HashMap<u16, u16>>,
     pipe_port_map: Option<HashMap<u32, String>>, // guest_port -> pipe_name
     streams: HashMap<u32, StreamState>,
+    dgram_sockets: HashMap<u32, UdpSocket>, // guest_port -> UDP socket
     pending_rx: VecDeque<PendingRx>,
     pending_by_guest_port: HashMap<u32, usize>,
     connect_timeout_ms: u64, // Configurable connection timeout
@@ -287,6 +287,7 @@ impl Vsock {
             host_port_map,
             pipe_port_map,
             streams: HashMap::new(),
+            dgram_sockets: HashMap::new(),
             pending_rx: VecDeque::new(),
             pending_by_guest_port: HashMap::new(),
             connect_timeout_ms: CONNECT_TIMEOUT_MS, // Use default timeout
@@ -594,6 +595,51 @@ impl Vsock {
         }
     }
 
+    /// Read data from all DGRAM sockets and queue RX packets to the guest.
+    ///
+    /// DGRAM sockets are connectionless, so we don't need credit flow control.
+    /// Each datagram is sent as a separate RW packet.
+    fn harvest_dgram_reads(&mut self) {
+        let mut dgram_responses: Vec<(u32, u32, Vec<u8>)> = Vec::new(); // (src_port, dst_port, payload)
+
+        for (guest_port, socket) in &self.dgram_sockets {
+            let mut rx_buf = [0u8; 4096];
+            match socket.recv_from(&mut rx_buf) {
+                Ok((n, peer_addr)) => {
+                    if n > 0 {
+                        // Try to map peer address back to a guest port
+                        // For now, use a simple heuristic: use peer port as dst_port
+                        let dst_port = peer_addr.port() as u32;
+                        dgram_responses.push((*guest_port, dst_port, rx_buf[..n].to_vec()));
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    // No data available, continue to next socket
+                }
+                Err(_) => {
+                    // Socket error, ignore for now
+                }
+            }
+        }
+
+        // Queue DGRAM responses
+        for (src_port, dst_port, payload) in dgram_responses {
+            let mut hdr = [0u8; 44];
+            Self::set_u64(&mut hdr, 0, VSOCK_HOST_CID);
+            Self::set_u64(&mut hdr, 8, self.cid);
+            Self::set_u32(&mut hdr, 16, dst_port); // Host port -> guest dst port
+            Self::set_u32(&mut hdr, 20, src_port); // Guest port -> guest src port
+            Self::set_u32(&mut hdr, 24, payload.len() as u32);
+            Self::set_u16(&mut hdr, 28, VSOCK_TYPE_DGRAM);
+            Self::set_u16(&mut hdr, 30, VSOCK_OP_RW);
+            Self::set_u32(&mut hdr, 32, 0); // flags
+            Self::set_u32(&mut hdr, 36, 0); // buf_alloc (not used for DGRAM)
+            Self::set_u32(&mut hdr, 40, 0); // fwd_cnt (not used for DGRAM)
+
+            self.queue_response(&hdr, VSOCK_OP_RW, payload);
+        }
+    }
+
     fn host_socket_addr(&self, guest_dst_port: u32) -> Option<SocketAddr> {
         let host_port_map = self.host_port_map.as_ref()?;
         let host_port = *host_port_map.get(&(guest_dst_port as u16))?;
@@ -670,12 +716,15 @@ impl Vsock {
                                 continue;
                             }
 
-                            // Current Windows backend only supports stream-like forwarding.
-                            if pkt_type != VSOCK_TYPE_STREAM {
+                            // Handle DGRAM type
+                            if pkt_type == VSOCK_TYPE_DGRAM {
+                                // DGRAM doesn't use REQUEST/RESPONSE handshake
+                                // Just send RST to indicate we don't support connection-oriented DGRAM
                                 self.queue_rst(&hdr);
                                 continue;
                             }
 
+                            // STREAM type handling
                             // Reconnect on same guest source port replaces the old stream.
                             if self.streams.contains_key(&src_port) {
                                 self.streams.remove(&src_port);
@@ -759,13 +808,58 @@ impl Vsock {
                                 continue;
                             }
 
-                            if pkt_type != VSOCK_TYPE_STREAM {
-                                self.queue_rst(&hdr);
+                            if data_len > MAX_RW_PAYLOAD {
+                                if pkt_type == VSOCK_TYPE_STREAM {
+                                    self.close_stream_and_rst(src_port, &hdr);
+                                } else {
+                                    self.queue_rst(&hdr);
+                                }
                                 continue;
                             }
 
-                            if data_len > MAX_RW_PAYLOAD {
-                                self.close_stream_and_rst(src_port, &hdr);
+                            // Handle DGRAM type
+                            if pkt_type == VSOCK_TYPE_DGRAM {
+                                // For DGRAM, create socket on first use
+                                if !self.dgram_sockets.contains_key(&src_port) {
+                                    // Create UDP socket bound to any port
+                                    match UdpSocket::bind("0.0.0.0:0") {
+                                        Ok(socket) => {
+                                            let _ = socket.set_nonblocking(true);
+                                            self.dgram_sockets.insert(src_port, socket);
+                                        }
+                                        Err(_) => {
+                                            self.queue_rst(&hdr);
+                                            continue;
+                                        }
+                                    }
+                                }
+
+                                if let Some(socket) = self.dgram_sockets.get(&src_port) {
+                                    if data_len > 0 {
+                                        let Some(buf_desc) = iter.next() else {
+                                            continue;
+                                        };
+                                        if buf_desc.len < data_len as u32 {
+                                            continue;
+                                        }
+
+                                        let mut payload = vec![0_u8; data_len];
+                                        if mem.read_slice(&mut payload, buf_desc.addr).is_err() {
+                                            continue;
+                                        }
+
+                                        // Send to host port if mapped
+                                        if let Some(addr) = self.host_socket_addr(dst_port) {
+                                            let _ = socket.send_to(&payload, addr);
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+
+                            // STREAM type handling
+                            if pkt_type != VSOCK_TYPE_STREAM {
+                                self.queue_rst(&hdr);
                                 continue;
                             }
 
@@ -804,6 +898,7 @@ impl Vsock {
                                     }
                                 }
                                 self.harvest_stream_reads();
+                                self.harvest_dgram_reads();
                                 self.queue_credit_update(&hdr);
                             } else {
                                 self.queue_rst(&hdr);
@@ -1054,15 +1149,18 @@ impl Subscriber for Vsock {
         if source == self.queue_events[RXQ_INDEX].as_raw_fd() {
             let _ = self.queue_events[RXQ_INDEX].read();
             self.harvest_stream_reads();
+            self.harvest_dgram_reads();
             raise_irq |= self.process_rx_queue();
         } else if source == self.queue_events[TXQ_INDEX].as_raw_fd() {
             let _ = self.queue_events[TXQ_INDEX].read();
             raise_irq |= self.process_tx_queue();
             self.harvest_stream_reads();
+            self.harvest_dgram_reads();
             raise_irq |= self.process_rx_queue();
         } else if source == self.queue_events[EVQ_INDEX].as_raw_fd() {
             let _ = self.queue_events[EVQ_INDEX].read();
             self.harvest_stream_reads();
+            self.harvest_dgram_reads();
             raise_irq |= self.process_evq_queue();
             raise_irq |= self.process_rx_queue();
         }

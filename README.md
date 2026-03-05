@@ -61,7 +61,7 @@ Each variant generates a dynamic library with a different name (and ```soname```
 * virtio-console
 * virtio-block
 * virtio-net (via TcpStream backend)
-* virtio-vsock (via Named Pipe backend; no TSI)
+* virtio-vsock (via Named Pipe backend; no TSI; DGRAM support)
 * virtio-balloon (free-page reporting)
 * virtio-rng
 
