@@ -88,6 +88,38 @@ jobs:
         run: cargo test -p vmm --target x86_64-pc-windows-msvc --lib
         continue-on-error: true
 
+  windows-build-dll:
+    name: Build krun.dll (Windows release)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Create a fake init
+        shell: pwsh
+        run: New-Item -ItemType File -Path "init/init" -Force | Out-Null
+
+      - name: Build krun.dll
+        run: cargo build --release -p libkrun --target x86_64-pc-windows-msvc
+
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/krun.dll  dist/krun.dll
+          Copy-Item target/x86_64-pc-windows-msvc/release/krun.dll.lib dist/krun.lib
+          Copy-Item include/libkrun_windows.h dist/libkrun_windows.h
+
+      - name: Upload krun.dll artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: krun-windows-x64
+          path: dist/
+
   windows-whpx-smoke:
     name: Windows WHPX smoke (manual)
     if: github.event_name == 'workflow_dispatch' && inputs.run_whpx_smoke

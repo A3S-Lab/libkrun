@@ -566,19 +566,19 @@ impl Attr {
             #[cfg(not(target_os = "windows"))]
             ino: st.st_ino,
             #[cfg(target_os = "windows")]
-            ino: st.st_ino as u64,
+            ino: st.st_ino, // already u64 in our custom stat64
             size: st.st_size as u64,
             #[cfg(not(target_os = "windows"))]
             blocks: st.st_blocks as u64,
             #[cfg(target_os = "windows")]
-            blocks: 0, // Windows stat doesn't have st_blocks
+            blocks: st.st_blocks,
             atime: st.st_atime as u64,
             mtime: st.st_mtime as u64,
             ctime: st.st_ctime as u64,
             #[cfg(not(target_os = "windows"))]
             atimensec: st.st_atime_nsec as u32,
             #[cfg(target_os = "windows")]
-            atimensec: 0, // Windows stat doesn't have nanosecond precision
+            atimensec: 0,
             #[cfg(not(target_os = "windows"))]
             mtimensec: st.st_mtime_nsec as u32,
             #[cfg(target_os = "windows")]
@@ -601,15 +601,15 @@ impl Attr {
             #[cfg(target_os = "macos")]
             nlink: st.st_nlink as u32,
             #[cfg(target_os = "windows")]
-            nlink: st.st_nlink as u32,
+            nlink: st.st_nlink,
             #[cfg(not(target_os = "windows"))]
             uid: st.st_uid,
             #[cfg(target_os = "windows")]
-            uid: st.st_uid as u32,
+            uid: st.st_uid, // already u32
             #[cfg(not(target_os = "windows"))]
             gid: st.st_gid,
             #[cfg(target_os = "windows")]
-            gid: st.st_gid as u32,
+            gid: st.st_gid, // already u32
             #[cfg(not(target_os = "windows"))]
             rdev: st.st_rdev as u32,
             #[cfg(target_os = "windows")]
@@ -617,7 +617,7 @@ impl Attr {
             #[cfg(not(target_os = "windows"))]
             blksize: st.st_blksize as u32,
             #[cfg(target_os = "windows")]
-            blksize: 4096, // Default block size for Windows
+            blksize: st.st_blksize,
             flags,
         }
     }
@@ -893,8 +893,8 @@ impl From<SetattrIn> for bindings::stat64 {
         }
         #[cfg(target_os = "windows")]
         {
-            out.st_uid = sai.uid as i16;
-            out.st_gid = sai.gid as i16;
+            out.st_uid = sai.uid;
+            out.st_gid = sai.gid;
         }
         out.st_size = sai.size as i64;
         out.st_atime = sai.atime as i64;

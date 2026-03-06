@@ -29,6 +29,10 @@ const ROOT_INODE: Inode = 1;
 const DT_UNKNOWN: u8 = 0;
 const DT_REG: u8 = 8;
 const DT_DIR: u8 = 4;
+const DT_LNK: u8 = 10;
+
+// libc on MSVC doesn't export S_IFLNK; define it ourselves (Linux ABI value).
+const S_IFLNK: u32 = 0o120_000;
 
 /// Configuration for Windows passthrough filesystem
 #[derive(Debug, Clone)]
@@ -173,24 +177,26 @@ impl PassthroughFs {
     fn metadata_to_stat(&self, metadata: &Metadata, inode: Inode) -> bindings::stat64 {
         let mut st: bindings::stat64 = unsafe { std::mem::zeroed() };
 
-        st.st_ino = inode as u16;  // Windows stat uses u16 for st_ino
+        st.st_ino = inode; // u64 — no truncation
         st.st_nlink = 1;
-        st.st_mode = if metadata.is_dir() {
-            (libc::S_IFDIR | 0o755) as u16
-        } else if metadata.is_file() {
-            (libc::S_IFREG | 0o644) as u16
+
+        let ft = metadata.file_type();
+        st.st_mode = if ft.is_dir() {
+            (libc::S_IFDIR | 0o755) as u32
+        } else if ft.is_symlink() {
+            (S_IFLNK | 0o777) as u32
         } else {
-            (libc::S_IFREG | 0o644) as u16
+            (libc::S_IFREG | 0o644) as u32
         };
 
         st.st_size = metadata.len() as i64;
-        // Windows stat doesn't have st_blksize and st_blocks fields
+        // Approximate block count (512-byte blocks, same as Linux convention)
+        st.st_blksize = 4096;
+        st.st_blocks = metadata.len().div_ceil(512);
 
-        // Convert Windows file times to Unix timestamps
         if let Ok(modified) = metadata.modified() {
             if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
                 st.st_mtime = duration.as_secs() as i64;
-                // Windows stat doesn't have nanosecond precision fields
             }
         }
 
@@ -206,9 +212,9 @@ impl PassthroughFs {
             }
         }
 
-        // Windows doesn't have uid/gid, use defaults
-        st.st_uid = 1000;
-        st.st_gid = 1000;
+        // Windows doesn't have uid/gid; expose as root-owned, world-readable
+        st.st_uid = 0;
+        st.st_gid = 0;
 
         st
     }
@@ -257,8 +263,8 @@ impl FileSystem for PassthroughFs {
         let name_path = self.cstr_to_path(name)?;
         let full_path = parent_path.join(&name_path);
 
-        // Check if file exists
-        let metadata = fs::metadata(&full_path)?;
+        // Use symlink_metadata (= lstat) so symlinks appear as S_IFLNK to the guest.
+        let metadata = fs::symlink_metadata(&full_path)?;
 
         // Get or create inode
         let inode = self.get_or_create_inode(&full_path)?;
@@ -301,7 +307,7 @@ impl FileSystem for PassthroughFs {
         _handle: Option<Self::Handle>,
     ) -> io::Result<(bindings::stat64, Duration)> {
         let path = self.get_path(inode)?;
-        let metadata = fs::metadata(&path)?;
+        let metadata = fs::symlink_metadata(&path)?;
         let st = self.metadata_to_stat(&metadata, inode);
         Ok((st, self.cfg.attr_timeout))
     }
@@ -412,14 +418,15 @@ impl FileSystem for PassthroughFs {
             // Get or create inode for this entry
             let entry_inode = self.get_or_create_inode(&entry_path).unwrap_or(0);
 
-            // Determine entry type
-            let entry_type = if let Ok(metadata) = entry.metadata() {
-                if metadata.is_dir() {
+            // Determine entry type using symlink_metadata to detect S_IFLNK
+            let entry_type = if let Ok(metadata) = fs::symlink_metadata(&entry_path) {
+                let ft = metadata.file_type();
+                if ft.is_dir() {
                     DT_DIR
-                } else if metadata.is_file() {
-                    DT_REG
+                } else if ft.is_symlink() {
+                    DT_LNK
                 } else {
-                    DT_UNKNOWN
+                    DT_REG
                 }
             } else {
                 DT_UNKNOWN
@@ -1186,5 +1193,100 @@ impl FileSystem for PassthroughFs {
     ) -> io::Result<usize> {
         // TODO: Implement copy_file_range
         Err(io::Error::from_raw_os_error(libc::ENOSYS))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+    use tempfile::TempDir;
+
+    fn make_fs(root: &std::path::Path) -> PassthroughFs {
+        let cfg = Config {
+            root_dir: root.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        PassthroughFs::new(cfg).expect("PassthroughFs::new")
+    }
+
+    fn ctx() -> Context {
+        Context { uid: 0, gid: 0, pid: 0 }
+    }
+
+    #[test]
+    fn test_virtiofs_windows_lookup_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("hello.txt");
+        std::fs::write(&path, b"hello").unwrap();
+
+        let fs = make_fs(dir.path());
+        let name = CString::new("hello.txt").unwrap();
+        let entry = fs.lookup(ctx(), ROOT_INODE, &name).expect("lookup");
+
+        // st_ino must be a valid non-zero u64 (not truncated to u16)
+        assert_ne!(entry.attr.st_ino, 0);
+        assert_eq!(entry.attr.st_size, 5);
+        // Regular file mode
+        let mode = entry.attr.st_mode & 0xf000;
+        assert_eq!(mode, (libc::S_IFREG as u32) & 0xf000);
+    }
+
+    #[test]
+    fn test_virtiofs_windows_lookup_dir() {
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("subdir");
+        std::fs::create_dir(&sub).unwrap();
+
+        let fs = make_fs(dir.path());
+        let name = CString::new("subdir").unwrap();
+        let entry = fs.lookup(ctx(), ROOT_INODE, &name).expect("lookup dir");
+
+        let mode = entry.attr.st_mode & 0xf000;
+        assert_eq!(mode, (libc::S_IFDIR as u32) & 0xf000);
+    }
+
+    #[test]
+    fn test_virtiofs_windows_large_inode() {
+        // Verify that inode numbers > 65535 are not truncated.
+        // Allocate enough inodes to exceed u16::MAX.
+        let dir = TempDir::new().unwrap();
+        let fs = make_fs(dir.path());
+
+        // Fast path: directly manipulate the counter.
+        fs.next_inode.store(70_000, std::sync::atomic::Ordering::Relaxed);
+
+        let path = dir.path().join("probe.txt");
+        std::fs::write(&path, b"x").unwrap();
+        let inode = fs.get_or_create_inode(&path).unwrap();
+        assert_eq!(inode, 70_000, "inode should be 70000, not truncated to u16");
+
+        let name = CString::new("probe.txt").unwrap();
+        let entry = fs.lookup(ctx(), ROOT_INODE, &name).expect("lookup");
+        assert_eq!(entry.attr.st_ino, 70_000, "st_ino must not be truncated");
+    }
+
+    #[test]
+    fn test_virtiofs_windows_readdir_types() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("file.txt"), b"data").unwrap();
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+
+        let fs = make_fs(dir.path());
+        let (_, _opts) = fs.opendir(ctx(), ROOT_INODE, 0).unwrap();
+        let handle = 0u64;
+
+        let mut entries: Vec<(u64, u32, String)> = Vec::new();
+        fs.readdir(ctx(), ROOT_INODE, handle, 4096, 0, |e| {
+            entries.push((e.ino, e.type_, String::from_utf8_lossy(e.name).to_string()));
+            Ok(1)
+        })
+        .unwrap();
+
+        let types: std::collections::HashMap<String, u32> =
+            entries.into_iter().map(|(_, t, n)| (n, t)).collect();
+
+        assert_eq!(types["subdir"], DT_DIR as u32, "subdir must be DT_DIR");
+        assert_eq!(types["file.txt"], DT_REG as u32, "file.txt must be DT_REG");
     }
 }

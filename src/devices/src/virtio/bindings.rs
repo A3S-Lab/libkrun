@@ -33,8 +33,28 @@ pub const LINUX_XATTR_REPLACE: libc::c_int = 2;
 pub type stat64 = libc::stat;
 #[cfg(target_os = "linux")]
 pub use libc::stat64;
+/// Windows stat64 substitute with 64-bit inode and u32 uid/gid.
+///
+/// `libc::stat` on MSVC has `st_ino: u16` and `st_uid/gid: i16` — both too
+/// narrow for the FUSE protocol (which uses 64-bit inodes and 32-bit uid/gid).
+/// This custom struct uses the correct widths throughout.
 #[cfg(target_os = "windows")]
-pub type stat64 = libc::stat;
+#[derive(Debug, Default, Copy, Clone)]
+pub struct stat64 {
+    pub st_dev: u64,
+    pub st_ino: u64,     // 64-bit: supports > 65535 files
+    pub st_mode: u32,
+    pub st_nlink: u32,
+    pub st_uid: u32,     // 32-bit: matches FUSE uid field
+    pub st_gid: u32,     // 32-bit: matches FUSE gid field
+    pub st_rdev: u32,
+    pub st_size: i64,
+    pub st_atime: i64,
+    pub st_mtime: i64,
+    pub st_ctime: i64,
+    pub st_blksize: u32,
+    pub st_blocks: u64,
+}
 
 #[cfg(target_os = "macos")]
 pub type off64_t = libc::off_t;

@@ -67,3 +67,6 @@ kvm-ioctls = ">=0.21"
 
 [target.'cfg(any(target_arch = "aarch64", target_arch = "riscv64"))'.dependencies]
 vm-fdt = ">= 0.2.0"
+
+[dev-dependencies]
+tempfile = "3"

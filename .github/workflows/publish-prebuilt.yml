@@ -26,3 +26,36 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.TOKEN }}
         shell: bash
+
+  build-windows-dll:
+    name: Build and publish krun.dll (Windows x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Create a fake init
+        shell: pwsh
+        run: New-Item -ItemType File -Path "init/init" -Force | Out-Null
+
+      - name: Build krun.dll
+        run: cargo build --release -p libkrun --target x86_64-pc-windows-msvc
+
+      - name: Package artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/krun.dll     dist/krun.dll
+          Copy-Item target/x86_64-pc-windows-msvc/release/krun.dll.lib dist/krun.lib
+          Copy-Item include/libkrun_windows.h                           dist/libkrun_windows.h
+          Compress-Archive -Path dist/* -DestinationPath krun-windows-x64.zip
+
+      - name: Upload to GitHub release
+        shell: bash
+        run: gh release upload "${{ github.event.release.tag_name }}" krun-windows-x64.zip
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
