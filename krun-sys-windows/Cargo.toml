@@ -1,0 +1,24 @@
+[package]
+name = "a3s-libkrun-sys"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.0"
+description = "Raw Rust bindings for libkrun on Windows (WHPX backend)"
+repository = "https://github.com/containers/libkrun"
+license = "Apache-2.0"
+# Declares ownership of the "krun" native link; prevents duplicate linking
+# when multiple crates in the dependency tree reference this sys crate.
+links = "krun"
+
+[target.'cfg(windows)'.build-dependencies]
+# No build-time dependencies: bindings are hand-written, no bindgen needed.
+# LIBKRUN_DIR env var or prebuilt/ directory supplies krun.lib at build time.
+
+# --------------------------------------------------------------------------
+# Examples — require krun.lib at link time (set LIBKRUN_DIR first).
+# --------------------------------------------------------------------------
+
+[[example]]
+name = "start_vm"
+# a3s_box_build_rs.rs is documentation only, not a runnable example.
+
