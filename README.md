@@ -418,6 +418,8 @@ contributor availability.
 | Windows multi-vCPU | Windows | WHPX supports multiple virtual processors; libkrun currently wires a single vCPU on Windows. SMP boot protocol (INIT/SIPI) needs to be implemented. |
 | libkrunfw-windows | Windows | A companion library that bundles a pre-built x86_64 ELF vmlinux for Windows, eliminating the need for callers to supply their own kernel via `krun_set_kernel`. |
 | virtio-snd real backend | Windows | The current Windows backend is a NullBackend (no audio). Wiring to Windows Audio Session API (WASAPI) is planned. |
+| virtiofs: mknod / link / copy_file_range | Windows | Three syscalls are not yet implemented in the Windows passthrough driver (`fs/windows/passthrough.rs`): `mknod` (special file creation), `link` (hard links), and `copy_file_range` (in-kernel file copy). |
+| virtio-net TSO on Windows | Windows | Packet segmentation for TCP Segment Offload (TSO) is not yet implemented in the Windows TcpStream backend (`net_windows.rs`). |
 | ACPI table generation | All | Generating a minimal ACPI table set (RSDP/RSDT/FADT/MADT) would allow guests to use ACPI power management and CPU hotplug without relying on the legacy PIC/PIT path. |
 
 ### Medium-term
