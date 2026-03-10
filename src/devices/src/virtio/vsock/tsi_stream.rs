@@ -328,12 +328,18 @@ impl TsiStreamProxy {
         }
     }
 
-    fn recv_pkt(&mut self) -> (bool, bool) {
+    /// Returns `(have_used, wait_credit, no_rx_space)`.
+    /// `no_rx_space` is true when the virtio RX queue had no available descriptors
+    /// at all, meaning the guest hasn't replenished its buffers yet and the caller
+    /// should back off (remove from epoll) to avoid busy-looping.
+    fn recv_pkt(&mut self) -> (bool, bool, bool) {
         let mut have_used = false;
         let mut wait_credit = false;
         let mut queue = self.queue.lock().unwrap();
+        let mut entered_loop = false;
 
         while let Some(head) = queue.pop(&self.mem) {
+            entered_loop = true;
             let len = match VsockPacket::from_rx_virtq_head(&head) {
                 Ok(mut pkt) => match self.recv_to_pkt(&mut pkt) {
                     RecvPkt::WaitForCredit => {
@@ -380,8 +386,11 @@ impl TsiStreamProxy {
             }
         }
 
-        debug!("recv_pkt: have_used={have_used}");
-        (have_used, wait_credit)
+        // If the loop never entered, the virtio RX queue has no available descriptors.
+        // Signal the caller so it can back off rather than busy-looping.
+        let no_rx_space = !entered_loop;
+        debug!("recv_pkt: have_used={have_used} no_rx_space={no_rx_space}");
+        (have_used, wait_credit, no_rx_space)
     }
 
     fn push_connect_rsp(&self, result: i32) {
@@ -630,15 +639,19 @@ impl Proxy for TsiStreamProxy {
                 "sending credit update: id={}, tx_cnt={}, last_tx_cnt={}",
                 self.id, self.tx_cnt, self.last_tx_cnt_sent
             );
-            self.last_tx_cnt_sent = self.tx_cnt;
             // This packet goes to the connection.
             let rx = MuxerRx::CreditUpdate {
                 local_port: pkt.dst_port(),
                 peer_port: pkt.src_port(),
                 fwd_cnt: self.tx_cnt.0,
             };
-            push_packet(self.cid, rx, &self.rxq, &self.queue, &self.mem);
-            update.signal_queue = true;
+            // Only advance last_tx_cnt_sent if the packet was actually queued.
+            // If it was dropped (rxq full), we leave last_tx_cnt_sent unchanged so
+            // the condition remains true and we retry on the next sendmsg call.
+            if push_packet(self.cid, rx, &self.rxq, &self.queue, &self.mem) {
+                self.last_tx_cnt_sent = self.tx_cnt;
+                update.signal_queue = true;
+            }
         }
 
         debug!("sendmsg ret={ret}");
@@ -867,8 +880,17 @@ impl Proxy for TsiStreamProxy {
                 self.id, self.status
             );
             if self.status == ProxyStatus::Connected {
-                let (signal_queue, wait_credit) = self.recv_pkt();
+                let (signal_queue, wait_credit, no_rx_space) = self.recv_pkt();
                 update.signal_queue = signal_queue;
+
+                if no_rx_space {
+                    // The guest hasn't provided RX descriptors yet.  Remove this
+                    // proxy from epoll so MuxerThread doesn't busy-loop, and ask
+                    // to be re-registered once the RX queue is replenished.
+                    update.polling =
+                        Some((self.id, self.fd.as_raw_fd(), EventSet::empty()));
+                    update.needs_rx_space = true;
+                }
 
                 if wait_credit && self.status != ProxyStatus::WaitingCreditUpdate {
                     self.status = ProxyStatus::WaitingCreditUpdate;

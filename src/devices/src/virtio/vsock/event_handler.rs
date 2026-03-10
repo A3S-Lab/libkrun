@@ -28,6 +28,9 @@ impl Vsock {
             error!("Failed to get vsock rx queue event: {e:?}");
         } else {
             raise_irq |= self.process_stream_rx();
+            // Guest has replenished the RX queue; wake MuxerThread so that
+            // proxies paused due to backpressure can resume processing.
+            self.muxer.signal_rx_ready();
         }
         raise_irq
     }

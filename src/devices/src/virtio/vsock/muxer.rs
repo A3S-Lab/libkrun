@@ -27,6 +27,7 @@ use super::TsiFlags;
 use super::VsockError;
 use crossbeam_channel::{unbounded, Sender};
 use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
+use utils::eventfd::EventFd;
 use vm_memory::GuestMemoryMmap;
 
 use crate::virtio::InterruptTransport;
@@ -92,7 +93,7 @@ pub fn push_packet(
     rxq_mutex: &Arc<Mutex<MuxerRxQ>>,
     queue_mutex: &Arc<Mutex<VirtQueue>>,
     mem: &GuestMemoryMmap,
-) {
+) -> bool {
     let mut queue = queue_mutex.lock().unwrap();
     if let Some(head) = queue.pop(mem) {
         if let Ok(mut pkt) = VsockPacket::from_rx_virtq_head(&head) {
@@ -101,10 +102,15 @@ pub fn push_packet(
                 error!("failed to add used elements to the queue: {e:?}");
             }
         }
+        true
     } else {
-        error!("couldn't push pkt to queue, adding it to rxq");
         drop(queue);
-        rxq_mutex.lock().unwrap().push(rx);
+        if rxq_mutex.lock().unwrap().push(rx) {
+            true
+        } else {
+            warn!("vsock rxq full, dropping packet");
+            false
+        }
     }
 }
 
@@ -120,6 +126,10 @@ pub struct VsockMuxer {
     reaper_sender: Option<Sender<u64>>,
     unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
     tsi_flags: TsiFlags,
+    /// Signals MuxerThread that the guest has replenished the virtio RX queue.
+    /// Written by the device thread on each rxq event; read by MuxerThread to
+    /// resume proxies that were paused due to an empty virtqueue (backpressure).
+    rx_ready_fd: Option<Arc<EventFd>>,
 }
 
 impl VsockMuxer {
@@ -141,6 +151,7 @@ impl VsockMuxer {
             reaper_sender: None,
             unix_ipc_port_map,
             tsi_flags,
+            rx_ready_fd: None,
         }
     }
 
@@ -163,6 +174,11 @@ impl VsockMuxer {
 
         let (sender, receiver) = unbounded();
 
+        let rx_ready_fd = Arc::new(
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).expect("failed to create rx_ready_fd"),
+        );
+        self.rx_ready_fd = Some(rx_ready_fd.clone());
+
         let thread = MuxerThread::new(
             self.cid,
             self.epoll.clone(),
@@ -173,12 +189,23 @@ impl VsockMuxer {
             interrupt.clone(),
             sender.clone(),
             self.unix_ipc_port_map.clone().unwrap_or_default(),
+            rx_ready_fd,
         );
         thread.run();
 
         self.reaper_sender = Some(sender);
         let reaper = ReaperThread::new(receiver, self.proxy_map.clone());
         reaper.run();
+    }
+
+    /// Notify MuxerThread that the guest has added new RX descriptors to the
+    /// virtio queue.  Proxies paused due to a full virtqueue will be resumed.
+    pub(crate) fn signal_rx_ready(&self) {
+        if let Some(fd) = &self.rx_ready_fd {
+            if let Err(e) = fd.write(1) {
+                warn!("failed to signal rx_ready_fd: {e}");
+            }
+        }
     }
 
     pub(crate) fn has_pending_rx(&self) -> bool {
@@ -224,9 +251,16 @@ impl VsockMuxer {
                 }
             }
         } else {
-            error!("couldn't push pkt to queue, adding it to rxq");
             drop(queue);
-            self.rxq.lock().unwrap().push(rx);
+            if self.rxq.lock().unwrap().push(rx) {
+                // Wake the guest so it processes pending used buffers and provides
+                // new RX descriptors, allowing rxq to drain on the next rx event.
+                if let Some(interrupt) = &self.interrupt {
+                    interrupt.signal_used_queue();
+                }
+            } else {
+                warn!("vsock rxq full, dropping control packet");
+            }
         }
     }
 
@@ -595,7 +629,11 @@ impl VsockMuxer {
                         local_port: pkt.dst_port(),
                         peer_port: pkt.src_port(),
                     };
-                    push_packet(self.cid, rx, &self.rxq, queue, mem);
+                    if push_packet(self.cid, rx, &self.rxq, queue, mem) {
+                        if let Some(interrupt) = &self.interrupt {
+                            interrupt.signal_used_queue();
+                        }
+                    }
                     return;
                 }
                 let rxq = self.rxq.clone();
@@ -730,7 +768,11 @@ impl VsockMuxer {
                 local_port: pkt.dst_port(),
                 peer_port: pkt.src_port(),
             };
-            push_packet(self.cid, rx, &self.rxq, queue, mem);
+            if push_packet(self.cid, rx, &self.rxq, queue, mem) {
+                if let Some(interrupt) = &self.interrupt {
+                    interrupt.signal_used_queue();
+                }
+            }
         }
     }
 

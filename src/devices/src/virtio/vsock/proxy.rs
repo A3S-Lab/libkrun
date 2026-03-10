@@ -60,6 +60,10 @@ pub struct ProxyUpdate {
     pub new_proxy: Option<(u32, OwnedFd, AddressFamily, NewProxyType)>,
     pub push_accept: Option<(u64, u64)>,
     pub push_credit_req: Option<MuxerRx>,
+    /// The virtio RX queue had no available descriptors during recv_pkt.
+    /// MuxerThread should remove this proxy from epoll and re-register it
+    /// once the guest replenishes the RX queue.
+    pub needs_rx_space: bool,
 }
 
 impl fmt::Display for ProxyError {

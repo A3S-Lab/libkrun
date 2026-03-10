@@ -16,6 +16,7 @@ use crate::virtio::InterruptTransport;
 use crossbeam_channel::Sender;
 use rand::{rng, rngs::ThreadRng, Rng};
 use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
+use utils::eventfd::EventFd;
 use vm_memory::GuestMemoryMmap;
 
 pub struct MuxerThread {
@@ -28,6 +29,10 @@ pub struct MuxerThread {
     interrupt: InterruptTransport,
     reaper_sender: Sender<u64>,
     unix_ipc_port_map: HashMap<u32, (PathBuf, bool)>,
+    /// Written by the device thread when the guest replenishes the virtio RX
+    /// queue.  MuxerThread registers this fd in its epoll set and uses it to
+    /// resume proxies that were paused due to backpressure.
+    rx_ready_fd: Arc<EventFd>,
 }
 
 impl MuxerThread {
@@ -42,6 +47,7 @@ impl MuxerThread {
         interrupt: InterruptTransport,
         reaper_sender: Sender<u64>,
         unix_ipc_port_map: HashMap<u32, (PathBuf, bool)>,
+        rx_ready_fd: Arc<EventFd>,
     ) -> Self {
         MuxerThread {
             cid,
@@ -53,6 +59,7 @@ impl MuxerThread {
             interrupt,
             reaper_sender,
             unix_ipc_port_map,
+            rx_ready_fd,
         }
     }
 
@@ -65,7 +72,12 @@ impl MuxerThread {
 
     fn send_credit_request(&self, credit_rx: MuxerRx) {
         debug!("send_credit_request");
-        push_packet(self.cid, credit_rx, &self.rxq, &self.queue, &self.mem);
+        // signal_queue is false on the WaitForCredit path, so the caller's
+        // should_signal won't fire.  Signal the interrupt here to ensure the
+        // guest sees the CreditRequest and responds with a CreditUpdate.
+        if push_packet(self.cid, credit_rx, &self.rxq, &self.queue, &self.mem) {
+            self.interrupt.signal_used_queue();
+        }
     }
 
     pub fn update_polling(&self, id: u64, fd: RawFd, evset: EventSet) {
@@ -173,7 +185,23 @@ impl MuxerThread {
     }
 
     fn work(self) {
+        use std::os::unix::io::AsRawFd;
+
         let mut thread_rng = rng();
+        // Proxies removed from epoll because the virtio RX queue had no space.
+        // Stored as (proxy_id, raw_fd) so we can re-register them on wake.
+        let mut paused_proxies: Vec<(u64, RawFd)> = Vec::new();
+
+        // Register rx_ready_fd in our epoll set.  We use the raw fd value as
+        // the event data so we can identify this event in the loop below.
+        let rx_ready_raw = self.rx_ready_fd.as_raw_fd();
+        let rx_ready_id = rx_ready_raw as u64;
+        let _ = self.epoll.ctl(
+            ControlOperation::Add,
+            rx_ready_raw,
+            &EpollEvent::new(EventSet::IN, rx_ready_id),
+        );
+
         self.create_lisening_ipc_sockets();
         loop {
             let mut epoll_events = vec![EpollEvent::new(EventSet::empty(), 0); 32];
@@ -183,9 +211,21 @@ impl MuxerThread {
             {
                 Ok(ev_cnt) => {
                     for ev in &epoll_events[0..ev_cnt] {
-                        debug!("Event: ev.data={} ev.fd={}", ev.data(), ev.fd());
-                        let evset = EventSet::from_bits(ev.events).unwrap();
                         let id = ev.data();
+                        let evset = EventSet::from_bits(ev.events).unwrap();
+
+                        // Wake event: guest replenished the virtio RX queue.
+                        if id == rx_ready_id {
+                            let _ = self.rx_ready_fd.read();
+                            for (pid, pfd) in paused_proxies.drain(..) {
+                                if self.proxy_map.read().unwrap().contains_key(&pid) {
+                                    self.update_polling(pid, pfd, EventSet::IN);
+                                }
+                            }
+                            continue;
+                        }
+
+                        debug!("Event: ev.data={} ev.fd={}", id, ev.fd());
 
                         let update = self.proxy_map.read().unwrap().get(&id).map(|proxy_lock| {
                             let mut proxy = proxy_lock.lock().unwrap();
@@ -193,7 +233,18 @@ impl MuxerThread {
                         });
 
                         if let Some(update) = update {
+                            let needs_rx_space = update.needs_rx_space;
                             self.process_proxy_update(id, update, &mut thread_rng);
+
+                            if needs_rx_space {
+                                // process_proxy_update already removed this proxy
+                                // from epoll via update.polling = empty.  Save it
+                                // so we can re-register it on the next wake event.
+                                if let Some(proxy) = self.proxy_map.read().unwrap().get(&id) {
+                                    let fd = proxy.lock().unwrap().as_raw_fd();
+                                    paused_proxies.push((id, fd));
+                                }
+                            }
                         }
                     }
                 }
