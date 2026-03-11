@@ -1,4 +1,5 @@
 use polly::event_manager::{EventManager, Subscriber};
+use std::os::fd::AsRawFd;
 use utils::epoll::{EpollEvent, EventSet};
 
 use super::device::{Rng, REQ_INDEX};

@@ -1,4 +1,5 @@
 use polly::event_manager::{EventManager, Subscriber};
+use std::os::fd::AsRawFd;
 use utils::epoll::{EpollEvent, EventSet};
 
 use super::device::{Balloon, DFQ_INDEX, FRQ_INDEX, IFQ_INDEX, PHQ_INDEX, STQ_INDEX};
