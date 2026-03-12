@@ -390,6 +390,17 @@ pub struct Config {
     pub export_fsid: u64,
     /// Table of exported FDs to share with other subsystems. Not supported for macos.
     pub export_table: Option<ExportTable>,
+
+    /// Whether to disable fsync operations. When enabled, fsync calls will return immediately
+    /// without actually syncing data to disk. This significantly improves performance on macOS
+    /// where fsync is slow, but reduces data durability guarantees.
+    ///
+    /// **WARNING**: Enabling this option means that data may be lost if the system crashes
+    /// before the OS flushes its buffers. Only enable this for development/testing environments
+    /// where data loss is acceptable.
+    ///
+    /// The default value for this option is `false`.
+    pub no_fsync: bool,
 }
 
 impl Default for Config {
@@ -404,6 +415,7 @@ impl Default for Config {
             proc_sfd_rawfd: None,
             export_fsid: 0,
             export_table: None,
+            no_fsync: false,
         }
     }
 }
@@ -433,6 +445,15 @@ pub struct PassthroughFs {
 
 impl PassthroughFs {
     pub fn new(cfg: Config) -> io::Result<PassthroughFs> {
+        let mut cfg = cfg;
+
+        // Check environment variable to enable no_fsync
+        // This provides a simple way to disable fsync for better performance on macOS
+        if std::env::var("LIBKRUN_NO_FSYNC").is_ok() {
+            cfg.no_fsync = true;
+            eprintln!("libkrun: no_fsync enabled via LIBKRUN_NO_FSYNC environment variable");
+        }
+
         let root = CString::new(cfg.root_dir.as_str()).expect("CString::new failed");
 
         // Safe because this doesn't modify any memory and we check the return value.
@@ -1622,6 +1643,11 @@ impl FileSystem for PassthroughFs {
         _datasync: bool,
         handle: Handle,
     ) -> io::Result<()> {
+        // If no_fsync is enabled, return immediately without syncing
+        if self.cfg.no_fsync {
+            return Ok(());
+        }
+
         let data = self
             .handles
             .read()

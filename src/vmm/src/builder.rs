@@ -2238,6 +2238,11 @@ fn attach_fs_devices(
 
         let id = format!("{}{}", String::from(fs.lock().unwrap().id()), i);
 
+        // Set no_fsync option if enabled
+        if config.no_fsync {
+            fs.lock().unwrap().set_no_fsync(true);
+        }
+
         if let Some(shm_region) = shm_manager.fs_region(i) {
             fs.lock().unwrap().set_shm_region(VirtioShmRegion {
                 host_addr: vmm
