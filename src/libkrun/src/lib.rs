@@ -615,6 +615,7 @@ pub unsafe extern "C" fn krun_set_root(ctx_id: u32, c_root_path: *const c_char) 
                 shared_dir,
                 // Default to a conservative 512 MB window.
                 shm_size: Some(1 << 29),
+                no_fsync: false,
             });
         }
         Entry::Vacant(_) => return -libc::ENOENT,
@@ -647,6 +648,7 @@ pub unsafe extern "C" fn krun_add_virtiofs(
                 fs_id: tag.to_string(),
                 shared_dir: path.to_string(),
                 shm_size: None,
+                no_fsync: false,
             });
         }
         Entry::Vacant(_) => return -libc::ENOENT,
@@ -680,6 +682,7 @@ pub unsafe extern "C" fn krun_add_virtiofs2(
                 fs_id: tag.to_string(),
                 shared_dir: path.to_string(),
                 shm_size: Some(shm_size.try_into().unwrap()),
+                no_fsync: false,
             });
         }
         Entry::Vacant(_) => return -libc::ENOENT,
