@@ -944,7 +944,13 @@ impl Proxy for TsiStreamProxy {
                 // OP_REQUEST and the vsock transport is fully established.
                 update.polling = Some((self.id(), self.fd.as_raw_fd(), EventSet::empty()));
             } else {
-                error!("EventSet::OUT while not connecting");
+                // This is expected: kqueue may have queued multiple EVFILT_WRITE events
+                // before we could unregister. The first event transitions to Connected,
+                // subsequent events arrive after the state change.
+                debug!(
+                    "EventSet::OUT while not connecting (status: {:?}), ignoring residual event",
+                    self.status
+                );
             }
         }
 
