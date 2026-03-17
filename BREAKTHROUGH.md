@@ -1,7 +1,7 @@
 # 重大突破：内核正在执行！
 
 **日期:** 2026-03-18
-**状态:** ✅ 内核成功启动并持续执行
+**状态:** ✅ 内核成功启动并持续执行，在循环中等待
 
 ---
 
@@ -22,27 +22,32 @@ v[4].Reg64 = 0x2 | (1 << 9);  // bit 1 = reserved, bit 9 = IF (interrupt enable)
 
 **文件:** `src/vmm/src/windows/vstate.rs:372`
 
-### 结果
+### 当前状态（2026-03-18 20:20）
 
-**内核现在正在执行！**
+**内核正在持续执行！**
 
 **证据:**
 ```
-[2026-03-17T19:55:30Z TRACE vmm::windows::whpx_vcpu] WHPX exit: reason=WHV_RUN_VP_EXIT_REASON(2), RIP=0xffffffff81021fc2
-[2026-03-17T19:55:30Z TRACE vmm::windows::whpx_vcpu] WHPX exit: reason=WHV_RUN_VP_EXIT_REASON(2), RIP=0xffffffff81021fca
-[2026-03-17T19:55:30Z TRACE vmm::windows::whpx_vcpu] WHPX exit: reason=WHV_RUN_VP_EXIT_REASON(2), RIP=0xffffffff81021fd1
+[2026-03-17T20:18:51Z TRACE vmm::windows::whpx_vcpu] WHPX exit: reason=WHV_RUN_VP_EXIT_REASON(2), RIP=0xffffffff81021fc2
+[2026-03-17T20:18:51Z TRACE vmm::windows::whpx_vcpu] WHPX exit: reason=WHV_RUN_VP_EXIT_REASON(2), RIP=0xffffffff81021fca
 ...
-[2026-03-17T19:55:30Z TRACE vmm::windows::whpx_vcpu] WHPX exit: reason=WHV_RUN_VP_EXIT_REASON(2), RIP=0xffffffff8102200e
-[2026-03-17T19:55:30Z TRACE vmm::windows::whpx_vcpu] WHPX exit: reason=WHV_RUN_VP_EXIT_REASON(2), RIP=0xffffffff81022010
-[2026-03-17T19:55:30Z TRACE vmm::windows::whpx_vcpu] WHPX exit: reason=WHV_RUN_VP_EXIT_REASON(2), RIP=0xffffffff8102200e
-[2026-03-17T19:55:30Z TRACE vmm::windows::whpx_vcpu] WHPX exit: reason=WHV_RUN_VP_EXIT_REASON(2), RIP=0xffffffff81022010
+[2026-03-17T20:18:51Z TRACE vmm::windows::whpx_vcpu] WHPX exit: reason=WHV_RUN_VP_EXIT_REASON(2), RIP=0xffffffff8102200e
+[2026-03-17T20:18:51Z TRACE vmm::windows::whpx_vcpu] WHPX exit: reason=WHV_RUN_VP_EXIT_REASON(2), RIP=0xffffffff81022010
+[2026-03-17T20:18:51Z TRACE vmm::windows::whpx_vcpu] WHPX exit: reason=WHV_RUN_VP_EXIT_REASON(2), RIP=0xffffffff8102200e
+[2026-03-17T20:18:51Z TRACE vmm::windows::whpx_vcpu] WHPX exit: reason=WHV_RUN_VP_EXIT_REASON(2), RIP=0xffffffff81022010
 ```
 
 **统计:**
-- 81 个 VM exit 在 5 秒内
-- RIP 在推进：0xffffffff81021fc2 → 0xffffffff8102200e/0xffffffff81022010 循环
-- 中断正在注入：400+ IRQ 0 中断
+- 持续的 VM exit（每秒数百次）
+- RIP 在推进：0xffffffff81021fc2 → ... → 0xffffffff8102200e/0xffffffff81022010 循环
+- 中断正在注入：100 Hz IRQ 0 持续注入
 - `WHvRequestInterrupt` 成功
+- Exit reason: WHV_RUN_VP_EXIT_REASON(2) = MemoryAccess
+
+**关键发现:**
+- 循环地址的VM exit不是MMIO访问（没有对应的MMIO日志）
+- 只有2次MMIO访问（IOAPIC写入），然后内核进入循环
+- 循环可能是内存访问（读取/写入普通内存）或其他类型的访问
 
 ---
 
@@ -62,22 +67,23 @@ v[4].Reg64 = 0x2 | (1 << 9);  // bit 1 = reserved, bit 9 = IF (interrupt enable)
 
 1. **内核在循环中** - RIP 在 0xffffffff8102200e 和 0xffffffff81022010 之间循环
 2. **没有串口输出** - 仍然没有看到串口访问
-3. **可能在等待** - 内核可能在等待某个设备或条件
+3. **循环原因未知** - 需要确定循环地址在做什么（可能是自旋锁或等待某个条件）
 
 ### 分析
 
 **RIP 循环模式:**
-- 0xffffffff8102200e → 0xffffffff81022010 → 0xffffffff8102200e → ...
+- 0xffffffff8102200e → 0xffffffff81022010 → 0xffffffff8102200e → ..
 - 这看起来像一个紧密的循环，可能是：
-  - 等待某个 I/O 端口
+  - 自旋锁（spinlock）
   - 等待某个内存位置变化
   - 等待某个中断处理完成
   - 或者是内核的空闲循环
 
 **WHV_RUN_VP_EXIT_REASON(2):**
 - 这是 `WHvRunVpExitReasonMemoryAccess`
-- 说明内核在持续访问内存（可能是 MMIO）
+- 说明内核在持续访问内存
 - 每次访问都导致 VM exit
+- 但不是MMIO访问（没有对应的MMIO日志）
 
 ---
 
@@ -85,29 +91,28 @@ v[4].Reg64 = 0x2 | (1 << 9);  // bit 1 = reserved, bit 9 = IF (interrupt enable)
 
 ### 立即行动
 
-#### 1. 检查循环地址在做什么 (30 分钟)
+#### 1. 确定循环地址的访问类型 (30 分钟)
 
-需要确定 0xffffffff8102200e 和 0xffffffff81022010 这两个地址在做什么：
-- 可能是 MMIO 读取
-- 可能是 I/O 端口访问
-- 可能是自旋锁
+需要确定 0xffffffff8102200e 和 0xffffffff81022010 这两个地址在做什么类型的内存访问：
+- 可能是普通内存读取/写入
+- 可能是执行访问（instruction fetch）
+- 可能是特殊的内存访问
 
-**方法:** 添加更详细的 MMIO/IO 日志，看看这些地址在访问什么
+**方法:** 检查 WHV_RUN_VP_EXIT_CONTEXT 的 MemoryAccess 字段，查看 AccessInfo 中的访问类型
 
-#### 2. 等待更长时间 (10 分钟)
+#### 2. 检查是否是自旋锁 (30 分钟)
+
+如果是自旋锁，内核可能在等待某个条件：
+- 检查循环地址访问的内存位置
+- 查看是否在读取某个标志位
+- 确定是否需要模拟某个设备响应
+
+#### 3. 等待更长时间 (10 分钟)
 
 内核可能需要更多时间来完成初始化：
 ```bash
-# 运行 30 秒看看是否有变化
-RUST_LOG=info timeout 30 ./test_kernel_boot.exe
-```
-
-#### 3. 检查是否有串口访问 (30 分钟)
-
-虽然没有看到串口输出，但可能内核在访问串口端口：
-```bash
-# 查找串口端口访问
-RUST_LOG=debug timeout 10 ./test_kernel_boot.exe 2>&1 | grep "0x3f8\|Serial"
+# 运行 60 秒看看是否有变化
+RUST_LOG=info timeout 60 ./test_kernel_boot.exe
 ```
 
 ### 中期计划
@@ -169,7 +174,10 @@ WHvRunVirtualProcessor 返回 ✅ 返回
 
 `WHV_RUN_VP_EXIT_REASON(2)` = `WHvRunVpExitReasonMemoryAccess`
 
-这意味着内核在访问未映射的内存或 MMIO 区域。每次访问都会导致 VM exit，我们需要模拟这些访问。
+这意味着内核在访问内存。每次访问都会导致 VM exit。需要确定：
+1. 访问类型（读/写/执行）
+2. 访问的内存地址
+3. 为什么这些访问会导致VM exit（可能是未映射的内存或特殊的内存区域）
 
 ---
 
@@ -181,6 +189,7 @@ WHvRunVirtualProcessor 返回 ✅ 返回
 1. 找到了阻止中断传递的根本原因（IF 标志未设置）
 2. 确认了中断注入机制工作正常
 3. 确认了内核正在执行并响应中断
+4. 内核进入了一个稳定的循环状态
 
 **下一步:** 确定内核在循环中等待什么，并提供相应的设备模拟或响应。
 
