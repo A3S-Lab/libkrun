@@ -8,7 +8,13 @@
 
 ### 快速开始
 
-- **[DEBUGGING_GUIDE.md](DEBUGGING_GUIDE.md)** - 🚀 从这里开始！
+- **[CURRENT_STATUS.md](CURRENT_STATUS.md)** - 🎯 当前状态 (从这里开始!)
+  - 最新进展总结
+  - 立即行动步骤
+  - 如何运行测试
+  - 预期结果和分析方法
+
+- **[DEBUGGING_GUIDE.md](DEBUGGING_GUIDE.md)** - 🚀 调试指南
   - 如何构建和运行测试
   - 日志级别说明
   - 输出解读方法
