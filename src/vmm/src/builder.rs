@@ -228,6 +228,8 @@ impl IrqChipT for WhpxIrqChip {
             })?;
         }
 
+        log::trace!("WHvRequestInterrupt succeeded for IRQ {} (vector {})", irq_line, interrupt.Vector);
+
         // Signal the vCPU thread so it can re-enter WHvRunVirtualProcessor and
         // deliver the queued interrupt if the guest is currently in HLT state.
         let _ = self.irq_pending_evt.write(1);
@@ -2000,11 +2002,17 @@ fn attach_legacy_devices(
     std::thread::Builder::new()
         .name("pit-timer".into())
         .spawn(move || {
+            let mut count = 0u64;
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(10));
+                count += 1;
                 if let Err(e) = intc_clone.lock().unwrap().set_irq(Some(0), None) {
-                    warn!("PIT IRQ0 injection failed: {e:?}");
+                    warn!("PIT IRQ0 injection failed after {} interrupts: {e:?}", count);
                     break;
+                }
+                // Log every 100 interrupts (every second)
+                if count % 100 == 0 {
+                    log::debug!("PIT timer: injected {} IRQ 0 interrupts", count);
                 }
             }
         })

@@ -369,7 +369,8 @@ impl Vcpu {
             v[1].Reg64 = arch::x86_64::layout::BOOT_STACK_POINTER;
             v[2].Reg64 = arch::x86_64::layout::BOOT_STACK_POINTER;
             v[3].Reg64 = arch::x86_64::layout::ZERO_PAGE_START;
-            v[4].Reg64 = 0x2;
+            // RFLAGS: bit 1 = reserved (always 1), bit 9 = IF (interrupt enable)
+            v[4].Reg64 = 0x2 | (1 << 9);
             v[5].Segment = code_seg;
             v[6].Segment = data_seg;
             v[7].Segment = data_seg;
