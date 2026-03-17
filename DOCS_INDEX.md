@@ -33,13 +33,19 @@
    - 输出分析方法
    - 调试技巧
 
-5. **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - 故障排除指南
+5. **[APIC_IMPROVEMENT.md](APIC_IMPROVEMENT.md)** - APIC改进说明 🆕
+   - LAPIC寄存器模拟实现
+   - 问题分析和解决方案
+   - 寄存器值详细说明
+   - 测试和验证方法
+
+6. **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - 故障排除指南
    - 常见问题和解决方案
    - 构建问题
    - 运行时问题
    - 环境配置
 
-6. **[IMPROVEMENT_SUMMARY.md](IMPROVEMENT_SUMMARY.md)** - 改进总结
+7. **[IMPROVEMENT_SUMMARY.md](IMPROVEMENT_SUMMARY.md)** - 改进总结
    - 本次会话完成的工作
    - 技术细节和实现
    - 使用示例
