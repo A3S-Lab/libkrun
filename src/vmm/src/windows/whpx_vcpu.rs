@@ -1043,6 +1043,27 @@ impl WhpxVcpu {
                     let access_info = unsafe { memory_access.AccessInfo.AsUINT32 };
                     let access_type = (access_info & 0x3) as i32;
                     let access_size = (((access_info >> 4) & 0xf) as usize).max(1);
+
+                    // Special logging for loop addresses to understand what they're doing
+                    let rip = exit_context.VpContext.Rip;
+                    if rip == 0xffffffff8102200e || rip == 0xffffffff81022010 {
+                        let access_type_str = match access_type {
+                            0 => "Read",
+                            1 => "Write",
+                            2 => "Execute",
+                            _ => "Unknown",
+                        };
+                        static mut LOOP_COUNT: u64 = 0;
+                        unsafe {
+                            LOOP_COUNT += 1;
+                            if LOOP_COUNT % 100 == 0 || LOOP_COUNT <= 10 {
+                                info!(
+                                    "🔍 LOOP #{}: RIP={:#x}, GPA={:#x}, Type={}, Size={}",
+                                    LOOP_COUNT, rip, gpa, access_type_str, access_size
+                                );
+                            }
+                        }
+                    }
                     if access_size > self.data_buffer.len() {
                         warn!(
                             "Unsupported WHPX MMIO access size {} at gpa=0x{gpa:x}",
