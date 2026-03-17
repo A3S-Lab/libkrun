@@ -1,5 +1,5 @@
 [workspace]
-members = ["src/libkrun", "src/krun_input", "krun-sys-windows"]
+members = ["src/libkrun", "src/krun_input", "src/libkrunfw-win", "krun-sys-windows"]
 exclude = ["examples/gtk_display"]
 resolver = "2"
 

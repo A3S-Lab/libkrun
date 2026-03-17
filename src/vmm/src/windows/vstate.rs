@@ -60,6 +60,8 @@ impl Display for Error {
 pub type Result<T> = result::Result<T, Error>;
 
 fn write_boot_state_to_guest(guest_mem: &GuestMemoryMmap) -> Result<()> {
+    log::info!("=== HIGHER-HALF KERNEL MAPPING FIX ACTIVE ===");
+
     let gdt_table: [u64; BOOT_GDT_MAX] = [
         0x0000_0000_0000_0000,
         0x00AF_9B00_0000_FFFF,
@@ -83,6 +85,8 @@ fn write_boot_state_to_guest(guest_mem: &GuestMemoryMmap) -> Result<()> {
         .write_obj(0_u64, GuestAddress(BOOT_IDT_OFFSET))
         .map_err(|_| Error::VcpuConfigure)?;
 
+    // Set up page tables for identity mapping (low memory 0-1GB)
+    // PML4[0] -> PDPTE -> PDE (512 x 2MB pages)
     guest_mem
         .write_obj(PDPTE_START | 0x03, GuestAddress(PML4_START))
         .map_err(|_| Error::VcpuConfigure)?;
@@ -90,6 +94,7 @@ fn write_boot_state_to_guest(guest_mem: &GuestMemoryMmap) -> Result<()> {
         .write_obj(PDE_START | 0x03, GuestAddress(PDPTE_START))
         .map_err(|_| Error::VcpuConfigure)?;
 
+    // Identity map first 1GB (0x0 - 0x40000000) using 2MB pages
     for i in 0..512 {
         guest_mem
             .write_obj(
@@ -98,6 +103,25 @@ fn write_boot_state_to_guest(guest_mem: &GuestMemoryMmap) -> Result<()> {
             )
             .map_err(|_| Error::VcpuConfigure)?;
     }
+
+    // Set up higher-half kernel mapping (0xffffffff80000000+)
+    // PML4[511] -> same PDPTE (maps kernel virtual addresses to same physical memory)
+    // This allows the kernel to access physical memory 0-1GB via virtual addresses 0xffffffff80000000+
+    guest_mem
+        .write_obj(
+            PDPTE_START | 0x03,
+            GuestAddress(PML4_START + (511 * 8)),
+        )
+        .map_err(|_| Error::VcpuConfigure)?;
+
+    log::info!(
+        "Page tables configured: PML4=0x{:x}, PDPTE=0x{:x}, PDE=0x{:x}",
+        PML4_START,
+        PDPTE_START,
+        PDE_START
+    );
+    log::info!("Identity mapping: 0x0-0x40000000 (1GB)");
+    log::info!("Higher-half kernel mapping: 0xffffffff80000000+ -> 0x0-0x40000000");
 
     Ok(())
 }
@@ -125,6 +149,25 @@ impl Vm {
                 let _ = WHvDeletePartition(partition);
                 Error::VmSetup
             })?;
+
+            // Enable local APIC emulation to support interrupt injection
+            use windows::Win32::System::Hypervisor::{
+                WHvPartitionPropertyCodeLocalApicEmulationMode,
+                WHvX64LocalApicEmulationModeXApic,
+            };
+            let mut apic_property: WHV_PARTITION_PROPERTY = std::mem::zeroed();
+            apic_property.LocalApicEmulationMode = WHvX64LocalApicEmulationModeXApic;
+            WHvSetPartitionProperty(
+                partition,
+                WHvPartitionPropertyCodeLocalApicEmulationMode,
+                &apic_property as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<WHV_PARTITION_PROPERTY>() as u32,
+            )
+            .map_err(|e| {
+                log::warn!("Failed to enable APIC emulation: {:?}, continuing anyway", e);
+                // Don't fail if APIC emulation can't be enabled, just log it
+            })
+            .ok();
 
             WHvSetupPartition(partition).map_err(|_| {
                 let _ = WHvDeletePartition(partition);
@@ -259,6 +302,14 @@ impl Vcpu {
         guest_mem: &GuestMemoryMmap,
         kernel_start_addr: GuestAddress,
     ) -> Result<()> {
+        log::info!(
+            "Configuring vCPU {} for x86_64 boot: RIP=0x{:x}, RSP=0x{:x}, RSI=0x{:x}",
+            self.id,
+            kernel_start_addr.raw_value(),
+            arch::x86_64::layout::BOOT_STACK_POINTER,
+            arch::x86_64::layout::ZERO_PAGE_START
+        );
+
         self.write_boot_state(guest_mem)?;
 
         let code_seg = WHV_X64_SEGMENT_REGISTER {
@@ -374,7 +425,41 @@ impl Vcpu {
                     return;
                 }
 
+                // Wait for the initial Resume before entering the run loop.
+                // resume_vcpus() in lib.rs calls start_vcpus() then immediately
+                // sends VcpuEvent::Resume to each handle.  Without this barrier
+                // the vCPU thread can start running, hit a guest exit (HLT, fault,
+                // etc.) and send VcpuResponse::Exited *before* the main thread
+                // calls recv_timeout() for VcpuResponse::Resumed — causing a
+                // spurious VcpuResume error.
+                match self.event_receiver.recv() {
+                    Ok(VcpuEvent::Resume) => {
+                        if self
+                            .response_sender
+                            .send(VcpuResponse::Resumed)
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    _ => {
+                        // Channel closed or unexpected event before first resume.
+                        self.exit(FC_EXIT_CODE_GENERIC_ERROR);
+                        return;
+                    }
+                }
+
+                let mut exit_count = 0u64;
+                let mut last_log_time = std::time::Instant::now();
                 loop {
+                    exit_count += 1;
+
+                    // Log progress every 5 seconds
+                    if last_log_time.elapsed().as_secs() >= 5 {
+                        info!("vCPU {} progress: {} exits processed", self.id, exit_count);
+                        last_log_time = std::time::Instant::now();
+                    }
+
                     match self.run() {
                         Ok(VcpuEmulation::Halted) => {
                             if let Some(ref evt) = self.irq_pending_evt {
@@ -430,6 +515,8 @@ impl Vcpu {
 
     /// Main vCPU run loop for x86_64.
     pub fn run(&mut self) -> result::Result<VcpuEmulation, io::Error> {
+        log::info!("vCPU {} starting execution at RIP=0x{:x}", self.id, self.boot_entry_addr);
+
         loop {
             while let Ok(event) = self.event_receiver.try_recv() {
                 match event {
@@ -553,11 +640,13 @@ impl Vcpu {
                     }
                 }
                 VcpuExit::Halted => {
+                    log::warn!("vCPU {} halted - kernel may have failed to boot or executed HLT instruction", self.id);
                     self.whpx_vcpu.clear_pending_mmio();
                     self.whpx_vcpu.clear_pending_io();
                     VcpuEmulation::Halted
                 }
                 VcpuExit::Shutdown => {
+                    log::warn!("vCPU {} shutdown - VM terminated abnormally", self.id);
                     self.whpx_vcpu.clear_pending_mmio();
                     self.whpx_vcpu.clear_pending_io();
                     VcpuEmulation::Stopped

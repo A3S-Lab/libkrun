@@ -246,12 +246,15 @@ impl BusDevice for Serial {
         }
 
         data[0] = self.handle_read(offset as u8);
+        log::trace!("[SERIAL] Read from offset {:#x}, data: {:#x}", offset, data[0]);
     }
 
     fn write(&mut self, _vcpuid: u64, offset: u64, data: &[u8]) {
         if data.len() != 1 {
             return;
         }
+        log::debug!("[SERIAL] Write to offset {:#x}, data: {:#x} ('{}')",
+                    offset, data[0], if data[0].is_ascii_graphic() || data[0] == b' ' { data[0] as char } else { '.' });
         if let Err(e) = self.handle_write(offset as u8, data[0]) {
             error!("Failed the write to serial: {e}");
         }

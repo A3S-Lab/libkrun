@@ -1042,25 +1042,134 @@ impl WhpxVcpu {
                         return Ok(VcpuExit::Shutdown);
                     }
                     let instruction_len = memory_access.InstructionByteCount as usize;
-                    let instruction_bytes = memory_access
-                        .InstructionBytes
-                        .get(..instruction_len)
-                        .ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Invalid WHPX MMIO instruction length",
-                        )
-                    })?;
+
+                    // Log instruction bytes for debugging
+                    if instruction_len == 0 {
+                        warn!(
+                            "WHPX MMIO access with zero instruction bytes at gpa=0x{gpa:x}, RIP=0x{:x}, access_type={access_type}, size={access_size}",
+                            exit_context.VpContext.Rip
+                        );
+                    } else {
+                        debug!(
+                            "WHPX MMIO access: gpa=0x{gpa:x}, RIP=0x{:x}, instruction_len={instruction_len}, bytes={:02x?}",
+                            exit_context.VpContext.Rip,
+                            &memory_access.InstructionBytes[..instruction_len.min(16)]
+                        );
+                    }
+
+                    // Get instruction bytes - either from WHPX or by fetching from guest memory
+                    let mut instruction_buffer = [0u8; 15];
+                    let mut skip_bytes = 0;
+                    let instruction_bytes = if instruction_len > 0 && memory_access.InstructionBytes[0] != 0 {
+                        // WHPX provided valid instruction bytes
+                        memory_access
+                            .InstructionBytes
+                            .get(..instruction_len)
+                            .ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "Invalid WHPX MMIO instruction length",
+                                )
+                            })?
+                    } else {
+                        // WHPX failed to provide instruction bytes - fetch manually from guest memory
+                        let rip = exit_context.VpContext.Rip;
+                        debug!(
+                            "WHPX returned invalid instruction bytes at RIP=0x{:x}, fetching from guest memory",
+                            rip
+                        );
+
+                        // Translate virtual RIP to physical address
+                        // For higher-half kernel addresses (0xffffffff80000000+), we can directly
+                        // calculate the physical address since we know the mapping
+                        let gpa = if rip >= 0xffffffff80000000 {
+                            // Higher-half kernel mapping: 0xffffffff80000000+ -> 0x0+
+                            rip - 0xffffffff80000000
+                        } else {
+                            // For other addresses, try WHPX translation
+                            let mut translate_result: WHV_TRANSLATE_GVA_RESULT = unsafe { std::mem::zeroed() };
+                            let mut translated_gpa: u64 = 0;
+                            let translate_flags = WHV_TRANSLATE_GVA_FLAGS(0); // Read access
+
+                            match unsafe {
+                                WHvTranslateGva(
+                                    self.partition,
+                                    self.index,
+                                    rip,
+                                    translate_flags,
+                                    &mut translate_result,
+                                    &mut translated_gpa,
+                                )
+                            } {
+                                Ok(_) if translate_result.ResultCode.0 == 0 => translated_gpa,
+                                _ => {
+                                    warn!(
+                                        "Failed to translate RIP 0x{:x}, skipping MMIO",
+                                        rip
+                                    );
+                                    self.advance_rip(rip.wrapping_add(2))?;
+                                    continue;
+                                }
+                            }
+                        };
+
+                        debug!(
+                            "Translated RIP 0x{:x} to GPA 0x{:x}",
+                            rip, gpa
+                        );
+
+                        // Read instruction bytes from guest memory
+                        let guest_mem_ref = unsafe { &*guest_mem };
+                        let fetch_len = instruction_buffer.len().min(access_size * 4 + 8);
+                        if let Err(e) = guest_mem_ref.read_slice(&mut instruction_buffer[..fetch_len], GuestAddress(gpa)) {
+                            warn!(
+                                "Failed to read instruction bytes from GPA 0x{:x}: {}, skipping MMIO",
+                                gpa, e
+                            );
+                            self.advance_rip(rip.wrapping_add(2))?;
+                            continue;
+                        }
+
+                        debug!(
+                            "Fetched instruction bytes from GPA 0x{:x} (RIP 0x{:x}): {:02x?}",
+                            gpa, rip, &instruction_buffer[..fetch_len.min(16)]
+                        );
+
+                        // Skip leading zero bytes if present (alignment padding)
+                        while skip_bytes < fetch_len && instruction_buffer[skip_bytes] == 0 {
+                            skip_bytes += 1;
+                        }
+
+                        if skip_bytes > 0 && skip_bytes < fetch_len {
+                            debug!(
+                                "Skipping {} leading zero bytes, instruction starts at offset {}",
+                                skip_bytes, skip_bytes
+                            );
+                        }
+
+                        &instruction_buffer[skip_bytes..fetch_len]
+                    };
+
+                    // Adjust RIP to account for skipped bytes (for decode purposes only)
+                    // Note: We still use the original RIP for decode_mmio_access because
+                    // it needs to calculate the correct next_rip based on the actual instruction location
+                    let decode_rip = exit_context.VpContext.Rip;
 
                     match access_type {
                         x if x == WHvMemoryAccessRead.0 => {
                             let decoded = match Self::decode_mmio_access(
-                                exit_context.VpContext.Rip,
+                                decode_rip,
                                 instruction_bytes,
                                 access_size,
                                 false,
                             ) {
-                                Ok(decoded) => decoded,
+                                Ok(decoded) => {
+                                    debug!(
+                                        "MMIO read decoded: kind={:?}, next_rip=0x{:x}, decode_rip=0x{:x}",
+                                        decoded.kind, decoded.next_rip, decode_rip
+                                    );
+                                    decoded
+                                }
                                 Err(e) => {
                                     warn!(
                                         "WHPX MMIO read decode failed (gpa=0x{gpa:x}, size={access_size}): {e}"
@@ -1105,12 +1214,18 @@ impl WhpxVcpu {
                         }
                         x if x == WHvMemoryAccessWrite.0 => {
                             let decoded = match Self::decode_mmio_access(
-                                exit_context.VpContext.Rip,
+                                decode_rip,
                                 instruction_bytes,
                                 access_size,
                                 true,
                             ) {
-                                Ok(decoded) => decoded,
+                                Ok(decoded) => {
+                                    debug!(
+                                        "MMIO write decoded: kind={:?}, next_rip=0x{:x}, decode_rip=0x{:x}",
+                                        decoded.kind, decoded.next_rip, decode_rip
+                                    );
+                                    decoded
+                                }
                                 Err(e) => {
                                     warn!(
                                         "WHPX MMIO write decode failed (gpa=0x{gpa:x}, size={access_size}): {e}"
@@ -1265,9 +1380,18 @@ impl WhpxVcpu {
                         for i in 0..size {
                             self.data_buffer[i] = ((rax >> (i * 8)) & 0xff) as u8;
                         }
+                        // Log serial port writes
+                        if port >= 0x3f8 && port <= 0x3ff {
+                            log::debug!("[IO] Serial write to port {:#x}, size={}, data={:02x?}",
+                                       port, size, &self.data_buffer[..size]);
+                        }
                         self.pending_io_write = Some(PendingIoWrite { next_rip });
                         return Ok(VcpuExit::IoPortWrite(port, &self.data_buffer[..size]));
                     } else {
+                        // Log serial port reads
+                        if port >= 0x3f8 && port <= 0x3ff {
+                            log::trace!("[IO] Serial read from port {:#x}, size={}", port, size);
+                        }
                         self.pending_io_read = Some(PendingIoRead { size, next_rip });
                         return Ok(VcpuExit::IoPortRead(port, &mut self.data_buffer[..size]));
                     }
@@ -1330,14 +1454,31 @@ impl WhpxVcpu {
                     if self.emulate_exception(&exit_context)? {
                         continue;
                     }
-                    warn!("Unhandled WHPX exception exit: stopping vCPU");
+                    let exception = unsafe { exit_context.Anonymous.VpException };
+                    warn!(
+                        "Unhandled WHPX exception: ExceptionType={}, ErrorCode=0x{:x}, RIP=0x{:x}",
+                        exception.ExceptionType,
+                        exception.ExceptionParameter,
+                        exit_context.VpContext.Rip
+                    );
                     return Ok(VcpuExit::Shutdown);
                 }
                 reason if reason == WHvRunVpExitReasonUnrecoverableException => {
+                    let exception = unsafe { exit_context.Anonymous.VpException };
+                    warn!(
+                        "WHPX unrecoverable exception: ExceptionType={}, ErrorCode=0x{:x}, RIP=0x{:x}",
+                        exception.ExceptionType,
+                        exception.ExceptionParameter,
+                        exit_context.VpContext.Rip
+                    );
                     return Ok(VcpuExit::Shutdown);
                 }
                 other => {
-                    warn!("Unsupported WHPX exit reason {}: stopping vCPU", other.0);
+                    warn!(
+                        "Unsupported WHPX exit reason {} at RIP=0x{:x}: stopping vCPU",
+                        other.0,
+                        exit_context.VpContext.Rip
+                    );
                     return Ok(VcpuExit::Shutdown);
                 }
             }

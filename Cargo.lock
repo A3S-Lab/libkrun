@@ -906,6 +906,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "libkrunfw-windows"
+version = "5.0.0"
+
+[[package]]
 name = "libloading"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"

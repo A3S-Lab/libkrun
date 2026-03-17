@@ -23,6 +23,8 @@ mod kvmgicv2;
 mod kvmgicv3;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod kvmioapic;
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+pub mod windows_apic_stub;
 #[cfg(target_arch = "aarch64")]
 mod rtc_pl031;
 #[cfg(target_os = "macos")]

@@ -2301,6 +2301,16 @@ unsafe fn load_krunfw_payload(
             &mut kernel_size as *mut usize,
         )
     };
+
+    // Log kernel loading information
+    log::info!(
+        "Loaded kernel from libkrunfw: guest_addr=0x{:x}, entry_addr=0x{:x}, size={} bytes ({:.2} MB)",
+        kernel_guest_addr,
+        kernel_entry_addr,
+        kernel_size,
+        kernel_size as f64 / 1024.0 / 1024.0
+    );
+
     let kernel_bundle = KernelBundle {
         host_addr: kernel_host_addr as u64,
         guest_addr: kernel_guest_addr,

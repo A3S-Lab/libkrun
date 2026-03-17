@@ -23,6 +23,9 @@ type Inode = u64;
 type Handle = u64;
 
 const ROOT_INODE: Inode = 1;
+const INIT_CSTR: &[u8] = b"init.krun\0";
+
+static INIT_BINARY: &[u8] = include_bytes!("../../../../../../init/init");
 
 // Windows doesn't have DT_ constants in libc, so define them here
 // These match the Linux values for compatibility
@@ -80,6 +83,7 @@ pub struct PassthroughFs {
     inodes: RwLock<BTreeMap<Inode, Arc<InodeData>>>,
     handles: RwLock<BTreeMap<Handle, Arc<HandleData>>>,
     path_to_inode: RwLock<BTreeMap<PathBuf, Inode>>,
+    init_inode: Inode,
 }
 
 impl PassthroughFs {
@@ -113,14 +117,18 @@ impl PassthroughFs {
         inodes.insert(ROOT_INODE, root_inode_data);
         path_to_inode.insert(root_dir.clone(), ROOT_INODE);
 
+        // Allocate inode for init.krun (virtual file)
+        let init_inode = ROOT_INODE + 1;
+
         Ok(PassthroughFs {
             cfg,
             root_dir,
-            next_inode: AtomicU64::new(ROOT_INODE + 1),
+            next_inode: AtomicU64::new(init_inode + 1),
             next_handle: AtomicU64::new(1),
             inodes: RwLock::new(inodes),
             handles: RwLock::new(BTreeMap::new()),
             path_to_inode: RwLock::new(path_to_inode),
+            init_inode,
         })
     }
 
@@ -261,6 +269,38 @@ impl FileSystem for PassthroughFs {
     }
 
     fn lookup(&self, _ctx: Context, parent: Self::Inode, name: &CStr) -> io::Result<Entry> {
+        // Check if this is a request for init.krun (virtual file)
+        let init_name = unsafe { CStr::from_bytes_with_nul_unchecked(INIT_CSTR) };
+
+        if parent == ROOT_INODE && self.init_inode != 0 && name == init_name {
+            // Return virtual init.krun file
+            let st = bindings::stat64 {
+                st_dev: 0,
+                st_ino: self.init_inode,
+                st_mode: 0o100_755, // Regular file, rwxr-xr-x
+                st_nlink: 1,
+                st_uid: 0,
+                st_gid: 0,
+                st_rdev: 0,
+                st_size: INIT_BINARY.len() as i64,
+                st_atime: 0,
+                st_mtime: 0,
+                st_ctime: 0,
+                st_blksize: 4096,
+                st_blocks: ((INIT_BINARY.len() + 511) / 512) as u64,
+            };
+
+            return Ok(Entry {
+                inode: self.init_inode,
+                generation: 0,
+                attr: st,
+                attr_flags: 0,
+                attr_timeout: self.cfg.attr_timeout,
+                entry_timeout: self.cfg.entry_timeout,
+            });
+        }
+
+        // Normal file lookup
         let parent_path = self.get_path(parent)?;
         let name_path = self.cstr_to_path(name)?;
         let full_path = parent_path.join(&name_path);
@@ -570,6 +610,23 @@ impl FileSystem for PassthroughFs {
         inode: Self::Inode,
         flags: u32,
     ) -> io::Result<(Option<Self::Handle>, OpenOptions)> {
+        // Special handling for init.krun (virtual file)
+        if inode == self.init_inode {
+            let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
+
+            // Store handle data with empty path (marker for init.krun)
+            let handle_data = Arc::new(HandleData {
+                inode,
+                path: PathBuf::new(), // Empty path indicates init.krun
+            });
+
+            self.handles.write().unwrap().insert(handle, handle_data);
+
+            let opts = OpenOptions::KEEP_CACHE;
+            return Ok((Some(handle), opts));
+        }
+
+        // Normal file open
         let path = self.get_path(inode)?;
 
         // Verify the file exists and is a regular file
@@ -721,7 +778,22 @@ impl FileSystem for PassthroughFs {
 
         let path = &handle_data.path;
 
-        // Open the file for reading
+        // Special handling for init.krun (empty path)
+        if path.as_os_str().is_empty() {
+            let off = offset as usize;
+            if off >= INIT_BINARY.len() {
+                return Ok(0);
+            }
+
+            let len = if off + (size as usize) < INIT_BINARY.len() {
+                size as usize
+            } else {
+                INIT_BINARY.len() - off
+            };
+            return w.write(&INIT_BINARY[off..(off + len)]);
+        }
+
+        // Normal file read
         use std::fs::File;
         use std::io::{Read, Seek, SeekFrom};
 
