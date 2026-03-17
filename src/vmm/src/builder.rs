@@ -979,7 +979,7 @@ pub fn build_microvm(
         Arc::new(VcpuList::new(cpu_count as u64))
     };
 
-    let vcpus;
+    let mut vcpus;
     let intc: IrqChip;
     // For x86_64 we need to create the interrupt controller before calling `KVM_CREATE_VCPUS`
     // while on aarch64 we need to do it the other way around.
@@ -1030,7 +1030,7 @@ pub fn build_microvm(
             irq_notify.clone(),
         )))));
 
-        attach_legacy_devices(&mut pio_device_manager, intc.clone())?;
+        attach_legacy_devices(&mut pio_device_manager, &mut mmio_device_manager, intc.clone())?;
 
         vcpus = create_vcpus_x86_64(
             &vm,
@@ -1042,6 +1042,11 @@ pub fn build_microvm(
             Some(irq_notify),
         )
         .map_err(StartMicrovmError::Internal)?;
+
+        // Set MMIO bus for each vCPU to handle APIC/IOAPIC accesses
+        for vcpu in &mut vcpus {
+            vcpu.set_mmio_bus(mmio_device_manager.bus.clone());
+        }
     }
 
     #[cfg(feature = "tdx")]
@@ -1572,6 +1577,13 @@ fn load_payload(
                     return Err(StartMicrovmError::MissingKernelConfig);
                 };
 
+            log::info!(
+                "Windows: Loading kernel to guest memory: guest_addr=0x{:x}, entry=0x{:x}, size={} bytes",
+                kernel_guest_addr,
+                kernel_entry_addr,
+                kernel_size
+            );
+
             let kernel_data =
                 unsafe { std::slice::from_raw_parts(kernel_host_addr as *mut u8, kernel_size) };
             if kernel_guest_addr + kernel_size as u64 > _arch_mem_info.ram_last_addr {
@@ -1583,6 +1595,12 @@ fn load_payload(
             guest_mem
                 .write(kernel_data, GuestAddress(kernel_guest_addr))
                 .unwrap();
+
+            log::info!(
+                "Windows: Kernel loaded successfully, will start at entry point 0x{:x}",
+                kernel_entry_addr
+            );
+
             Ok((guest_mem, GuestAddress(kernel_entry_addr), None, None))
         }
         Payload::ExternalKernel(external_kernel) => {
@@ -1681,13 +1699,24 @@ pub fn create_guest_memory(
     let (arch_mem_info, mut arch_mem_regions) = match payload {
         #[cfg(not(feature = "tee"))]
         Payload::KernelMmap => {
-            let (kernel_guest_addr, kernel_size) =
-                if let Some(kernel_bundle) = &vm_resources.kernel_bundle {
-                    (kernel_bundle.guest_addr, kernel_bundle.size)
-                } else {
-                    return Err(StartMicrovmError::MissingKernelConfig);
-                };
-            arch::arch_memory_regions(mem_size, Some(kernel_guest_addr), kernel_size, 0, None)
+            // On Windows the kernel is copied into guest memory (no mmap support),
+            // so we must NOT punch a hole — pass None so the full range is mapped
+            // and the subsequent guest_mem.write() call succeeds.
+            // On other platforms libkrunfw injects the kernel via mmap into the hole.
+            #[cfg(target_os = "windows")]
+            {
+                arch::arch_memory_regions(mem_size, None, 0, 0, None)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let (kernel_guest_addr, kernel_size) =
+                    if let Some(kernel_bundle) = &vm_resources.kernel_bundle {
+                        (kernel_bundle.guest_addr, kernel_bundle.size)
+                    } else {
+                        return Err(StartMicrovmError::MissingKernelConfig);
+                    };
+                arch::arch_memory_regions(mem_size, Some(kernel_guest_addr), kernel_size, 0, None)
+            }
         }
         Payload::ExternalKernel(external_kernel) => arch::arch_memory_regions(
             mem_size,
@@ -1907,6 +1936,7 @@ fn attach_legacy_devices(
 #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
 fn attach_legacy_devices(
     pio_device_manager: &mut PortIODeviceManager,
+    mmio_device_manager: &mut MMIODeviceManager,
     intc: IrqChip,
 ) -> std::result::Result<(), StartMicrovmError> {
     pio_device_manager
@@ -1942,21 +1972,45 @@ fn attach_legacy_devices(
         .map_err(Error::LegacyIOBus)
         .map_err(StartMicrovmError::Internal)?;
 
+    // Register APIC stub devices to handle MMIO accesses without crashing
+    let (ioapic_base, ioapic_size) = devices::legacy::windows_apic_stub::ApicStub::ioapic_range();
+    let ioapic_stub = devices::legacy::windows_apic_stub::ApicStub::ioapic();
+    mmio_device_manager
+        .bus
+        .insert(ioapic_stub, ioapic_base, ioapic_size)
+        .map_err(device_manager::mmio::Error::BusError)
+        .map_err(Error::RegisterMMIODevice)
+        .map_err(StartMicrovmError::Internal)?;
+
+    let (lapic_base, lapic_size) = devices::legacy::windows_apic_stub::ApicStub::lapic_range();
+    let lapic_stub = devices::legacy::windows_apic_stub::ApicStub::lapic();
+    mmio_device_manager
+        .bus
+        .insert(lapic_stub, lapic_base, lapic_size)
+        .map_err(device_manager::mmio::Error::BusError)
+        .map_err(Error::RegisterMMIODevice)
+        .map_err(StartMicrovmError::Internal)?;
+
+    log::info!("Registered APIC stub devices: IOAPIC at 0x{:x}, LAPIC at 0x{:x}", ioapic_base, lapic_base);
+
     // PIT IRQ 0 timer thread (100 Hz).
     // Injects IRQ 0 (vector 0x20) periodically so the kernel's jiffies counter
     // advances during early-boot TSC calibration and scheduling setup.
+    let intc_clone = intc.clone();
     std::thread::Builder::new()
         .name("pit-timer".into())
         .spawn(move || {
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(10));
-                if let Err(e) = intc.lock().unwrap().set_irq(Some(0), None) {
+                if let Err(e) = intc_clone.lock().unwrap().set_irq(Some(0), None) {
                     warn!("PIT IRQ0 injection failed: {e:?}");
                     break;
                 }
             }
         })
         .map_err(|e| StartMicrovmError::Internal(Error::EventFd(e)))?;
+
+    log::info!("PIT timer thread started (100 Hz IRQ 0 injection)");
 
     Ok(())
 }
