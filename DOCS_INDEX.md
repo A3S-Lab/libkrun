@@ -1,267 +1,156 @@
 # Windows WHPX 内核启动项目文档索引
 
-本项目致力于在Windows WHPX虚拟化平台上启动Linux内核，最终目标是运行nginx。
+本项目致力于在Windows WHPX虚拟化平台上启动Linux内核,最终目标是运行nginx。
 
 ---
 
 ## 📚 文档导航
 
-### 快速开始
+### 🎯 快速开始 (Start Here)
 
-- **[CURRENT_STATUS.md](CURRENT_STATUS.md)** - 🎯 当前状态 (从这里开始!)
-  - 最新进展总结
-  - 立即行动步骤
-  - 如何运行测试
-  - 预期结果和分析方法
+1. **[CURRENT_STATUS.md](CURRENT_STATUS.md)** - 当前状态和下一步行动
+   - 最新进展总结
+   - 立即行动步骤
+   - 如何运行测试
+   - 预期结果和分析方法
 
-- **[DEBUGGING_GUIDE.md](DEBUGGING_GUIDE.md)** - 🚀 调试指南
-  - 如何构建和运行测试
-  - 日志级别说明
-  - 输出解读方法
-  - 常见问题解答
+2. **[QUICK_REFERENCE.md](QUICK_REFERENCE.md)** - 快速参考
+   - 常用命令
+   - 关键文件位置
+   - 快速故障排除
 
-### 项目概览
+### 📖 核心文档
 
-- **[PROJECT_SUMMARY.md](PROJECT_SUMMARY.md)** - 📊 完整项目总结
-  - 已完成的里程碑
-  - 技术架构图
-  - 关键代码修改
-  - 短/中/长期计划
-  - 性能指标和已知问题
+3. **[WINDOWS_WHPX_README.md](WINDOWS_WHPX_README.md)** - 项目README
+   - 项目概述和目标
+   - 架构说明
+   - 技术栈
+   - 已完成的里程碑
 
-### 技术文档
+4. **[RIP_TRACKING_GUIDE.md](RIP_TRACKING_GUIDE.md)** - RIP跟踪系统指南
+   - 跟踪系统功能说明
+   - 如何运行测试
+   - 输出分析方法
+   - 调试技巧
 
-- **[BREAKTHROUGH.md](BREAKTHROUGH.md)** - 🎉 重大突破记录
-  - RFLAGS.IF修复（关键！）
-  - 内核执行确认
-  - 当前循环状态分析
+5. **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - 故障排除指南
+   - 常见问题和解决方案
+   - 构建问题
+   - 运行时问题
+   - 环境配置
 
-- **[DEBUG_FINDINGS.md](DEBUG_FINDINGS.md)** - 🔍 详细调试发现
-  - 问题分析
-  - 技术细节
-  - 中断传递流程
-  - 页表配置
+6. **[IMPROVEMENT_SUMMARY.md](IMPROVEMENT_SUMMARY.md)** - 改进总结
+   - 本次会话完成的工作
+   - 技术细节和实现
+   - 使用示例
+   - 关键洞察
 
-- **[LOOP_ANALYSIS.md](LOOP_ANALYSIS.md)** - 🔄 循环分析工具
-  - 分析工具说明
-  - 预期输出示例
-  - 分析方法指南
-  - 下一步行动
+### 🔧 工具和脚本
 
-- **[RIP_TRACKING_GUIDE.md](RIP_TRACKING_GUIDE.md)** - 🎯 RIP跟踪指南 (最新!)
-  - 全面的RIP执行跟踪
-  - 自动卡住检测
-  - 运行测试的详细步骤
-  - 输出分析方法
-  - 故障排除指南
-
-### 会话记录
-
-- **[SESSION_SUMMARY.md](SESSION_SUMMARY.md)** - 📝 本次会话总结
-  - 完成的工作
-  - 技术进展
-  - 遇到的挑战
-  - 下一步计划
+- **run_test_proper.ps1** - PowerShell测试运行器 (推荐)
+- **run_test.bat** - CMD批处理测试运行器
+- **download_kernel.ps1** - 内核下载脚本
 
 ---
 
-## 🎯 当前状态
+## 📋 文档阅读顺序
 
-### ✅ 已完成
+### 新用户 (First Time)
 
-1. **内核加载** - 成功加载19MB内核
-2. **高半部映射** - 3级页表配置正确
-3. **中断启用** - RFLAGS.IF修复（关键突破！）
-4. **内核执行** - 内核持续运行，无崩溃
-5. **调试工具** - 循环地址分析代码
+1. **WINDOWS_WHPX_README.md** - 了解项目背景
+2. **CURRENT_STATUS.md** - 了解当前状态
+3. **RIP_TRACKING_GUIDE.md** - 学习如何运行测试
+4. **TROUBLESHOOTING.md** - 遇到问题时查阅
 
-### 🔄 进行中
+### 开发者 (Developer)
 
-**内核在循环中执行**
-- 循环地址：0xffffffff8102200e ↔ 0xffffffff81022010
-- 约40 exits/秒
-- 中断正常注入
+1. **CURRENT_STATUS.md** - 快速了解当前进展
+2. **IMPROVEMENT_SUMMARY.md** - 了解最新改进
+3. **RIP_TRACKING_GUIDE.md** - 使用跟踪工具
+4. **README.md** - 深入技术细节
 
-### ⏳ 待完成
+### 调试问题 (Debugging)
 
-1. **突破循环** - 确定原因并提供响应
-2. **串口输出** - 看到内核console输出
-3. **完整启动** - 进入init进程
-4. **运行nginx** - 最终目标
+1. **QUICK_REFERENCE.md** - 快速查找命令
+2. **TROUBLESHOOTING.md** - 查找解决方案
+3. **RIP_TRACKING_GUIDE.md** - 使用跟踪工具诊断
+4. **CURRENT_STATUS.md** - 了解已知问题
 
 ---
 
-## 🚀 快速开始
+## 🎯 关键信息速查
 
-### 1. 构建
+### 当前状态
+- ✅ 内核可以加载和启动
+- ✅ 页表配置正确(higher-half mapping)
+- ✅ 中断已启用(RFLAGS.IF)
+- ✅ RIP跟踪系统已实现
+- ⏳ 需要运行测试确定内核卡住位置
 
-```bash
-# 构建libkrunfw（包含内核）
-cd src/libkrunfw-win
-cargo build --release
-cd ../..
+### 下一步行动
+1. 在PowerShell中运行 `.\run_test_proper.ps1`
+2. 分析输出中的STUCK消息
+3. 根据GPA范围确定需要实现的功能
+4. 实现相应的设备模拟或中断处理
 
-# 构建测试
-cargo build --release --example test_kernel_boot
-```
+### 关键文件位置
+- RIP跟踪代码: `src/vmm/src/windows/whpx_vcpu.rs:1047-1088`
+- APIC stub: `src/vmm/src/builder.rs:1050-1150`
+- 页表配置: `src/vmm/src/windows/vstate.rs:300-400`
+- 测试程序: `examples/test_kernel_boot.rs`
 
-### 2. 运行
-
+### 常用命令
 ```powershell
-# 使用PowerShell脚本（推荐）
-.\run_test.ps1
+# 构建
+cargo build --release --example test_kernel_boot
 
-# 或手动运行
-$env:RUST_LOG = "info"
-.\target\release\examples\test_kernel_boot.exe
-```
+# 运行测试
+.\run_test_proper.ps1
 
-### 3. 分析
-
-```bash
-# 查看循环分析
-grep "LOOP #" test_output.log
-
-# 查看进度
-grep "progress" test_output.log
+# 分析日志
+Select-String -Path test.log -Pattern "STUCK|Exit #"
 ```
 
 ---
 
-## 📈 项目统计
+## 📊 文档统计
 
-### 代码
-
-- **核心修改:** 1个文件（whpx_vcpu.rs）
-- **新增代码:** 约20行（循环分析）
-- **关键修复:** RFLAGS.IF标志（1行，影响巨大！）
-
-### 文档
-
-- **文档数量:** 7个主要文档
-- **总行数:** 1500+ 行
-- **总字数:** 16000+ 字
-- **语言:** 中文为主，技术术语英文
-
-### Git提交
-
-- **提交数:** 8个（本次会话）
-- **文件修改:** 9个
-- **新增文档:** 5个
+- 核心文档: 6个
+- 工具脚本: 3个
+- 总文档大小: ~50KB
+- 最后更新: 2026-03-18
 
 ---
 
-## 🔑 关键技术
+## 🔗 相关资源
 
-### 虚拟化
+### 代码仓库
+- 主仓库: libkrun (Windows WHPX port)
 
-- **平台:** Windows Hypervisor Platform (WHPX)
-- **API:** WHvRunVirtualProcessor, WHvRequestInterrupt
-- **架构:** x86_64 long mode
-
-### 内核
-
-- **类型:** Linux kernel (from libkrunfw)
-- **大小:** 19MB
-- **映射:** Higher-half (0xffffffff80000000+)
-
-### 中断
-
-- **定时器:** PIT (100 Hz)
-- **中断控制器:** IOAPIC + LAPIC stub
-- **关键修复:** RFLAGS.IF = 1
+### 技术参考
+- Windows Hypervisor Platform API
+- x86_64 higher-half kernel mapping
+- APIC/IOAPIC/LAPIC specification
+- Linux kernel boot protocol
 
 ---
 
-## 🛠️ 工具和脚本
+## 💡 文档维护
 
-### PowerShell脚本
+### 添加新文档时
+1. 在此索引中添加链接
+2. 更新"文档统计"部分
+3. 考虑更新"阅读顺序"建议
 
-- **run_test.ps1** - 自动化测试脚本
-  - 设置环境变量
-  - 运行测试（5秒超时）
-  - 保存日志
-  - 提取关键信息
+### 删除文档时
+1. 从此索引中移除链接
+2. 检查其他文档中的交叉引用
+3. 更新"文档统计"部分
 
-### 日志分析
-
-```bash
-# 循环地址
-grep "LOOP #" test_output.log | head -20
-
-# vCPU进度
-grep "progress" test_output.log
-
-# 定时器
-grep "PIT timer" test_output.log
-
-# MMIO访问
-grep "MMIO access" test_output.log
-```
+### 更新文档时
+1. 更新"最后更新"时间戳
+2. 如果是重大更新,在IMPROVEMENT_SUMMARY.md中记录
 
 ---
 
-## 📖 推荐阅读顺序
-
-### 新手
-
-1. **DEBUGGING_GUIDE.md** - 了解如何运行测试
-2. **PROJECT_SUMMARY.md** - 理解项目全貌
-3. **BREAKTHROUGH.md** - 了解关键突破
-
-### 开发者
-
-1. **DEBUG_FINDINGS.md** - 深入技术细节
-2. **LOOP_ANALYSIS.md** - 理解分析工具
-3. **源代码** - whpx_vcpu.rs, vstate.rs
-
-### 贡献者
-
-1. **SESSION_SUMMARY.md** - 了解最新进展
-2. **Git历史** - `git log --oneline`
-3. **所有文档** - 全面了解项目
-
----
-
-## 🤝 贡献
-
-欢迎贡献！当前最需要的帮助：
-
-1. **运行测试** - 收集循环地址数据
-2. **分析结果** - 确定循环原因
-3. **实现响应** - 突破循环
-4. **文档改进** - 补充和完善
-
----
-
-## 📞 获取帮助
-
-遇到问题？
-
-1. 查看 **DEBUGGING_GUIDE.md** 的常见问题部分
-2. 检查 **DEBUG_FINDINGS.md** 的技术细节
-3. 查看git提交历史了解最新变化
-4. 使用TRACE日志获取更多信息
-
----
-
-## 📜 许可证
-
-本项目遵循libkrun的许可证（Apache 2.0）。
-
----
-
-## 🎉 致谢
-
-感谢所有为这个项目做出贡献的人！
-
-特别感谢：
-- libkrun项目提供的基础代码
-- Windows Hypervisor Platform API文档
-- 所有测试和反馈的用户
-
----
-
-**最后更新:** 2026-03-18
-**项目状态:** 🔄 活跃开发中
-**下一个里程碑:** 突破内核循环
+**提示**: 如果不确定从哪里开始,请阅读 **CURRENT_STATUS.md**
