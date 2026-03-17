@@ -42,6 +42,7 @@ pub struct Config {
     pub root_dir: String,
     pub export_fsid: u64,
     pub export_table: Option<ExportTable>,
+    pub no_fsync: bool,
 }
 
 impl Default for Config {
@@ -52,6 +53,7 @@ impl Default for Config {
             root_dir: String::new(),
             export_fsid: 0,
             export_table: None,
+            no_fsync: false,
         }
     }
 }
