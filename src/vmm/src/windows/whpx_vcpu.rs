@@ -996,6 +996,25 @@ impl WhpxVcpu {
         self.pending_mmio_write = None;
     }
 
+    /// Gets the current RIP (instruction pointer) value.
+    pub fn get_rip(&self) -> io::Result<u64> {
+        let names = [WHvX64RegisterRip];
+        let mut values = [WHV_REGISTER_VALUE::default()];
+
+        unsafe {
+            WHvGetVirtualProcessorRegisters(
+                self.partition,
+                self.index,
+                names.as_ptr(),
+                names.len() as u32,
+                values.as_mut_ptr(),
+            )
+            .map_err(|e| io::Error::other(format!("Failed to get RIP: {}", e)))?;
+        }
+
+        Ok(unsafe { values[0].Reg64 })
+    }
+
     /// Runs the virtual CPU until a VM exit occurs.
     ///
     /// # Returns
@@ -1497,6 +1516,8 @@ impl WhpxVcpu {
                     return Ok(VcpuExit::Shutdown);
                 }
                 reason if reason == WHvRunVpExitReasonX64Halt => {
+                    let rip = exit_context.VpContext.Rip;
+                    info!("🛑 HLT instruction executed at RIP={:#x} - vCPU halted, waiting for interrupt", rip);
                     return Ok(VcpuExit::Halted);
                 }
                 reason if reason == WHvRunVpExitReasonCanceled => {

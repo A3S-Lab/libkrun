@@ -213,22 +213,25 @@ impl IrqChipT for WhpxIrqChip {
         };
 
         unsafe {
-            WHvRequestInterrupt(
+            let result = WHvRequestInterrupt(
                 self.partition,
                 &interrupt,
                 std::mem::size_of::<WHV_INTERRUPT_CONTROL>() as u32,
-            )
-            .map_err(|e| {
-                devices::Error::FailedSignalingUsedQueue(io::Error::other(
+            );
+
+            if let Err(e) = result {
+                log::error!("❌ WHvRequestInterrupt FAILED for IRQ {} (vector {}): {}",
+                    irq_line, interrupt.Vector, e);
+                return Err(devices::Error::FailedSignalingUsedQueue(io::Error::other(
                     format!(
                         "WHPX interrupt injection failed for irq {} (vector {}): {}",
                         irq_line, interrupt.Vector, e
                     ),
-                ))
-            })?;
+                )));
+            }
         }
 
-        log::trace!("WHvRequestInterrupt succeeded for IRQ {} (vector {})", irq_line, interrupt.Vector);
+        log::debug!("✅ WHvRequestInterrupt succeeded for IRQ {} (vector {})", irq_line, interrupt.Vector);
 
         // Signal the vCPU thread so it can re-enter WHvRunVirtualProcessor and
         // deliver the queued interrupt if the guest is currently in HLT state.
@@ -2010,9 +2013,9 @@ fn attach_legacy_devices(
                     warn!("PIT IRQ0 injection failed after {} interrupts: {e:?}", count);
                     break;
                 }
-                // Log every 100 interrupts (every second)
-                if count % 100 == 0 {
-                    log::debug!("PIT timer: injected {} IRQ 0 interrupts", count);
+                // Log first 10 interrupts and every 100 interrupts (every second)
+                if count <= 10 || count % 100 == 0 {
+                    log::info!("⏰ PIT timer: injected {} IRQ 0 interrupts (vector 0x20)", count);
                 }
             }
         })

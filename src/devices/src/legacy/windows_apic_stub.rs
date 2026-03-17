@@ -28,13 +28,25 @@ const LAPIC_TIMER_INITIAL: u64 = 0x380;
 const LAPIC_TIMER_CURRENT: u64 = 0x390;
 const LAPIC_TIMER_DIVIDE: u64 = 0x3E0;
 
+// IOAPIC register offsets
+const IOREGSEL: u64 = 0x00;  // Register Select (index)
+const IOWIN: u64 = 0x10;     // Data Window (read/write selected register)
+
+// IOAPIC register indices (written to IOREGSEL)
+const IOAPIC_ID: u8 = 0x00;
+const IOAPIC_VER: u8 = 0x01;
+const IOAPIC_ARB: u8 = 0x02;
+const IOAPIC_REDTBL_BASE: u8 = 0x10;  // Redirection table starts at 0x10
+
 /// Stub APIC device that handles MMIO reads/writes without crashing
 #[derive(Debug)]
 pub struct ApicStub {
     base: u64,
-    // Track some state to make the stub more realistic
+    // LAPIC state
     spurious_vector: u32,
     tpr: u32,
+    // IOAPIC state
+    ioregsel: u8,  // Currently selected register index
 }
 
 impl ApicStub {
@@ -43,6 +55,7 @@ impl ApicStub {
             base,
             spurious_vector: 0xFF,  // Default spurious vector
             tpr: 0,
+            ioregsel: 0,  // Default to register 0
         }
     }
 
@@ -131,20 +144,69 @@ impl ApicStub {
             }
         }
     }
+
+    fn read_ioapic_register(&self, offset: u64) -> u32 {
+        match offset {
+            IOREGSEL => {
+                // Return currently selected register index
+                self.ioregsel as u32
+            }
+            IOWIN => {
+                // Read from the register selected by IOREGSEL
+                match self.ioregsel {
+                    IOAPIC_ID => {
+                        // IOAPIC ID register
+                        // Bits 24-27: APIC ID (0 for single IOAPIC)
+                        0x00000000
+                    }
+                    IOAPIC_VER => {
+                        // IOAPIC Version register
+                        // Bits 0-7: Version (0x20 = 82093AA)
+                        // Bits 16-23: Maximum Redirection Entry (23 = 24 entries, 0-23)
+                        0x00170020  // Version 0x20, 24 entries (0x17 = 23)
+                    }
+                    IOAPIC_ARB => {
+                        // IOAPIC Arbitration ID (read-only, same as ID)
+                        0x00000000
+                    }
+                    IOAPIC_REDTBL_BASE..=0x3F => {
+                        // Redirection Table entries (0x10-0x3F = 24 entries * 2 registers each)
+                        // Each entry is 64 bits, accessed as two 32-bit registers
+                        // Return masked (bit 16 = 1) to indicate interrupt is disabled
+                        0x00010000  // Masked
+                    }
+                    _ => {
+                        // Unknown register index - return all 1s to indicate invalid/non-existent
+                        log::warn!("IOAPIC: read from unknown register index 0x{:02x}, returning 0xFFFFFFFF", self.ioregsel);
+                        0xFFFFFFFF
+                    }
+                }
+            }
+            _ => {
+                log::warn!("IOAPIC: read from unknown offset 0x{:x}", offset);
+                0
+            }
+        }
+    }
 }
 
 impl BusDevice for ApicStub {
     fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
-        // Handle LAPIC reads with proper register values
+        let value = if self.base == LAPIC_BASE {
+            // LAPIC read
+            self.read_lapic_register(offset)
+        } else {
+            // IOAPIC read
+            self.read_ioapic_register(offset)
+        };
+
+        // Write the value to the data buffer (little-endian)
+        let bytes_to_copy = data.len().min(4);
+        for i in 0..bytes_to_copy {
+            data[i] = ((value >> (i * 8)) & 0xFF) as u8;
+        }
+
         if self.base == LAPIC_BASE {
-            let value = self.read_lapic_register(offset);
-
-            // Write the value to the data buffer (little-endian)
-            let bytes_to_copy = data.len().min(4);
-            for i in 0..bytes_to_copy {
-                data[i] = ((value >> (i * 8)) & 0xFF) as u8;
-            }
-
             log::trace!(
                 "LAPIC read at offset=0x{:x}, len={}, value=0x{:08x}",
                 offset,
@@ -152,34 +214,31 @@ impl BusDevice for ApicStub {
                 value
             );
         } else {
-            // IOAPIC - return zeros for now
-            for byte in data.iter_mut() {
-                *byte = 0;
-            }
-            log::trace!(
-                "IOAPIC read at offset=0x{:x}, len={}",
+            log::info!(
+                "📥 IOAPIC read at offset=0x{:x}, len={}, value=0x{:08x} (ioregsel=0x{:02x})",
                 offset,
-                data.len()
+                data.len(),
+                value,
+                self.ioregsel
             );
         }
     }
 
     fn write(&mut self, _base: u64, offset: u64, data: &[u8]) {
-        // Handle LAPIC writes
-        if self.base == LAPIC_BASE {
-            // Parse the written value (little-endian)
-            let mut value: u32 = 0;
-            for (i, &byte) in data.iter().enumerate().take(4) {
-                value |= (byte as u32) << (i * 8);
-            }
+        // Parse the written value (little-endian)
+        let mut value: u32 = 0;
+        for (i, &byte) in data.iter().enumerate().take(4) {
+            value |= (byte as u32) << (i * 8);
+        }
 
+        if self.base == LAPIC_BASE {
+            // LAPIC write
             match offset {
                 LAPIC_TPR => {
                     self.tpr = value & 0xFF;
                     log::debug!("LAPIC TPR write: 0x{:02x}", self.tpr);
                 }
                 LAPIC_EOI => {
-                    // EOI write - acknowledge interrupt
                     log::debug!("LAPIC EOI write (interrupt acknowledged)");
                 }
                 LAPIC_SPURIOUS => {
@@ -210,13 +269,35 @@ impl BusDevice for ApicStub {
                 }
             }
         } else {
-            // IOAPIC write - silently ignore for now
-            log::trace!(
-                "IOAPIC write at offset=0x{:x}, len={}, data={:02x?}",
-                offset,
-                data.len(),
-                data
-            );
+            // IOAPIC write
+            match offset {
+                IOREGSEL => {
+                    // Write to register select
+                    self.ioregsel = (value & 0xFF) as u8;
+                    log::info!(
+                        "📤 IOAPIC IOREGSEL write: 0x{:02x} (selecting register)",
+                        self.ioregsel
+                    );
+                }
+                IOWIN => {
+                    // Write to the register selected by IOREGSEL
+                    log::info!(
+                        "📤 IOAPIC IOWIN write: reg=0x{:02x}, value=0x{:08x}",
+                        self.ioregsel,
+                        value
+                    );
+                    // For now, just log the write. In a full implementation,
+                    // we would store redirection table entries, etc.
+                }
+                _ => {
+                    log::warn!(
+                        "IOAPIC write at unknown offset=0x{:x}, len={}, value=0x{:08x}",
+                        offset,
+                        data.len(),
+                        value
+                    );
+                }
+            }
         }
     }
 }
