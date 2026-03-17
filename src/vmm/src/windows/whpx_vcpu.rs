@@ -1009,12 +1009,18 @@ impl WhpxVcpu {
         guest_mem: *const GuestMemoryMmap,
         vcpu_id: u64,
     ) -> io::Result<VcpuExit<'_>> {
+        static mut RUN_COUNT: u64 = 0;
         loop {
             let mut exit_context = WHV_RUN_VP_EXIT_CONTEXT::default();
 
             // SAFETY: WHvRunVirtualProcessor is safe to call with valid partition and vCPU handles.
             // The exit_context is a valid mutable reference that will be filled by the API.
             unsafe {
+                RUN_COUNT += 1;
+                if RUN_COUNT % 1000 == 0 {
+                    log::debug!("WHvRunVirtualProcessor called {} times", RUN_COUNT);
+                }
+
                 WHvRunVirtualProcessor(
                     self.partition,
                     self.index,
@@ -1025,6 +1031,9 @@ impl WhpxVcpu {
                     io::Error::other(format!("Failed to run vCPU: {}", e))
                 })?;
             }
+
+            // Log exit reason for debugging
+            log::trace!("WHPX exit: reason={:?}, RIP={:#x}", exit_context.ExitReason, exit_context.VpContext.Rip);
 
             // Parse the exit reason.
             match exit_context.ExitReason {
