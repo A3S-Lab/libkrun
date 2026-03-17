@@ -1044,24 +1044,46 @@ impl WhpxVcpu {
                     let access_type = (access_info & 0x3) as i32;
                     let access_size = (((access_info >> 4) & 0xf) as usize).max(1);
 
-                    // Special logging for loop addresses to understand what they're doing
+                    // Track all MemoryAccess exits to understand kernel behavior
                     let rip = exit_context.VpContext.Rip;
-                    if rip == 0xffffffff8102200e || rip == 0xffffffff81022010 {
-                        let access_type_str = match access_type {
-                            0 => "Read",
-                            1 => "Write",
-                            2 => "Execute",
-                            _ => "Unknown",
-                        };
-                        static mut LOOP_COUNT: u64 = 0;
-                        unsafe {
-                            LOOP_COUNT += 1;
-                            if LOOP_COUNT % 100 == 0 || LOOP_COUNT <= 10 {
-                                info!(
-                                    "🔍 LOOP #{}: RIP={:#x}, GPA={:#x}, Type={}, Size={}",
-                                    LOOP_COUNT, rip, gpa, access_type_str, access_size
-                                );
+                    let access_type_str = match access_type {
+                        0 => "Read",
+                        1 => "Write",
+                        2 => "Execute",
+                        _ => "Unknown",
+                    };
+
+                    static mut TOTAL_EXITS: u64 = 0;
+                    static mut LAST_RIP: u64 = 0;
+                    static mut SAME_RIP_COUNT: u64 = 0;
+
+                    unsafe {
+                        TOTAL_EXITS += 1;
+
+                        // Track if we're stuck at the same RIP
+                        if rip == LAST_RIP {
+                            SAME_RIP_COUNT += 1;
+                            // Log if stuck at same address for 100+ exits
+                            if SAME_RIP_COUNT == 100 {
+                                info!("⚠️  STUCK: RIP={:#x} repeated 100 times, GPA={:#x}, Type={}, Size={}",
+                                      rip, gpa, access_type_str, access_size);
+                            } else if SAME_RIP_COUNT % 1000 == 0 {
+                                info!("⚠️  STUCK: RIP={:#x} repeated {} times", rip, SAME_RIP_COUNT);
                             }
+                        } else {
+                            // RIP changed, log if previous was stuck
+                            if SAME_RIP_COUNT >= 100 {
+                                info!("✓ Unstuck from RIP={:#x} after {} exits, now at {:#x}",
+                                      LAST_RIP, SAME_RIP_COUNT, rip);
+                            }
+                            LAST_RIP = rip;
+                            SAME_RIP_COUNT = 1;
+                        }
+
+                        // Log first 20 exits and every 1000th exit for overview
+                        if TOTAL_EXITS <= 20 || TOTAL_EXITS % 1000 == 0 {
+                            info!("Exit #{}: RIP={:#x}, GPA={:#x}, Type={}, Size={}",
+                                  TOTAL_EXITS, rip, gpa, access_type_str, access_size);
                         }
                     }
                     if access_size > self.data_buffer.len() {

@@ -42,6 +42,13 @@
   - 分析方法指南
   - 下一步行动
 
+- **[RIP_TRACKING_GUIDE.md](RIP_TRACKING_GUIDE.md)** - 🎯 RIP跟踪指南 (最新!)
+  - 全面的RIP执行跟踪
+  - 自动卡住检测
+  - 运行测试的详细步骤
+  - 输出分析方法
+  - 故障排除指南
+
 ### 会话记录
 
 - **[SESSION_SUMMARY.md](SESSION_SUMMARY.md)** - 📝 本次会话总结
