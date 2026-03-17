@@ -53,9 +53,11 @@
 
 ### 🔧 工具和脚本
 
-- **run_test_proper.ps1** - PowerShell测试运行器 (推荐)
-- **run_test.bat** - CMD批处理测试运行器
-- **download_kernel.ps1** - 内核下载脚本
+- **[../scripts/RUN_TEST.ps1](../scripts/RUN_TEST.ps1)** - 完整测试运行器 (推荐)
+- **[../scripts/run_test_proper.ps1](../scripts/run_test_proper.ps1)** - PowerShell测试运行器
+- **[../scripts/test_apic.bat](../scripts/test_apic.bat)** - APIC测试脚本
+- **[../scripts/run_test.bat](../scripts/run_test.bat)** - CMD批处理测试运行器
+- **[../scripts/download_kernel.ps1](../scripts/download_kernel.ps1)** - 内核下载脚本
 
 ---
 
@@ -94,7 +96,7 @@
 - ⏳ 需要运行测试确定内核卡住位置
 
 ### 下一步行动
-1. 在PowerShell中运行 `.\run_test_proper.ps1`
+1. 在PowerShell中运行 `..scriptsRUN_TEST.ps1`
 2. 分析输出中的STUCK消息
 3. 根据GPA范围确定需要实现的功能
 4. 实现相应的设备模拟或中断处理
@@ -111,7 +113,7 @@
 cargo build --release --example test_kernel_boot
 
 # 运行测试
-.\run_test_proper.ps1
+..scriptsRUN_TEST.ps1
 
 # 分析日志
 Select-String -Path test.log -Pattern "STUCK|Exit #"
