@@ -189,7 +189,19 @@ impl Serial {
                 } else {
                     if let Some(out) = self.out.as_mut() {
                         out.write_all(&[value])?;
-                        out.flush()?;
+                        #[cfg(target_os = "windows")]
+                        {
+                            // Early Linux printk drives the UART one byte at a time.
+                            // Flushing the host stream on every byte turns serial
+                            // console output into a massive bottleneck on Windows.
+                            if matches!(value, b'\n' | b'\r') {
+                                out.flush()?;
+                            }
+                        }
+                        #[cfg(not(target_os = "windows"))]
+                        {
+                            out.flush()?;
+                        }
                     }
                     self.thr_empty()?;
                 }
@@ -246,15 +258,27 @@ impl BusDevice for Serial {
         }
 
         data[0] = self.handle_read(offset as u8);
-        log::trace!("[SERIAL] Read from offset {:#x}, data: {:#x}", offset, data[0]);
+        log::trace!(
+            "[SERIAL] Read from offset {:#x}, data: {:#x}",
+            offset,
+            data[0]
+        );
     }
 
     fn write(&mut self, _vcpuid: u64, offset: u64, data: &[u8]) {
         if data.len() != 1 {
             return;
         }
-        log::debug!("[SERIAL] Write to offset {:#x}, data: {:#x} ('{}')",
-                    offset, data[0], if data[0].is_ascii_graphic() || data[0] == b' ' { data[0] as char } else { '.' });
+        log::debug!(
+            "[SERIAL] Write to offset {:#x}, data: {:#x} ('{}')",
+            offset,
+            data[0],
+            if data[0].is_ascii_graphic() || data[0] == b' ' {
+                data[0] as char
+            } else {
+                '.'
+            }
+        );
         if let Err(e) = self.handle_write(offset as u8, data[0]) {
             error!("Failed the write to serial: {e}");
         }

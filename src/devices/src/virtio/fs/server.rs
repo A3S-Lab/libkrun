@@ -33,6 +33,32 @@ const MAX_BUFFER_SIZE: u32 = 1 << 20;
 const BUFFER_HEADER_SIZE: u32 = 0x1000;
 const DIRENT_PADDING: [u8; 8] = [0; 8];
 
+#[cfg(target_os = "windows")]
+fn fs_server_debug_log(message: impl AsRef<str>) {
+    static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*VALUE.get_or_init(|| {
+        std::env::var("LIBKRUN_WINDOWS_VERBOSE_DEBUG")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+    }) {
+        return;
+    }
+    let message = message.as_ref();
+    eprintln!("[VIRTIOFS-SERVER] {message}");
+    for path in [
+        r"C:\Users\18770\.a3s\libkrun-virtiofs-device.log",
+        r"D:\code\libkrun\tmp_virtiofs_device.log",
+    ] {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{message}");
+        }
+    }
+}
+
 struct ZCReader<'a>(Reader<'a>);
 
 impl ZeroCopyReader for ZCReader<'_> {
@@ -88,6 +114,11 @@ impl<F: FileSystem + Sync> Server<F> {
         #[cfg(target_os = "macos")] map_sender: &Option<Sender<WorkerMessage>>,
     ) -> Result<usize> {
         let in_header: InHeader = r.read_obj().map_err(Error::DecodeMessage)?;
+        #[cfg(target_os = "windows")]
+        fs_server_debug_log(format!(
+            "FsServer::handle_message opcode={} unique={} nodeid={} len={}",
+            in_header.opcode, in_header.unique, in_header.nodeid, in_header.len
+        ));
 
         if in_header.len > (MAX_BUFFER_SIZE + BUFFER_HEADER_SIZE) {
             return reply_error(

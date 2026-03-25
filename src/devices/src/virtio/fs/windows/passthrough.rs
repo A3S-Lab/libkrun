@@ -8,16 +8,17 @@ use std::collections::BTreeMap;
 use std::ffi::CStr;
 use std::fs::{self, Metadata};
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, UNIX_EPOCH};
 
+use super::super::bindings;
 use super::super::filesystem::{
     Context, DirEntry, Entry, ExportTable, Extensions, FileSystem, FsOptions, GetxattrReply,
     ListxattrReply, OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter,
 };
-use super::super::bindings;
 
 type Inode = u64;
 type Handle = u64;
@@ -25,7 +26,76 @@ type Handle = u64;
 const ROOT_INODE: Inode = 1;
 const INIT_CSTR: &[u8] = b"init.krun\0";
 
-static INIT_BINARY: &[u8] = include_bytes!("../../../../../../init/init");
+static INIT_BINARY: &[u8] = include_bytes!(env!("LIBKRUN_WINDOWS_INIT_BINARY"));
+
+fn virtiofs_debug_enabled() -> bool {
+    static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("LIBKRUN_WINDOWS_VERBOSE_DEBUG")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+    })
+}
+
+fn virtiofs_debug_log(message: impl AsRef<str>) {
+    if !virtiofs_debug_enabled() {
+        return;
+    }
+    let message = message.as_ref();
+    eprintln!("[VIRTIOFS-FS] {message}");
+    for raw_path in [
+        r"C:\Users\18770\.a3s\libkrun-virtiofs-windows.log",
+        r"D:\code\libkrun\tmp_virtiofs_windows.log",
+    ] {
+        let path = PathBuf::from(raw_path);
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{message}");
+        }
+    }
+}
+
+fn should_trace_path(path: &Path) -> bool {
+    if std::env::var_os("LIBKRUN_WINDOWS_TRACE_ALL_PATHS").is_some() {
+        return true;
+    }
+
+    let full = path.to_string_lossy();
+    if full.contains(r"\usr\lib\x86_64-linux-gnu\") {
+        return true;
+    }
+
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    matches!(
+        name,
+        "init.krun"
+            | "init"
+            | "docker-entrypoint.sh"
+            | "sh"
+            | "ld-linux-x86-64.so.2"
+            | "libgcc_s.so.1"
+            | "libc.so.6"
+            | "a3s-box-port-forward.progress"
+            | "krun-debug.log"
+            | "probe.txt"
+            | "ping.txt"
+            | "diag.txt"
+    )
+}
+
+fn log_path_error(op: &str, path: &Path, err: &io::Error) {
+    virtiofs_debug_log(format!(
+        "{op} failed path={} kind={:?} raw_os_error={:?} error={}",
+        path.display(),
+        err.kind(),
+        err.raw_os_error(),
+        err
+    ));
+}
 
 // Windows doesn't have DT_ constants in libc, so define them here
 // These match the Linux values for compatibility
@@ -89,6 +159,7 @@ pub struct PassthroughFs {
 impl PassthroughFs {
     pub fn new(cfg: Config) -> io::Result<PassthroughFs> {
         let root_dir = PathBuf::from(&cfg.root_dir);
+        virtiofs_debug_log(format!("PassthroughFs::new root_dir={}", root_dir.display()));
 
         // Verify root directory exists
         if !root_dir.exists() {
@@ -183,8 +254,39 @@ impl PassthroughFs {
             .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))
     }
 
+    fn path_is_executable(&self, path: &Path, metadata: &Metadata) -> bool {
+        if metadata.is_dir() {
+            return true;
+        }
+
+        if !metadata.is_file() {
+            return false;
+        }
+
+        if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
+            match ext.to_ascii_lowercase().as_str() {
+                "exe" | "bat" | "cmd" | "com" => return true,
+                _ => {}
+            }
+        }
+
+        let mut header = [0u8; 4];
+        if let Ok(mut file) = fs::File::open(path) {
+            if let Ok(read) = std::io::Read::read(&mut file, &mut header) {
+                if read >= 2 && &header[..2] == b"#!" {
+                    return true;
+                }
+                if read >= 4 && header == [0x7f, b'E', b'L', b'F'] {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
     /// Convert Windows metadata to POSIX stat64
-    fn metadata_to_stat(&self, metadata: &Metadata, inode: Inode) -> bindings::stat64 {
+    fn metadata_to_stat(&self, path: &Path, metadata: &Metadata, inode: Inode) -> bindings::stat64 {
         let mut st: bindings::stat64 = unsafe { std::mem::zeroed() };
 
         st.st_ino = inode; // u64 — no truncation
@@ -196,7 +298,12 @@ impl PassthroughFs {
         } else if ft.is_symlink() {
             (S_IFLNK | 0o777) as u32
         } else {
-            (libc::S_IFREG | 0o644) as u32
+            let mode = if self.path_is_executable(path, metadata) {
+                0o755
+            } else {
+                0o644
+            };
+            (libc::S_IFREG | mode) as u32
         };
 
         st.st_size = metadata.len() as i64;
@@ -236,6 +343,128 @@ impl PassthroughFs {
         })?;
         Ok(PathBuf::from(name_str))
     }
+
+    fn root_alias_target(&self, name: &str) -> Option<PathBuf> {
+        let alias_path = self.root_dir.join(name);
+        if alias_path.exists() {
+            return None;
+        }
+
+        let target = match name {
+            "bin" => self.root_dir.join("usr").join("bin"),
+            "sbin" => self.root_dir.join("usr").join("sbin"),
+            "lib" => self.root_dir.join("usr").join("lib"),
+            "lib64" => {
+                let usr_lib64 = self.root_dir.join("usr").join("lib64");
+                let usr_lib64_loader = usr_lib64.join("ld-linux-x86-64.so.2");
+                if usr_lib64_loader.is_file() {
+                    usr_lib64
+                } else {
+                    self.root_dir.join("usr").join("lib").join("x86_64-linux-gnu")
+                }
+            }
+            _ => return None,
+        };
+
+        if target.exists() {
+            Some(target)
+        } else {
+            None
+        }
+    }
+
+    fn versioned_file_alias_target(&self, full_path: &Path) -> Option<PathBuf> {
+        let file_name = full_path.file_name()?.to_str()?;
+        if !file_name.contains(".so") {
+            return None;
+        }
+
+        let parent = full_path.parent()?;
+        let prefix = format!("{file_name}.");
+        let mut candidates: Vec<PathBuf> = fs::read_dir(parent)
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix))
+            })
+            .collect();
+
+        candidates.sort();
+        candidates.into_iter().next()
+    }
+
+    fn multiarch_lib_alias_target(&self, parent_path: &Path, name_path: &Path) -> Option<PathBuf> {
+        let usr_lib = self.root_dir.join("usr").join("lib");
+        if parent_path != usr_lib {
+            return None;
+        }
+
+        let multiarch_dir = usr_lib.join("x86_64-linux-gnu");
+        if !multiarch_dir.is_dir() {
+            return None;
+        }
+
+        let candidate = multiarch_dir.join(name_path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+
+        self.versioned_file_alias_target(&candidate)
+    }
+
+    fn resolve_lookup_path(&self, parent_path: &Path, name_path: &Path) -> PathBuf {
+        let full_path = parent_path.join(name_path);
+        if full_path.exists() {
+            return full_path;
+        }
+
+        if parent_path == self.root_dir {
+            if let Some(name) = name_path.to_str() {
+                if let Some(target) = self.root_alias_target(name) {
+                    virtiofs_debug_log(format!(
+                        "lookup alias /{} -> {}",
+                        name,
+                        target.display()
+                    ));
+                    return target;
+                }
+            }
+        }
+
+        // Debian-style images commonly encode /bin/sh as a symlink to dash.
+        let usr_bin = self.root_dir.join("usr").join("bin");
+        if parent_path == usr_bin && name_path == Path::new("sh") {
+            let dash = usr_bin.join("dash");
+            if dash.is_file() {
+                virtiofs_debug_log(format!("lookup alias /bin/sh -> {}", dash.display()));
+                return dash;
+            }
+        }
+
+        if let Some(target) = self.versioned_file_alias_target(&full_path) {
+            virtiofs_debug_log(format!(
+                "lookup alias {} -> {}",
+                full_path.display(),
+                target.display()
+            ));
+            return target;
+        }
+
+        if let Some(target) = self.multiarch_lib_alias_target(parent_path, name_path) {
+            virtiofs_debug_log(format!(
+                "lookup alias {} -> {}",
+                full_path.display(),
+                target.display()
+            ));
+            return target;
+        }
+
+        full_path
+    }
 }
 
 // FileSystem trait implementation will be added in next step
@@ -248,6 +477,10 @@ impl FileSystem for PassthroughFs {
     type Handle = u64;
 
     fn init(&self, capable: FsOptions) -> io::Result<FsOptions> {
+        virtiofs_debug_log(format!(
+            "PassthroughFs::init root_dir={} capable={:?}",
+            self.cfg.root_dir, capable
+        ));
         log::info!(
             "virtiofs(windows): initializing with root_dir={}",
             self.cfg.root_dir
@@ -273,6 +506,7 @@ impl FileSystem for PassthroughFs {
         let init_name = unsafe { CStr::from_bytes_with_nul_unchecked(INIT_CSTR) };
 
         if parent == ROOT_INODE && self.init_inode != 0 && name == init_name {
+            virtiofs_debug_log("lookup virtual /init.krun");
             // Return virtual init.krun file
             let st = bindings::stat64 {
                 st_dev: 0,
@@ -303,16 +537,37 @@ impl FileSystem for PassthroughFs {
         // Normal file lookup
         let parent_path = self.get_path(parent)?;
         let name_path = self.cstr_to_path(name)?;
-        let full_path = parent_path.join(&name_path);
+        let full_path = self.resolve_lookup_path(&parent_path, &name_path);
+        if should_trace_path(&full_path) {
+            virtiofs_debug_log(format!("lookup {}", full_path.display()));
+        }
 
         // Use symlink_metadata (= lstat) so symlinks appear as S_IFLNK to the guest.
-        let metadata = fs::symlink_metadata(&full_path)?;
+        let metadata = match fs::symlink_metadata(&full_path) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                if should_trace_path(&full_path) {
+                    log_path_error("lookup", &full_path, &err);
+                }
+                return Err(err);
+            }
+        };
 
         // Get or create inode
         let inode = self.get_or_create_inode(&full_path)?;
 
         // Convert metadata to stat
-        let st = self.metadata_to_stat(&metadata, inode);
+        let st = self.metadata_to_stat(&full_path, &metadata, inode);
+        if should_trace_path(&full_path) {
+            virtiofs_debug_log(format!(
+                "lookup-ok {} inode={} mode=0o{:o} size={} blocks={}",
+                full_path.display(),
+                inode,
+                st.st_mode,
+                st.st_size,
+                st.st_blocks
+            ));
+        }
 
         Ok(Entry {
             inode,
@@ -349,8 +604,26 @@ impl FileSystem for PassthroughFs {
         _handle: Option<Self::Handle>,
     ) -> io::Result<(bindings::stat64, Duration)> {
         let path = self.get_path(inode)?;
-        let metadata = fs::symlink_metadata(&path)?;
-        let st = self.metadata_to_stat(&metadata, inode);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                if should_trace_path(&path) {
+                    log_path_error("getattr", &path, &err);
+                }
+                return Err(err);
+            }
+        };
+        let st = self.metadata_to_stat(&path, &metadata, inode);
+        if should_trace_path(&path) {
+            virtiofs_debug_log(format!(
+                "getattr-ok {} inode={} mode=0o{:o} size={} blocks={}",
+                path.display(),
+                inode,
+                st.st_mode,
+                st.st_size,
+                st.st_blocks
+            ));
+        }
         Ok((st, self.cfg.attr_timeout))
     }
 
@@ -502,8 +775,8 @@ impl FileSystem for PassthroughFs {
         let path = self.get_path(inode)?;
 
         // Get disk space information using Windows API
-        use std::os::windows::ffi::OsStrExt;
         use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
 
         let path_wide: Vec<u16> = OsStr::new(&path)
             .encode_wide()
@@ -515,15 +788,17 @@ impl FileSystem for PassthroughFs {
         let mut total_free_bytes: u64 = 0;
 
         unsafe {
-            use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
             use windows::core::PCWSTR;
+            use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
             if GetDiskFreeSpaceExW(
                 PCWSTR(path_wide.as_ptr()),
                 Some(&mut free_bytes_available),
                 Some(&mut total_bytes),
                 Some(&mut total_free_bytes),
-            ).is_err() {
+            )
+            .is_err()
+            {
                 return Err(io::Error::last_os_error());
             }
         }
@@ -564,7 +839,9 @@ impl FileSystem for PassthroughFs {
         _extensions: Extensions,
     ) -> io::Result<Entry> {
         let parent_path = self.get_path(parent)?;
-        let name_str = name.to_str().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let name_str = name
+            .to_str()
+            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
         let new_path = parent_path.join(name_str);
 
         // Create the directory
@@ -575,7 +852,7 @@ impl FileSystem for PassthroughFs {
 
         // Get metadata
         let metadata = fs::metadata(&new_path)?;
-        let st = self.metadata_to_stat(&metadata, inode);
+        let st = self.metadata_to_stat(&new_path, &metadata, inode);
 
         Ok(Entry {
             inode,
@@ -589,7 +866,9 @@ impl FileSystem for PassthroughFs {
 
     fn rmdir(&self, _ctx: Context, parent: Self::Inode, name: &CStr) -> io::Result<()> {
         let parent_path = self.get_path(parent)?;
-        let name_str = name.to_str().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let name_str = name
+            .to_str()
+            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
         let dir_path = parent_path.join(name_str);
 
         // Remove the directory
@@ -612,6 +891,7 @@ impl FileSystem for PassthroughFs {
     ) -> io::Result<(Option<Self::Handle>, OpenOptions)> {
         // Special handling for init.krun (virtual file)
         if inode == self.init_inode {
+            virtiofs_debug_log("open virtual /init.krun");
             let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
 
             // Store handle data with empty path (marker for init.krun)
@@ -628,9 +908,20 @@ impl FileSystem for PassthroughFs {
 
         // Normal file open
         let path = self.get_path(inode)?;
+        if should_trace_path(&path) {
+            virtiofs_debug_log(format!("open {} flags=0x{:x}", path.display(), flags));
+        }
 
         // Verify the file exists and is a regular file
-        let metadata = fs::metadata(&path)?;
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                if should_trace_path(&path) {
+                    log_path_error("open", &path, &err);
+                }
+                return Err(err);
+            }
+        };
         if !metadata.is_file() {
             return Err(io::Error::from_raw_os_error(libc::EISDIR));
         }
@@ -661,6 +952,16 @@ impl FileSystem for PassthroughFs {
             opts |= OpenOptions::KEEP_CACHE;
         }
 
+        if should_trace_path(&path) {
+            virtiofs_debug_log(format!(
+                "open-ok {} inode={} size={} opts=0x{:x}",
+                path.display(),
+                inode,
+                metadata.len(),
+                opts.bits()
+            ));
+        }
+
         Ok((Some(handle), opts))
     }
 
@@ -674,6 +975,14 @@ impl FileSystem for PassthroughFs {
         _flock_release: bool,
         _lock_owner: Option<u64>,
     ) -> io::Result<()> {
+        if let Some(handle_data) = self.handles.read().unwrap().get(&handle) {
+            if should_trace_path(&handle_data.path) {
+                virtiofs_debug_log(format!(
+                    "release {} handle={handle}",
+                    handle_data.path.display()
+                ));
+            }
+        }
         // Remove the handle from our tracking
         self.handles.write().unwrap().remove(&handle);
         Ok(())
@@ -690,8 +999,13 @@ impl FileSystem for PassthroughFs {
         _extensions: Extensions,
     ) -> io::Result<(Entry, Option<Self::Handle>, OpenOptions)> {
         let parent_path = self.get_path(parent)?;
-        let name_str = name.to_str().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let name_str = name
+            .to_str()
+            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
         let new_path = parent_path.join(name_str);
+        if should_trace_path(&new_path) {
+            virtiofs_debug_log(format!("create {} flags=0x{:x}", new_path.display(), flags));
+        }
 
         // Create the file
         use std::fs::File;
@@ -713,7 +1027,7 @@ impl FileSystem for PassthroughFs {
 
         // Get metadata
         let metadata = fs::metadata(&new_path)?;
-        let st = self.metadata_to_stat(&metadata, inode);
+        let st = self.metadata_to_stat(&new_path, &metadata, inode);
 
         // Determine open options based on flags
         let mut opts = OpenOptions::empty();
@@ -744,7 +1058,9 @@ impl FileSystem for PassthroughFs {
 
     fn unlink(&self, _ctx: Context, parent: Self::Inode, name: &CStr) -> io::Result<()> {
         let parent_path = self.get_path(parent)?;
-        let name_str = name.to_str().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let name_str = name
+            .to_str()
+            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
         let file_path = parent_path.join(name_str);
 
         // Remove the file
@@ -780,6 +1096,10 @@ impl FileSystem for PassthroughFs {
 
         // Special handling for init.krun (empty path)
         if path.as_os_str().is_empty() {
+            virtiofs_debug_log(format!(
+                "read virtual /init.krun offset={} size={}",
+                offset, size
+            ));
             let off = offset as usize;
             if off >= INIT_BINARY.len() {
                 return Ok(0);
@@ -794,17 +1114,67 @@ impl FileSystem for PassthroughFs {
         }
 
         // Normal file read
+        if should_trace_path(path) {
+            virtiofs_debug_log(format!(
+                "read {} offset={} size={}",
+                path.display(),
+                offset,
+                size
+            ));
+        }
         use std::fs::File;
         use std::io::{Read, Seek, SeekFrom};
 
-        let mut file = File::open(path)?;
+        let mut file = match File::open(path) {
+            Ok(file) => file,
+            Err(err) => {
+                if should_trace_path(path) {
+                    log_path_error("read-open", path, &err);
+                }
+                return Err(err);
+            }
+        };
 
         // Seek to the requested offset
-        file.seek(SeekFrom::Start(offset))?;
+        if let Err(err) = file.seek(SeekFrom::Start(offset)) {
+            if should_trace_path(path) {
+                virtiofs_debug_log(format!(
+                    "read-seek failed path={} offset={} error={}",
+                    path.display(),
+                    offset,
+                    err
+                ));
+            }
+            return Err(err);
+        }
 
         // Read data into a buffer
         let mut buffer = vec![0u8; size as usize];
-        let bytes_read = file.read(&mut buffer)?;
+        let bytes_read = match file.read(&mut buffer) {
+            Ok(bytes_read) => bytes_read,
+            Err(err) => {
+                if should_trace_path(path) {
+                    virtiofs_debug_log(format!(
+                        "read-io failed path={} offset={} size={} error={}",
+                        path.display(),
+                        offset,
+                        size,
+                        err
+                    ));
+                }
+                return Err(err);
+            }
+        };
+
+        if should_trace_path(path) {
+            virtiofs_debug_log(format!(
+                "read-ok {} offset={} requested={} got={}",
+                path.display(),
+                offset,
+                size,
+                bytes_read
+            ));
+        }
 
         // Write to the output writer
         if bytes_read > 0 {
@@ -834,24 +1204,42 @@ impl FileSystem for PassthroughFs {
             .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))?;
 
         let path = &handle_data.path;
+        if should_trace_path(path) {
+            virtiofs_debug_log(format!(
+                "write {} offset={} size={}",
+                path.display(),
+                offset,
+                size
+            ));
+        }
 
-        // Open the file for writing
+        // Mirror the Linux/macOS implementations and let the zero-copy reader
+        // drive descriptor consumption. A single `Read::read` is not guaranteed
+        // to consume the full request payload and caused guest writes to be
+        // silently dropped on Windows.
         use std::fs::OpenOptions as StdOpenOptions;
-        use std::io::{Seek, SeekFrom, Write};
 
-        let mut file = StdOpenOptions::new()
-            .write(true)
-            .open(path)?;
-
-        // Seek to the requested offset
-        file.seek(SeekFrom::Start(offset))?;
-
-        // Read data from the input reader and write to file
-        let mut buffer = vec![0u8; size as usize];
-        let bytes_read = r.read(&mut buffer)?;
-
+        let file = StdOpenOptions::new().write(true).open(path)?;
+        let bytes_read = r.read_to(&file, size as usize, offset)?;
         if bytes_read > 0 {
-            file.write_all(&buffer[..bytes_read])?;
+            let target_len = offset.saturating_add(bytes_read as u64);
+            if let Ok(metadata) = file.metadata() {
+                if metadata.len() < target_len {
+                    file.set_len(target_len)?;
+                }
+            }
+        }
+
+        if should_trace_path(path) {
+            let new_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+            virtiofs_debug_log(format!(
+                "write-ok {} offset={} requested={} got={} len={}",
+                path.display(),
+                offset,
+                size,
+                bytes_read,
+                new_len
+            ));
         }
 
         Ok(bytes_read)
@@ -866,13 +1254,21 @@ impl FileSystem for PassthroughFs {
         valid: SetattrValid,
     ) -> io::Result<(bindings::stat64, Duration)> {
         let path = self.get_path(inode)?;
+        if should_trace_path(&path) {
+            virtiofs_debug_log(format!(
+                "setattr {} valid=0x{:x} size={} mode=0o{:o} mtime={}",
+                path.display(),
+                valid.bits(),
+                attr.st_size,
+                attr.st_mode,
+                attr.st_mtime
+            ));
+        }
 
         // Handle size changes (truncate)
         if valid.contains(SetattrValid::SIZE) {
             use std::fs::OpenOptions as StdOpenOptions;
-            let file = StdOpenOptions::new()
-                .write(true)
-                .open(&path)?;
+            let file = StdOpenOptions::new().write(true).open(&path)?;
             file.set_len(attr.st_size as u64)?;
         }
 
@@ -898,7 +1294,7 @@ impl FileSystem for PassthroughFs {
 
         // Get updated metadata
         let metadata = fs::metadata(&path)?;
-        let st = self.metadata_to_stat(&metadata, inode);
+        let st = self.metadata_to_stat(&path, &metadata, inode);
 
         Ok((st, self.cfg.attr_timeout))
     }
@@ -915,8 +1311,12 @@ impl FileSystem for PassthroughFs {
         let olddir_path = self.get_path(olddir)?;
         let newdir_path = self.get_path(newdir)?;
 
-        let oldname_str = oldname.to_str().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
-        let newname_str = newname.to_str().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let oldname_str = oldname
+            .to_str()
+            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let newname_str = newname
+            .to_str()
+            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
 
         let old_path = olddir_path.join(oldname_str);
         let new_path = newdir_path.join(newname_str);
@@ -979,15 +1379,19 @@ impl FileSystem for PassthroughFs {
         _extensions: Extensions,
     ) -> io::Result<Entry> {
         let parent_path = self.get_path(parent)?;
-        let name_str = name.to_str().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let name_str = name
+            .to_str()
+            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
         let link_path = parent_path.join(name_str);
 
-        let target_str = linkname.to_str().map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let target_str = linkname
+            .to_str()
+            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
         let target_path = Path::new(target_str);
 
         // Create symbolic link using std::os::windows::fs::symlink_file or symlink_dir
         // We need to determine if target is a file or directory
-        use std::os::windows::fs::{symlink_file, symlink_dir};
+        use std::os::windows::fs::{symlink_dir, symlink_file};
 
         // Try to determine if target is a directory
         let is_dir = if target_path.is_absolute() {
@@ -1007,7 +1411,7 @@ impl FileSystem for PassthroughFs {
 
         // Get metadata
         let metadata = fs::symlink_metadata(&link_path)?;
-        let st = self.metadata_to_stat(&metadata, inode);
+        let st = self.metadata_to_stat(&link_path, &metadata, inode);
 
         Ok(Entry {
             inode,
@@ -1023,7 +1427,15 @@ impl FileSystem for PassthroughFs {
         let path = self.get_path(inode)?;
 
         // Read the symlink target
-        let target = fs::read_link(&path)?;
+        let target = match fs::read_link(&path) {
+            Ok(target) => target,
+            Err(err) => {
+                if should_trace_path(&path) {
+                    log_path_error("readlink", &path, &err);
+                }
+                return Err(err);
+            }
+        };
 
         // Convert to bytes
         let target_str = target.to_string_lossy();
@@ -1037,19 +1449,14 @@ impl FileSystem for PassthroughFs {
         handle: Self::Handle,
         _lock_owner: u64,
     ) -> io::Result<()> {
-        // Get the path from the handle
-        let handles = self.handles.read().unwrap();
-        let handle_data = handles
-            .get(&handle)
-            .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))?;
-
-        let path = &handle_data.path;
-
-        // Open the file and sync it
-        use std::fs::File;
-        let file = File::open(path)?;
-        file.sync_all()?;
-
+        // FUSE flush is a close-time notification, not a durability request.
+        // On Windows, reopening the file and forcing sync_all() can turn a
+        // harmless close() into EIO for read-only executable loads.
+        if let Some(handle_data) = self.handles.read().unwrap().get(&handle) {
+            if should_trace_path(&handle_data.path) {
+                virtiofs_debug_log(format!("flush-ok {} handle={handle}", handle_data.path.display()));
+            }
+        }
         Ok(())
     }
 
@@ -1130,17 +1537,19 @@ impl FileSystem for PassthroughFs {
 
         // Check execute access
         if mask & X_OK != 0 {
-            // On Windows, check if it's a directory or has .exe/.bat/.cmd extension
-            if !metadata.is_dir() {
-                if let Some(ext) = path.extension() {
-                    let ext_str = ext.to_string_lossy().to_lowercase();
-                    if ext_str != "exe" && ext_str != "bat" && ext_str != "cmd" {
-                        return Err(io::Error::from_raw_os_error(libc::EACCES));
-                    }
-                } else {
-                    return Err(io::Error::from_raw_os_error(libc::EACCES));
-                }
+            if !self.path_is_executable(&path, &metadata) {
+                return Err(io::Error::from_raw_os_error(libc::EACCES));
             }
+        }
+
+        if should_trace_path(&path) {
+            virtiofs_debug_log(format!(
+                "access-ok {} mask=0x{:x} readonly={} exec={}",
+                path.display(),
+                mask,
+                metadata.permissions().readonly(),
+                self.path_is_executable(&path, &metadata)
+            ));
         }
 
         Ok(())
@@ -1150,10 +1559,15 @@ impl FileSystem for PassthroughFs {
         &self,
         _ctx: Context,
         _inode: Self::Inode,
-        _name: &CStr,
+        name: &CStr,
         _value: &[u8],
         _flags: u32,
     ) -> io::Result<()> {
+        virtiofs_debug_log(format!(
+            "setxattr inode={} name={}",
+            _inode,
+            name.to_string_lossy()
+        ));
         // Extended attributes not supported on Windows
         Err(io::Error::from_raw_os_error(libc::ENOTSUP))
     }
@@ -1161,25 +1575,41 @@ impl FileSystem for PassthroughFs {
     fn getxattr(
         &self,
         _ctx: Context,
-        _inode: Self::Inode,
-        _name: &CStr,
-        _size: u32,
+        inode: Self::Inode,
+        name: &CStr,
+        size: u32,
     ) -> io::Result<GetxattrReply> {
-        // Extended attributes not supported on Windows
-        Err(io::Error::from_raw_os_error(libc::ENOTSUP))
+        virtiofs_debug_log(format!(
+            "getxattr inode={} name={} size={}",
+            inode,
+            name.to_string_lossy(),
+            size
+        ));
+        // Report "attribute missing" instead of "operation unsupported" so
+        // guest exec checks can proceed on files without xattrs.
+        Err(io::Error::from_raw_os_error(bindings::LINUX_ENODATA))
     }
 
     fn listxattr(
         &self,
         _ctx: Context,
-        _inode: Self::Inode,
-        _size: u32,
+        inode: Self::Inode,
+        size: u32,
     ) -> io::Result<ListxattrReply> {
-        // Extended attributes not supported on Windows
-        Err(io::Error::from_raw_os_error(libc::ENOTSUP))
+        virtiofs_debug_log(format!("listxattr inode={} size={}", inode, size));
+        if size == 0 {
+            Ok(ListxattrReply::Count(0))
+        } else {
+            Ok(ListxattrReply::Names(Vec::new()))
+        }
     }
 
-    fn removexattr(&self, _ctx: Context, _inode: Self::Inode, _name: &CStr) -> io::Result<()> {
+    fn removexattr(&self, _ctx: Context, inode: Self::Inode, name: &CStr) -> io::Result<()> {
+        virtiofs_debug_log(format!(
+            "removexattr inode={} name={}",
+            inode,
+            name.to_string_lossy()
+        ));
         // Extended attributes not supported on Windows
         Err(io::Error::from_raw_os_error(libc::ENOTSUP))
     }
@@ -1204,9 +1634,7 @@ impl FileSystem for PassthroughFs {
         // Open the file and set its length
         use std::fs::OpenOptions as StdOpenOptions;
 
-        let file = StdOpenOptions::new()
-            .write(true)
-            .open(path)?;
+        let file = StdOpenOptions::new().write(true).open(path)?;
 
         let new_size = offset + length;
         file.set_len(new_size)?;
@@ -1285,7 +1713,11 @@ mod tests {
     }
 
     fn ctx() -> Context {
-        Context { uid: 0, gid: 0, pid: 0 }
+        Context {
+            uid: 0,
+            gid: 0,
+            pid: 0,
+        }
     }
 
     #[test]
@@ -1328,7 +1760,8 @@ mod tests {
         let fs = make_fs(dir.path());
 
         // Fast path: directly manipulate the counter.
-        fs.next_inode.store(70_000, std::sync::atomic::Ordering::Relaxed);
+        fs.next_inode
+            .store(70_000, std::sync::atomic::Ordering::Relaxed);
 
         let path = dir.path().join("probe.txt");
         std::fs::write(&path, b"x").unwrap();
@@ -1362,5 +1795,57 @@ mod tests {
 
         assert_eq!(types["subdir"], DT_DIR as u32, "subdir must be DT_DIR");
         assert_eq!(types["file.txt"], DT_REG as u32, "file.txt must be DT_REG");
+    }
+
+    #[test]
+    fn test_virtiofs_windows_lookup_versioned_so_alias() {
+        let dir = TempDir::new().unwrap();
+        let lib_dir = dir.path().join("usr").join("lib").join("x86_64-linux-gnu");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        let real_lib = lib_dir.join("libcrypt.so.1.1.0");
+        std::fs::write(&real_lib, b"libcrypt").unwrap();
+
+        let fs = make_fs(dir.path());
+
+        let lib_entry = fs
+            .lookup(ctx(), ROOT_INODE, &CString::new("lib").unwrap())
+            .expect("lookup /lib alias");
+        let x86_entry = fs
+            .lookup(
+                ctx(),
+                lib_entry.inode,
+                &CString::new("x86_64-linux-gnu").unwrap(),
+            )
+            .expect("lookup x86_64-linux-gnu");
+        let soname_entry = fs
+            .lookup(ctx(), x86_entry.inode, &CString::new("libcrypt.so.1").unwrap())
+            .expect("lookup libcrypt.so.1 alias");
+
+        assert_eq!(soname_entry.attr.st_size, 8);
+        assert_eq!(fs.get_path(soname_entry.inode).unwrap(), real_lib);
+    }
+
+    #[test]
+    fn test_virtiofs_windows_lookup_usr_lib_multiarch_alias() {
+        let dir = TempDir::new().unwrap();
+        let lib_dir = dir.path().join("usr").join("lib").join("x86_64-linux-gnu");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        let real_lib = lib_dir.join("libcrypt.so.1.1.0");
+        std::fs::write(&real_lib, b"libcrypt").unwrap();
+
+        let fs = make_fs(dir.path());
+
+        let usr_entry = fs
+            .lookup(ctx(), ROOT_INODE, &CString::new("usr").unwrap())
+            .expect("lookup /usr");
+        let lib_entry = fs
+            .lookup(ctx(), usr_entry.inode, &CString::new("lib").unwrap())
+            .expect("lookup /usr/lib");
+        let soname_entry = fs
+            .lookup(ctx(), lib_entry.inode, &CString::new("libcrypt.so.1").unwrap())
+            .expect("lookup /usr/lib/libcrypt.so.1 alias");
+
+        assert_eq!(soname_entry.attr.st_size, 8);
+        assert_eq!(fs.get_path(soname_entry.inode).unwrap(), real_lib);
     }
 }

@@ -11,6 +11,8 @@ use kernel::cmdline::Cmdline;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
+#[cfg(target_os = "windows")]
+use std::fs::OpenOptions;
 #[cfg(not(target_os = "windows"))]
 use std::io::IsTerminal;
 use std::io::{self, Read};
@@ -31,13 +33,13 @@ use crate::device_manager::mmio::MMIODeviceManager;
 use crate::resources::{
     DefaultVirtioConsoleConfig, PortConfig, TsiFlags, VirtioConsoleConfigMode, VmResources,
 };
+#[cfg(target_os = "windows")]
+use crate::vmm_config::block_windows::BlockWindowsBuilder;
 use crate::vmm_config::external_kernel::{ExternalKernel, KernelFormat};
 #[cfg(feature = "net")]
 use crate::vmm_config::net::NetBuilder;
 #[cfg(target_os = "windows")]
 use crate::vmm_config::net_windows::NetWindowsBuilder;
-#[cfg(target_os = "windows")]
-use crate::vmm_config::block_windows::BlockWindowsBuilder;
 #[cfg(target_arch = "x86_64")]
 use devices::legacy::Cmos;
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
@@ -78,6 +80,8 @@ use crate::vstate::KvmContext;
 #[cfg(all(target_os = "linux", feature = "tee"))]
 use crate::vstate::MeasuredRegion;
 use crate::vstate::{Error as VstateError, Vcpu, VcpuConfig, Vm};
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+use crate::windows::interrupts::{PendingInterrupt, PendingInterruptQueue};
 use arch::{ArchMemoryInfo, InitrdConfig};
 use device_manager::shm::ShmManager;
 #[cfg(feature = "gpu")]
@@ -119,6 +123,28 @@ impl std::io::Write for CrtFdWriter {
         Ok(())
     }
 }
+
+#[cfg(target_os = "windows")]
+fn open_windows_console_output_file(path: &std::path::Path) -> io::Result<File> {
+    OpenOptions::new().create(true).append(true).open(path)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_attach_implicit_virtio_console() -> bool {
+    std::env::var("LIBKRUN_WINDOWS_IMPLICIT_VIRTIO_CONSOLE")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_attach_implicit_virtio_console() -> bool {
+    true
+}
 #[cfg(target_arch = "x86_64")]
 use linux_loader::loader::{self, KernelLoader};
 #[cfg(not(target_os = "windows"))]
@@ -153,18 +179,189 @@ static EDK2_BINARY: &[u8] = include_bytes!("../../../edk2/KRUN_EFI.silent.fd");
 #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
 struct WhpxIrqChip {
     partition: windows::Win32::System::Hypervisor::WHV_PARTITION_HANDLE,
+    vcpu_count: u32,
     irq_pending_evt: Arc<utils::eventfd::EventFd>,
+    pending_interrupt: PendingInterruptQueue,
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+fn windows_irq_debug_log(message: impl AsRef<str>) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ENABLED.get_or_init(|| {
+        std::env::var("LIBKRUN_WINDOWS_VERBOSE_DEBUG")
+            .or_else(|_| std::env::var("LIBKRUN_WINDOWS_IO_DEBUG"))
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+    }) {
+        return;
+    }
+    use std::io::Write;
+
+    for path in [
+        r"C:\Users\18770\.a3s\libkrun-whpx-io-current.log",
+        "tmp_whpx_io.log",
+    ] {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{}", message.as_ref());
+        }
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+fn windows_force_pic_irq0_fixed() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("LIBKRUN_WHPX_PIC_IRQ0_FIXED")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+fn windows_pic_fixed_pending_interruption() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("LIBKRUN_WHPX_PIC_FIXED_INJECT")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "pending-interruption" | "pending-interrupt" | "register"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+fn windows_pic_fixed_builder_request_interrupt() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("LIBKRUN_WHPX_PIC_FIXED_BUILDER_REQUEST_INTERRUPT")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+fn windows_skip_pic_fixed_ack() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("LIBKRUN_WHPX_SKIP_PIC_FIXED_ACK")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+fn windows_skip_cancel_for_halted_irq_delivery() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("LIBKRUN_WHPX_SKIP_CANCEL_ON_HLT_IRQ")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowsPicFixedBuilderDirectMode {
+    PendingInterruption,
+    PendingEventExtInt,
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+fn windows_pic_fixed_builder_direct_mode() -> WindowsPicFixedBuilderDirectMode {
+    static VALUE: std::sync::OnceLock<WindowsPicFixedBuilderDirectMode> =
+        std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("LIBKRUN_WHPX_PIC_FIXED_BUILDER_DIRECT_MODE")
+            .ok()
+            .map(|value| match value.trim().to_ascii_lowercase().as_str() {
+                "pending-event" | "pending-event-extint" | "event" | "extint" => {
+                    WindowsPicFixedBuilderDirectMode::PendingEventExtInt
+                }
+                _ => WindowsPicFixedBuilderDirectMode::PendingInterruption,
+            })
+            .unwrap_or(WindowsPicFixedBuilderDirectMode::PendingInterruption)
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_kernel_cmdline_append() -> Option<String> {
+    std::env::var("LIBKRUN_WINDOWS_KERNEL_CMDLINE_APPEND")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+fn make_whpx_interrupt_control_bitfield(
+    interrupt_type: windows::Win32::System::Hypervisor::WHV_INTERRUPT_TYPE,
+    destination_mode: windows::Win32::System::Hypervisor::WHV_INTERRUPT_DESTINATION_MODE,
+    trigger_mode: windows::Win32::System::Hypervisor::WHV_INTERRUPT_TRIGGER_MODE,
+) -> u64 {
+    (interrupt_type.0 as u64)
+        | ((destination_mode.0 as u64) << 8)
+        | ((trigger_mode.0 as u64) << 12)
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+#[derive(Clone, Copy, Debug)]
+enum WhpxInterruptRoute {
+    IoApic {
+        vector: u32,
+        destination_mode: windows::Win32::System::Hypervisor::WHV_INTERRUPT_DESTINATION_MODE,
+        trigger_mode: windows::Win32::System::Hypervisor::WHV_INTERRUPT_TRIGGER_MODE,
+        interrupt_type: windows::Win32::System::Hypervisor::WHV_INTERRUPT_TYPE,
+        destination: u32,
+    },
+    PicExtIntRequest {
+        irq: u8,
+        vector: u8,
+    },
+    FallbackFixed {
+        vector: u32,
+    },
+    Unresolved,
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
 impl WhpxIrqChip {
     fn new(
         partition: windows::Win32::System::Hypervisor::WHV_PARTITION_HANDLE,
+        vcpu_count: u32,
         irq_pending_evt: Arc<utils::eventfd::EventFd>,
+        pending_interrupt: PendingInterruptQueue,
     ) -> Self {
         Self {
             partition,
+            vcpu_count,
             irq_pending_evt,
+            pending_interrupt,
         }
     }
 
@@ -172,6 +369,690 @@ impl WhpxIrqChip {
         // Legacy ISA IRQ vectors are remapped starting at 0x20.
         0x20 + irq_line
     }
+
+    fn resolve_interrupt_route(irq_line: u32) -> WhpxInterruptRoute {
+        use windows::Win32::System::Hypervisor::{
+            WHvX64InterruptDestinationModeLogical, WHvX64InterruptDestinationModePhysical,
+            WHvX64InterruptTriggerModeEdge, WHvX64InterruptTriggerModeLevel,
+            WHvX64InterruptTypeFixed, WHvX64InterruptTypeLowestPriority,
+        };
+
+        if let Some(route) = devices::legacy::windows_apic_stub::query_route(irq_line) {
+            if !route.masked && route.vector != 0 {
+                return WhpxInterruptRoute::IoApic {
+                    vector: u32::from(route.vector),
+                    destination_mode: if route.destination_mode_logical {
+                        WHvX64InterruptDestinationModeLogical
+                    } else {
+                        WHvX64InterruptDestinationModePhysical
+                    },
+                    trigger_mode: if route.trigger_mode_level {
+                        WHvX64InterruptTriggerModeLevel
+                    } else {
+                        WHvX64InterruptTriggerModeEdge
+                    },
+                    interrupt_type: if route.delivery_mode == 1 {
+                        WHvX64InterruptTypeLowestPriority
+                    } else {
+                        WHvX64InterruptTypeFixed
+                    },
+                    destination: u32::from(route.destination),
+                };
+            }
+        }
+
+        if irq_line < 16 {
+            if let Some(vector) = devices::legacy::windows_pic_stub::query_irq_vector(irq_line as u8)
+            {
+                return WhpxInterruptRoute::PicExtIntRequest {
+                    irq: irq_line as u8,
+                    vector,
+                };
+            }
+            return WhpxInterruptRoute::Unresolved;
+        }
+
+        WhpxInterruptRoute::FallbackFixed {
+            vector: Self::irq_to_vector(irq_line),
+        }
+    }
+
+    fn cancel_blocked_vcpu_runs(&self) {
+        use windows::Win32::System::Hypervisor::WHvCancelRunVirtualProcessor;
+
+        for vcpu_index in 0..self.vcpu_count {
+            let result = unsafe { WHvCancelRunVirtualProcessor(self.partition, vcpu_index, 0) };
+
+            match result {
+                Ok(()) => windows_irq_debug_log(format!("[IRQ] canceled_run vcpu={}", vcpu_index)),
+                Err(e) => windows_irq_debug_log(format!(
+                    "[IRQ] canceled_run_failed vcpu={} hr=0x{:x}",
+                    vcpu_index,
+                    e.code().0 as u32
+                )),
+            }
+        }
+    }
+
+    fn replay_deferred_pic_interrupt(&self, irq_line: u32) -> Result<bool, devices::Error> {
+        use windows::Win32::System::Hypervisor::{
+            WHvGetVirtualProcessorRegisters, WHvX64RegisterRflags, WHvX64RegisterRip,
+            WHV_REGISTER_NAME, WHV_REGISTER_VALUE,
+        };
+
+        let pending_vector = {
+            let pending_interrupt = self.pending_interrupt.lock().unwrap();
+            pending_interrupt.front().and_then(|pending| match *pending {
+                PendingInterrupt::PicExtInt { irq, vector } => Some((irq, vector)),
+                PendingInterrupt::PicFixed { irq, vector } => Some((irq, vector)),
+            })
+        };
+
+        let Some((pending_irq, vector)) = pending_vector else {
+            return Ok(false);
+        };
+
+        let reg_names: [WHV_REGISTER_NAME; 2] = [WHvX64RegisterRip, WHvX64RegisterRflags];
+        let mut reg_values = [WHV_REGISTER_VALUE::default(); 2];
+
+        unsafe {
+            WHvGetVirtualProcessorRegisters(
+                self.partition,
+                0,
+                reg_names.as_ptr(),
+                reg_names.len() as u32,
+                reg_values.as_mut_ptr(),
+            )
+            .map_err(|e| {
+                devices::Error::FailedSignalingUsedQueue(io::Error::other(format!(
+                    "Failed to read WHPX vCPU state for deferred IRQ {} (pending IRQ {}) replay: {}",
+                    irq_line, pending_irq, e
+                )))
+            })?;
+        }
+
+        let (rip, rflags) = unsafe { (reg_values[0].Reg64, reg_values[1].Reg64) };
+        let interrupt_enabled = (rflags & (1 << 9)) != 0;
+
+        if !interrupt_enabled {
+            windows_irq_debug_log(format!(
+                "[IRQ] deferred_wait irq={} pending_irq={} vector=0x{:02x} rip=0x{:016x} rflags=0x{:016x}",
+                irq_line, pending_irq, vector, rip, rflags
+            ));
+            return Ok(false);
+        }
+
+        windows_irq_debug_log(format!(
+            "[IRQ] deferred_replay irq={} pending_irq={} vector=0x{:02x} rip=0x{:016x} rflags=0x{:016x}",
+            irq_line, pending_irq, vector, rip, rflags
+        ));
+        self.cancel_blocked_vcpu_runs();
+        let _ = self.irq_pending_evt.write(1);
+        Ok(true)
+    }
+
+    fn pending_interrupt_slots_busy(&self) -> Option<(bool, bool, u64)> {
+        use windows::Win32::System::Hypervisor::{
+            WHvGetVirtualProcessorRegisters, WHvRegisterInternalActivityState,
+            WHvRegisterPendingEvent, WHvRegisterPendingInterruption, WHV_REGISTER_NAME,
+            WHV_REGISTER_VALUE,
+        };
+
+        let reg_names: [WHV_REGISTER_NAME; 3] = [
+            WHvRegisterPendingInterruption,
+            WHvRegisterPendingEvent,
+            WHvRegisterInternalActivityState,
+        ];
+        let mut reg_values = [WHV_REGISTER_VALUE::default(); 3];
+        let result = unsafe {
+            WHvGetVirtualProcessorRegisters(
+                self.partition,
+                0,
+                reg_names.as_ptr(),
+                reg_names.len() as u32,
+                reg_values.as_mut_ptr(),
+            )
+        };
+
+        match result {
+            Ok(()) => {
+                let pending_interrupt_busy =
+                    unsafe { (reg_values[0].PendingInterruption.AsUINT64 & 1) != 0 };
+                let pending_event_busy =
+                    unsafe { (reg_values[1].ExtIntEvent.AsUINT128.Anonymous.Low64 & 1) != 0 };
+                let internal_activity = unsafe { reg_values[2].InternalActivity.AsUINT64 };
+                Some((pending_interrupt_busy, pending_event_busy, internal_activity))
+            }
+            Err(e) => {
+                windows_irq_debug_log(format!(
+                    "[IRQ] pending_slot_probe_failed hr=0x{:x}",
+                    e.code().0 as u32
+                ));
+                None
+            }
+        }
+    }
+
+    fn should_cancel_halted_pending_event_duplicate() -> bool {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let count = COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+        count % 4 == 0
+    }
+
+    fn should_cancel_after_irq_delivery(&self) -> bool {
+        if !windows_skip_cancel_for_halted_irq_delivery() {
+            return true;
+        }
+
+        match self.pending_interrupt_slots_busy() {
+            Some((_, _, internal_activity)) if (internal_activity & 0x2) != 0 => {
+                windows_irq_debug_log(format!(
+                    "[IRQ] skip_cancel_on_hlt internal_activity=0x{:x}",
+                    internal_activity
+                ));
+                false
+            }
+            Some((_, _, internal_activity)) => {
+                windows_irq_debug_log(format!(
+                    "[IRQ] keep_cancel_not_hlt internal_activity=0x{:x}",
+                    internal_activity
+                ));
+                true
+            }
+            None => true,
+        }
+    }
+
+    fn kick_after_queue_update(&self, debug_label: &str) {
+        if self.should_cancel_after_irq_delivery() {
+            windows_irq_debug_log(format!("[IRQ] {} action=cancel", debug_label));
+            self.cancel_blocked_vcpu_runs();
+        } else {
+            windows_irq_debug_log(format!("[IRQ] {} action=event-only", debug_label));
+        }
+        let _ = self.irq_pending_evt.write(1);
+    }
+
+    fn dump_vcpu_irq_state(&self, label: &str, irq_line: u32, route: &WhpxInterruptRoute) {
+        use windows::Win32::System::Hypervisor::{
+            WHvGetVirtualProcessorRegisters, WHvX64RegisterDeliverabilityNotifications,
+            WHvRegisterInterruptState, WHvRegisterPendingEvent, WHvRegisterPendingInterruption,
+            WHvX64RegisterApicBase, WHvX64RegisterApicLvtLint0, WHvX64RegisterApicLvtLint1,
+            WHvX64RegisterApicSpurious, WHvX64RegisterApicTpr, WHvX64RegisterCr8,
+            WHvX64RegisterRflags, WHvX64RegisterRip, WHV_REGISTER_NAME, WHV_REGISTER_VALUE,
+        };
+
+        let core_reg_names: [WHV_REGISTER_NAME; 6] = [
+            WHvX64RegisterRip,
+            WHvX64RegisterRflags,
+            WHvRegisterInterruptState,
+            WHvRegisterPendingInterruption,
+            WHvRegisterPendingEvent,
+            WHvX64RegisterDeliverabilityNotifications,
+        ];
+        let mut core_reg_values = [WHV_REGISTER_VALUE::default(); 6];
+
+        unsafe {
+            match WHvGetVirtualProcessorRegisters(
+                self.partition,
+                0,
+                core_reg_names.as_ptr(),
+                core_reg_names.len() as u32,
+                core_reg_values.as_mut_ptr(),
+            ) {
+                Ok(()) => {
+                    let pending_event = core_reg_values[4].ExtIntEvent.AsUINT128.Anonymous;
+                    windows_irq_debug_log(format!(
+                        "[IRQSTATE] label={} irq={} route={:?} rip=0x{:016x} rflags=0x{:016x} interrupt_state=0x{:016x} pending_interrupt=0x{:016x} pending_event_hi=0x{:016x} pending_event_lo=0x{:016x} deliverability=0x{:016x}",
+                        label,
+                        irq_line,
+                        route,
+                        core_reg_values[0].Reg64,
+                        core_reg_values[1].Reg64,
+                        core_reg_values[2].InterruptState.AsUINT64,
+                        core_reg_values[3].PendingInterruption.AsUINT64,
+                        pending_event.High64,
+                        pending_event.Low64,
+                        core_reg_values[5].DeliverabilityNotifications.AsUINT64,
+                    ));
+                }
+                Err(e) => windows_irq_debug_log(format!(
+                    "[IRQSTATE] label={} irq={} route={:?} core_read_failed hr=0x{:x}",
+                    label,
+                    irq_line,
+                    route,
+                    e.code().0 as u32
+                )),
+            }
+
+            for (name, reg_name) in [
+                ("apic_base", WHvX64RegisterApicBase),
+                ("cr8", WHvX64RegisterCr8),
+                ("apic_tpr", WHvX64RegisterApicTpr),
+                ("lint0", WHvX64RegisterApicLvtLint0),
+                ("lint1", WHvX64RegisterApicLvtLint1),
+                ("apic_spurious", WHvX64RegisterApicSpurious),
+            ] {
+                let mut value = [WHV_REGISTER_VALUE::default(); 1];
+                match WHvGetVirtualProcessorRegisters(
+                    self.partition,
+                    0,
+                    [reg_name].as_ptr(),
+                    1,
+                    value.as_mut_ptr(),
+                ) {
+                    Ok(()) => windows_irq_debug_log(format!(
+                        "[IRQSTATE] label={} irq={} route={:?} {}=0x{:016x}",
+                        label,
+                        irq_line,
+                        route,
+                        name,
+                        value[0].Reg64
+                    )),
+                    Err(e) => windows_irq_debug_log(format!(
+                        "[IRQSTATE] label={} irq={} route={:?} {}_read_failed hr=0x{:x}",
+                        label,
+                        irq_line,
+                        route,
+                        name,
+                        e.code().0 as u32
+                    )),
+                }
+            }
+        }
+    }
+
+    fn arm_interrupt_window_notification(
+        &self,
+        irq_line: u32,
+        vector: u8,
+        route: &WhpxInterruptRoute,
+    ) -> Result<(), devices::Error> {
+        use windows::Win32::System::Hypervisor::{
+            WHvGetVirtualProcessorRegisters, WHvSetVirtualProcessorRegisters,
+            WHvX64RegisterDeliverabilityNotifications, WHV_REGISTER_VALUE,
+            WHV_X64_DELIVERABILITY_NOTIFICATIONS_REGISTER,
+        };
+
+        let priority = u64::from(vector >> 4) & 0xf;
+        let notifications = WHV_X64_DELIVERABILITY_NOTIFICATIONS_REGISTER {
+            AsUINT64: (1 << 1) | (priority << 2),
+        };
+        let reg_name = [WHvX64RegisterDeliverabilityNotifications];
+        let reg_value = [WHV_REGISTER_VALUE {
+            DeliverabilityNotifications: notifications,
+        }];
+
+        unsafe {
+            WHvSetVirtualProcessorRegisters(
+                self.partition,
+                0,
+                reg_name.as_ptr(),
+                1,
+                reg_value.as_ptr(),
+            )
+            .map_err(|e| {
+                devices::Error::FailedSignalingUsedQueue(io::Error::other(format!(
+                    "Failed to arm WHPX interrupt window for irq {} route {:?}: {}",
+                    irq_line, route, e
+                )))
+            })?;
+
+            let mut readback = [WHV_REGISTER_VALUE::default(); 1];
+            match WHvGetVirtualProcessorRegisters(
+                self.partition,
+                0,
+                reg_name.as_ptr(),
+                1,
+                readback.as_mut_ptr(),
+            ) {
+                Ok(()) => windows_irq_debug_log(format!(
+                    "[IRQ] interrupt_window_armed irq={} route={:?} vector=0x{:02x} readback=0x{:016x}",
+                    irq_line,
+                    route,
+                    vector,
+                    readback[0].DeliverabilityNotifications.AsUINT64
+                )),
+                Err(e) => windows_irq_debug_log(format!(
+                    "[IRQ] interrupt_window_arm_readback_failed irq={} route={:?} vector=0x{:02x} hr=0x{:x}",
+                    irq_line,
+                    route,
+                    vector,
+                    e.code().0 as u32
+                )),
+            }
+        }
+
+        Ok(())
+    }
+
+    fn inject_pending_interruption_register(
+        &self,
+        irq_line: u32,
+        irq: u8,
+        vector: u8,
+    ) -> Result<bool, devices::Error> {
+        use windows::Win32::System::Hypervisor::{
+            WHvGetVirtualProcessorRegisters, WHvRegisterInternalActivityState,
+            WHvRegisterPendingInterruption, WHvSetVirtualProcessorRegisters,
+            WHvX64RegisterRflags, WHvX64RegisterRip, WHV_REGISTER_NAME, WHV_REGISTER_VALUE,
+        };
+
+        let reg_name = [WHvRegisterPendingInterruption];
+        let mut current = [WHV_REGISTER_VALUE::default(); 1];
+        unsafe {
+            WHvGetVirtualProcessorRegisters(
+                self.partition,
+                0,
+                reg_name.as_ptr(),
+                1,
+                current.as_mut_ptr(),
+            )
+            .map_err(|e| {
+                devices::Error::FailedSignalingUsedQueue(io::Error::other(format!(
+                    "Failed to read WHPX pending interruption state for irq {}: {}",
+                    irq_line, e
+                )))
+            })?;
+        }
+
+        let current_bits = unsafe { current[0].PendingInterruption.AsUINT64 };
+        if (current_bits & 1) != 0 {
+            windows_irq_debug_log(format!(
+                "[IRQ] pending_interrupt_busy irq={} pic_irq={} vector=0x{:02x} bits=0x{:016x}",
+                irq_line, irq, vector, current_bits
+            ));
+            return Ok(true);
+        }
+
+        let vcpu_reg_names: [WHV_REGISTER_NAME; 3] = [
+            WHvX64RegisterRip,
+            WHvX64RegisterRflags,
+            WHvRegisterInternalActivityState,
+        ];
+        let mut vcpu_regs = [WHV_REGISTER_VALUE::default(); 3];
+        unsafe {
+            WHvGetVirtualProcessorRegisters(
+                self.partition,
+                0,
+                vcpu_reg_names.as_ptr(),
+                vcpu_reg_names.len() as u32,
+                vcpu_regs.as_mut_ptr(),
+            )
+            .map_err(|e| {
+                devices::Error::FailedSignalingUsedQueue(io::Error::other(format!(
+                    "Failed to read WHPX vCPU state for pending interruption on irq {}: {}",
+                    irq_line, e
+                )))
+            })?;
+        }
+
+        let rip = unsafe { vcpu_regs[0].Reg64 };
+        let rflags = unsafe { vcpu_regs[1].Reg64 };
+        let internal_activity = unsafe { vcpu_regs[2].InternalActivity.AsUINT64 };
+        if (rflags & (1 << 9)) == 0 {
+            windows_irq_debug_log(format!(
+                "[IRQ] pending_interrupt_wait_if0 irq={} pic_irq={} vector=0x{:02x} rip=0x{:016x} rflags=0x{:016x}",
+                irq_line, irq, vector, rip, rflags
+            ));
+            return Ok(false);
+        }
+        if (internal_activity & 0x2) == 0 {
+            windows_irq_debug_log(format!(
+                "[IRQ] pending_interrupt_wait_hlt irq={} pic_irq={} vector=0x{:02x} rip=0x{:016x} rflags=0x{:016x} internal_activity=0x{:016x}",
+                irq_line, irq, vector, rip, rflags, internal_activity
+            ));
+            return Ok(false);
+        }
+
+        let mut reg_value = [WHV_REGISTER_VALUE::default(); 1];
+        reg_value[0].PendingInterruption.AsUINT64 = 1 | (u64::from(vector) << 16);
+        unsafe {
+            WHvSetVirtualProcessorRegisters(
+                self.partition,
+                0,
+                reg_name.as_ptr(),
+                1,
+                reg_value.as_ptr(),
+            )
+            .map_err(|e| {
+                devices::Error::FailedSignalingUsedQueue(io::Error::other(format!(
+                    "Failed to set WHPX pending interruption for irq {}: {}",
+                    irq_line, e
+                )))
+            })?;
+        }
+
+        let mut post = [WHV_REGISTER_VALUE::default(); 1];
+        unsafe {
+            let _ = WHvGetVirtualProcessorRegisters(
+                self.partition,
+                0,
+                reg_name.as_ptr(),
+                1,
+                post.as_mut_ptr(),
+            );
+        }
+        let post_bits = unsafe { post[0].PendingInterruption.AsUINT64 };
+        windows_irq_debug_log(format!(
+            "[IRQ] pending_interrupt_set irq={} pic_irq={} vector=0x{:02x} post=0x{:016x}",
+            irq_line, irq, vector, post_bits
+        ));
+        if self.should_cancel_after_irq_delivery() {
+            self.cancel_blocked_vcpu_runs();
+        }
+        let _ = self.irq_pending_evt.write(1);
+        Ok(true)
+    }
+
+    fn request_pic_fixed_interrupt_direct(
+        &self,
+        irq_line: u32,
+        irq: u8,
+        vector: u8,
+    ) -> Result<bool, devices::Error> {
+        use windows::Win32::System::Hypervisor::{
+            WHvRequestInterrupt, WHvX64InterruptDestinationModePhysical,
+            WHvX64InterruptTriggerModeEdge, WHvX64InterruptTypeFixed, WHV_INTERRUPT_CONTROL,
+        };
+
+        let interrupt = WHV_INTERRUPT_CONTROL {
+            _bitfield: make_whpx_interrupt_control_bitfield(
+                WHvX64InterruptTypeFixed,
+                WHvX64InterruptDestinationModePhysical,
+                WHvX64InterruptTriggerModeEdge,
+            ),
+            Destination: 0,
+            Vector: u32::from(vector),
+        };
+        windows_irq_debug_log(format!(
+            "[IRQ] builder_direct_request_begin irq={} pic_irq={} vector=0x{:02x} dest=0x{:x} type=0x{:x}",
+            irq_line,
+            irq,
+            vector,
+            interrupt.Destination,
+            interrupt._bitfield & 0xff
+        ));
+
+        unsafe {
+            WHvRequestInterrupt(
+                self.partition,
+                &interrupt,
+                std::mem::size_of::<WHV_INTERRUPT_CONTROL>() as u32,
+            )
+            .map_err(|e| {
+                devices::Error::FailedSignalingUsedQueue(io::Error::other(format!(
+                    "Failed direct builder WHPX fixed interrupt request for irq {} vector 0x{:02x}: {}",
+                    irq_line, vector, e
+                )))
+            })?;
+        }
+
+        let skipped_ack = windows_skip_pic_fixed_ack();
+        if !skipped_ack {
+            devices::legacy::windows_pic_stub::acknowledge_irq(irq);
+        }
+
+        windows_irq_debug_log(format!(
+            "[IRQ] builder_direct_request_ok irq={} pic_irq={} vector=0x{:02x} skipped_ack={}",
+            irq_line, irq, vector, skipped_ack
+        ));
+        if self.should_cancel_after_irq_delivery() {
+            self.cancel_blocked_vcpu_runs();
+        }
+        let _ = self.irq_pending_evt.write(1);
+        Ok(true)
+    }
+
+    fn inject_pending_event_extint_register(
+        &self,
+        irq_line: u32,
+        irq: u8,
+        vector: u8,
+    ) -> Result<bool, devices::Error> {
+        use windows::Win32::System::Hypervisor::{
+            WHvGetVirtualProcessorRegisters, WHvRegisterInternalActivityState,
+            WHvRegisterPendingEvent, WHvRegisterPendingInterruption,
+            WHvSetVirtualProcessorRegisters, WHvX64PendingEventExtInt, WHvX64RegisterRflags,
+            WHvX64RegisterRip, WHV_REGISTER_NAME, WHV_REGISTER_VALUE,
+            WHV_X64_PENDING_EXT_INT_EVENT,
+        };
+
+        windows_irq_debug_log(format!(
+            "[IRQ] pending_event_probe_begin irq={} pic_irq={} vector=0x{:02x}",
+            irq_line, irq, vector
+        ));
+        let pending_reg_names: [WHV_REGISTER_NAME; 2] =
+            [WHvRegisterPendingInterruption, WHvRegisterPendingEvent];
+        let mut pending_regs = [WHV_REGISTER_VALUE::default(); 2];
+        unsafe {
+            WHvGetVirtualProcessorRegisters(
+                self.partition,
+                0,
+                pending_reg_names.as_ptr(),
+                pending_reg_names.len() as u32,
+                pending_regs.as_mut_ptr(),
+            )
+            .map_err(|e| {
+                devices::Error::FailedSignalingUsedQueue(io::Error::other(format!(
+                    "Failed to read WHPX pending event state for irq {}: {}",
+                    irq_line, e
+                )))
+            })?;
+        }
+
+        let pending_interrupt_bits = unsafe { pending_regs[0].PendingInterruption.AsUINT64 };
+        let pending_event_bits = unsafe { pending_regs[1].ExtIntEvent.AsUINT128.Anonymous.Low64 };
+        windows_irq_debug_log(format!(
+            "[IRQ] pending_event_probe_pending irq={} pic_irq={} vector=0x{:02x} pending_interrupt=0x{:016x} pending_event_lo=0x{:016x}",
+            irq_line, irq, vector, pending_interrupt_bits, pending_event_bits
+        ));
+        if (pending_interrupt_bits & 1) != 0 || (pending_event_bits & 1) != 0 {
+            windows_irq_debug_log(format!(
+                "[IRQ] pending_event_busy irq={} pic_irq={} vector=0x{:02x} pending_interrupt=0x{:016x} pending_event_lo=0x{:016x}",
+                irq_line, irq, vector, pending_interrupt_bits, pending_event_bits
+            ));
+            return Ok(true);
+        }
+
+        let vcpu_reg_names: [WHV_REGISTER_NAME; 3] = [
+            WHvX64RegisterRip,
+            WHvX64RegisterRflags,
+            WHvRegisterInternalActivityState,
+        ];
+        let mut vcpu_regs = [WHV_REGISTER_VALUE::default(); 3];
+        unsafe {
+            WHvGetVirtualProcessorRegisters(
+                self.partition,
+                0,
+                vcpu_reg_names.as_ptr(),
+                vcpu_reg_names.len() as u32,
+                vcpu_regs.as_mut_ptr(),
+            )
+            .map_err(|e| {
+                devices::Error::FailedSignalingUsedQueue(io::Error::other(format!(
+                    "Failed to read WHPX vCPU state for pending event on irq {}: {}",
+                    irq_line, e
+                )))
+            })?;
+        }
+
+        let rip = unsafe { vcpu_regs[0].Reg64 };
+        let rflags = unsafe { vcpu_regs[1].Reg64 };
+        let internal_activity = unsafe { vcpu_regs[2].InternalActivity.AsUINT64 };
+        windows_irq_debug_log(format!(
+            "[IRQ] pending_event_probe_vcpu irq={} pic_irq={} vector=0x{:02x} rip=0x{:016x} rflags=0x{:016x} internal_activity=0x{:016x}",
+            irq_line, irq, vector, rip, rflags, internal_activity
+        ));
+        if (rflags & (1 << 9)) == 0 {
+            windows_irq_debug_log(format!(
+                "[IRQ] pending_event_wait_if0 irq={} pic_irq={} vector=0x{:02x} rip=0x{:016x} rflags=0x{:016x}",
+                irq_line, irq, vector, rip, rflags
+            ));
+            return Ok(false);
+        }
+        if (internal_activity & 0x2) == 0 {
+            windows_irq_debug_log(format!(
+                "[IRQ] pending_event_wait_hlt irq={} pic_irq={} vector=0x{:02x} rip=0x{:016x} rflags=0x{:016x} internal_activity=0x{:016x}",
+                irq_line, irq, vector, rip, rflags, internal_activity
+            ));
+            return Ok(false);
+        }
+
+        let mut ext_int_event = WHV_X64_PENDING_EXT_INT_EVENT::default();
+        unsafe {
+            ext_int_event.Anonymous._bitfield =
+                1 | ((WHvX64PendingEventExtInt.0 as u64) << 1) | (u64::from(vector) << 8);
+            ext_int_event.Anonymous.Reserved2 = 0;
+        }
+        let reg_name = [WHvRegisterPendingEvent];
+        let reg_value = [WHV_REGISTER_VALUE {
+            Reg128: unsafe { ext_int_event.AsUINT128 },
+        }];
+        windows_irq_debug_log(format!(
+            "[IRQ] pending_event_write_begin irq={} pic_irq={} vector=0x{:02x} rip=0x{:016x}",
+            irq_line, irq, vector, rip
+        ));
+        unsafe {
+            WHvSetVirtualProcessorRegisters(
+                self.partition,
+                0,
+                reg_name.as_ptr(),
+                1,
+                reg_value.as_ptr(),
+            )
+            .map_err(|e| {
+                devices::Error::FailedSignalingUsedQueue(io::Error::other(format!(
+                    "Failed to set WHPX pending event for irq {}: {}",
+                    irq_line, e
+                )))
+            })?;
+        }
+
+        let mut post = [WHV_REGISTER_VALUE::default(); 1];
+        unsafe {
+            let _ = WHvGetVirtualProcessorRegisters(
+                self.partition,
+                0,
+                reg_name.as_ptr(),
+                1,
+                post.as_mut_ptr(),
+            );
+        }
+        let post_bits = unsafe { post[0].ExtIntEvent.AsUINT128.Anonymous.Low64 };
+        windows_irq_debug_log(format!(
+            "[IRQ] pending_event_set irq={} pic_irq={} vector=0x{:02x} post_lo=0x{:016x}",
+            irq_line, irq, vector, post_bits
+        ));
+        if self.should_cancel_after_irq_delivery() {
+            self.cancel_blocked_vcpu_runs();
+        }
+        let _ = self.irq_pending_evt.write(1);
+        Ok(true)
+    }
+
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
@@ -192,8 +1073,10 @@ impl IrqChipT for WhpxIrqChip {
         irq_line: Option<u32>,
         _interrupt_evt: Option<&EventFd>,
     ) -> Result<(), devices::Error> {
+        use std::sync::atomic::{AtomicU64, Ordering};
         use windows::Win32::System::Hypervisor::{
-            WHvRequestInterrupt, WHvX64InterruptDestinationModePhysical,
+            WHvRequestInterrupt, WHvX64InterruptDestinationModeLogical,
+            WHvX64InterruptDestinationModePhysical,
             WHvX64InterruptTriggerModeEdge, WHvX64InterruptTypeFixed, WHV_INTERRUPT_CONTROL,
         };
 
@@ -204,15 +1087,326 @@ impl IrqChipT for WhpxIrqChip {
             ))
         })?;
 
-        let interrupt = WHV_INTERRUPT_CONTROL {
-            _bitfield: (WHvX64InterruptTypeFixed.0 as u64)
-                | ((WHvX64InterruptDestinationModePhysical.0 as u64) << 8)
-                | ((WHvX64InterruptTriggerModeEdge.0 as u64) << 9),
-            Destination: 0,
-            Vector: Self::irq_to_vector(irq_line),
+        if irq_line < 16 {
+            devices::legacy::windows_pic_stub::raise_irq(irq_line as u8);
+        }
+
+        let route = Self::resolve_interrupt_route(irq_line);
+
+        if irq_line == 0 {
+            static WAIT_COUNT: AtomicU64 = AtomicU64::new(0);
+            static IOAPIC_COUNT: AtomicU64 = AtomicU64::new(0);
+            match &route {
+                WhpxInterruptRoute::Unresolved => {
+                    let n = WAIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n <= 20 || n % 100 == 0 {
+                        windows_irq_debug_log(format!("[IRQ0] unresolved count={}", n));
+                    }
+                }
+                WhpxInterruptRoute::IoApic {
+                    vector,
+                    destination,
+                    ..
+                } => {
+                    let n = IOAPIC_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n <= 20 || n % 100 == 0 {
+                        windows_irq_debug_log(format!(
+                            "[IRQ0] ioapic vector=0x{:02x} dest=0x{:x} count={}",
+                            vector, destination, n
+                        ));
+                    }
+                }
+                WhpxInterruptRoute::PicExtIntRequest { irq, vector } => {
+                    windows_irq_debug_log(format!(
+                        "[IRQ0] pic-extint-req irq={} vector=0x{:02x}",
+                        irq, vector
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        if let WhpxInterruptRoute::Unresolved = route {
+            if irq_line == 0 && self.replay_deferred_pic_interrupt(irq_line)? {
+                windows_irq_debug_log(format!(
+                    "[IRQ] unresolved_replayed irq={} route={}",
+                    irq_line, "pic-deferred"
+                ));
+            }
+            return Ok(());
+        }
+
+        let request_kind = match &route {
+            WhpxInterruptRoute::IoApic { .. } => "ioapic",
+            WhpxInterruptRoute::PicExtIntRequest { .. } => "pic-extint",
+            WhpxInterruptRoute::FallbackFixed { .. } => "fallback-fixed",
+            WhpxInterruptRoute::Unresolved => "unresolved",
+        };
+
+        if let WhpxInterruptRoute::PicExtIntRequest { irq, vector } = route {
+            if irq == 0 && windows_force_pic_irq0_fixed() {
+                windows_irq_debug_log(format!(
+                    "[IRQ] pic_fixed_strategy irq={} pic_irq={} route={} vector=0x{:02x} builder_direct_enabled={} builder_direct_mode={:?} builder_request_interrupt={}",
+                    irq_line,
+                    irq,
+                    request_kind,
+                    vector,
+                    windows_pic_fixed_pending_interruption(),
+                    windows_pic_fixed_builder_direct_mode(),
+                    windows_pic_fixed_builder_request_interrupt()
+                ));
+                self.dump_vcpu_irq_state("pic-fixed-before", irq_line, &route);
+                if windows_pic_fixed_builder_request_interrupt()
+                    && self.request_pic_fixed_interrupt_direct(irq_line, irq, vector)?
+                {
+                    windows_irq_debug_log(format!(
+                        "[IRQ] direct_builder_request irq={} pic_irq={} route={} vector=0x{:02x}",
+                        irq_line, irq, request_kind, vector
+                    ));
+                    return Ok(());
+                }
+                let direct_builder_injected = if windows_pic_fixed_pending_interruption() {
+                    match windows_pic_fixed_builder_direct_mode() {
+                        WindowsPicFixedBuilderDirectMode::PendingInterruption => {
+                            self.inject_pending_interruption_register(irq_line, irq, vector)?
+                        }
+                        WindowsPicFixedBuilderDirectMode::PendingEventExtInt => false,
+                    }
+                } else {
+                    false
+                };
+                if direct_builder_injected {
+                    windows_irq_debug_log(format!(
+                        "[IRQ] direct_builder_inject irq={} pic_irq={} route={} vector=0x{:02x} mode={:?}",
+                        irq_line,
+                        irq,
+                        request_kind,
+                        vector,
+                        windows_pic_fixed_builder_direct_mode()
+                    ));
+                    return Ok(());
+                }
+                {
+                    let mut pending_interrupt = self.pending_interrupt.lock().unwrap();
+                    let already_queued = pending_interrupt.iter().any(|pending| match *pending {
+                        PendingInterrupt::PicExtInt { irq: pending_irq, .. }
+                        | PendingInterrupt::PicFixed { irq: pending_irq, .. } => pending_irq == irq,
+                    });
+                    if already_queued {
+                        windows_irq_debug_log(format!(
+                            "[IRQ] queue_skip_duplicate ptr=0x{:x} irq={} pic_irq={} mode=fixed depth={} front={:?}",
+                            Arc::as_ptr(&self.pending_interrupt) as usize,
+                            irq_line,
+                            irq,
+                            pending_interrupt.len(),
+                            pending_interrupt.front().copied()
+                        ));
+                        drop(pending_interrupt);
+                        match self.pending_interrupt_slots_busy() {
+                            Some((pending_interrupt_busy, pending_event_busy, internal_activity))
+                                if pending_interrupt_busy || pending_event_busy =>
+                            {
+                                if pending_event_busy
+                                    && (internal_activity & 0x2) != 0
+                                    && Self::should_cancel_halted_pending_event_duplicate()
+                                {
+                                    windows_irq_debug_log(format!(
+                                        "[IRQ] duplicate_halted_kick ptr=0x{:x} irq={} pic_irq={} mode=fixed pending_interrupt_busy={} pending_event_busy={} internal_activity=0x{:x}",
+                                        Arc::as_ptr(&self.pending_interrupt) as usize,
+                                        irq_line,
+                                        irq,
+                                        pending_interrupt_busy,
+                                        pending_event_busy,
+                                        internal_activity
+                                    ));
+                                    self.kick_after_queue_update(
+                                        "duplicate_halted_kick mode=fixed",
+                                    );
+                                } else {
+                                    windows_irq_debug_log(format!(
+                                        "[IRQ] duplicate_no_cancel ptr=0x{:x} irq={} pic_irq={} mode=fixed pending_interrupt_busy={} pending_event_busy={} internal_activity=0x{:x}",
+                                        Arc::as_ptr(&self.pending_interrupt) as usize,
+                                        irq_line,
+                                        irq,
+                                        pending_interrupt_busy,
+                                        pending_event_busy,
+                                        internal_activity
+                                    ));
+                                }
+                            }
+                            _ => {
+                                windows_irq_debug_log(format!(
+                                    "[IRQ] duplicate_cancel ptr=0x{:x} irq={} pic_irq={} mode=fixed",
+                                    Arc::as_ptr(&self.pending_interrupt) as usize,
+                                    irq_line,
+                                    irq
+                                ));
+                                self.kick_after_queue_update("duplicate_cancel mode=fixed");
+                            }
+                        }
+                        return Ok(());
+                    }
+                    pending_interrupt.push_back(PendingInterrupt::PicFixed { irq, vector });
+                    windows_irq_debug_log(format!(
+                        "[IRQ] queue_push ptr=0x{:x} irq={} pic_irq={} mode=fixed depth={} front={:?}",
+                        Arc::as_ptr(&self.pending_interrupt) as usize,
+                        irq_line,
+                        irq,
+                        pending_interrupt.len(),
+                        pending_interrupt.front().copied()
+                    ));
+                }
+                windows_irq_debug_log(format!(
+                    "[IRQ] queued irq={} pic_irq={} route={} vector=0x{:02x} delivery=vcpu-fixed",
+                    irq_line, irq, request_kind, vector
+                ));
+                self.kick_after_queue_update("queue_push_complete mode=fixed");
+                return Ok(());
+            } else {
+                self.dump_vcpu_irq_state("pic-extint-before", irq_line, &route);
+                {
+                    let mut pending_interrupt = self.pending_interrupt.lock().unwrap();
+                    let already_queued = pending_interrupt.iter().any(|pending| match *pending {
+                        PendingInterrupt::PicExtInt { irq: pending_irq, .. }
+                        | PendingInterrupt::PicFixed { irq: pending_irq, .. } => pending_irq == irq,
+                    });
+                    if already_queued {
+                        windows_irq_debug_log(format!(
+                            "[IRQ] queue_skip_duplicate ptr=0x{:x} irq={} pic_irq={} depth={} front={:?}",
+                            Arc::as_ptr(&self.pending_interrupt) as usize,
+                            irq_line,
+                            irq,
+                            pending_interrupt.len(),
+                            pending_interrupt.front().copied()
+                        ));
+                        drop(pending_interrupt);
+                        match self.pending_interrupt_slots_busy() {
+                            Some((pending_interrupt_busy, pending_event_busy, internal_activity))
+                                if pending_interrupt_busy || pending_event_busy =>
+                            {
+                                if pending_event_busy
+                                    && (internal_activity & 0x2) != 0
+                                    && Self::should_cancel_halted_pending_event_duplicate()
+                                {
+                                    windows_irq_debug_log(format!(
+                                        "[IRQ] duplicate_halted_kick ptr=0x{:x} irq={} pic_irq={} pending_interrupt_busy={} pending_event_busy={} internal_activity=0x{:x}",
+                                        Arc::as_ptr(&self.pending_interrupt) as usize,
+                                        irq_line,
+                                        irq,
+                                        pending_interrupt_busy,
+                                        pending_event_busy,
+                                        internal_activity
+                                    ));
+                                    self.kick_after_queue_update("duplicate_halted_kick");
+                                } else {
+                                    windows_irq_debug_log(format!(
+                                        "[IRQ] duplicate_no_cancel ptr=0x{:x} irq={} pic_irq={} pending_interrupt_busy={} pending_event_busy={} internal_activity=0x{:x}",
+                                        Arc::as_ptr(&self.pending_interrupt) as usize,
+                                        irq_line,
+                                        irq,
+                                        pending_interrupt_busy,
+                                        pending_event_busy,
+                                        internal_activity
+                                    ));
+                                }
+                            }
+                            _ => {
+                                windows_irq_debug_log(format!(
+                                    "[IRQ] duplicate_cancel ptr=0x{:x} irq={} pic_irq={}",
+                                    Arc::as_ptr(&self.pending_interrupt) as usize,
+                                    irq_line,
+                                    irq
+                                ));
+                                self.kick_after_queue_update("duplicate_cancel");
+                            }
+                        }
+                        return Ok(());
+                    }
+                    pending_interrupt.push_back(PendingInterrupt::PicExtInt { irq, vector });
+                    windows_irq_debug_log(format!(
+                        "[IRQ] queue_push ptr=0x{:x} irq={} pic_irq={} depth={} front={:?}",
+                        Arc::as_ptr(&self.pending_interrupt) as usize,
+                        irq_line,
+                        irq,
+                        pending_interrupt.len(),
+                        pending_interrupt.front().copied()
+                    ));
+                }
+                windows_irq_debug_log(format!(
+                    "[IRQ] queued irq={} pic_irq={} route={} vector=0x{:02x} delivery=cancel-exit",
+                    irq_line,
+                    irq,
+                    request_kind,
+                    vector
+                ));
+                self.kick_after_queue_update("queue_push_complete");
+                return Ok(());
+            }
+        }
+
+        let interrupt = match route {
+            WhpxInterruptRoute::IoApic {
+                vector,
+                destination_mode,
+                trigger_mode,
+                interrupt_type,
+                destination,
+            } => {
+                let (effective_destination_mode, effective_destination) = if self.vcpu_count == 1
+                    && destination_mode == WHvX64InterruptDestinationModeLogical
+                {
+                    windows_irq_debug_log(format!(
+                        "[IRQ] ioapic_single_vcpu_normalized irq={} vector=0x{:02x} orig_dest_mode=logical orig_dest=0x{:x} new_dest_mode=physical new_dest=0x0",
+                        irq_line, vector, destination
+                    ));
+                    (WHvX64InterruptDestinationModePhysical, 0)
+                } else {
+                    (destination_mode, destination)
+                };
+
+                WHV_INTERRUPT_CONTROL {
+                    _bitfield: make_whpx_interrupt_control_bitfield(
+                        interrupt_type,
+                        effective_destination_mode,
+                        trigger_mode,
+                    ),
+                    Destination: effective_destination,
+                    Vector: vector,
+                }
+            }
+            WhpxInterruptRoute::PicExtIntRequest { vector, .. } => WHV_INTERRUPT_CONTROL {
+                // Fallback if pending-event ExtINT injection is rejected.
+                _bitfield: make_whpx_interrupt_control_bitfield(
+                    WHvX64InterruptTypeFixed,
+                    WHvX64InterruptDestinationModePhysical,
+                    WHvX64InterruptTriggerModeEdge,
+                ),
+                Destination: 0,
+                Vector: u32::from(vector),
+            },
+            WhpxInterruptRoute::FallbackFixed { vector } => WHV_INTERRUPT_CONTROL {
+                _bitfield: make_whpx_interrupt_control_bitfield(
+                    WHvX64InterruptTypeFixed,
+                    WHvX64InterruptDestinationModePhysical,
+                    WHvX64InterruptTriggerModeEdge,
+                ),
+                Destination: 0,
+                Vector: vector,
+            },
+            WhpxInterruptRoute::Unresolved => unreachable!(),
         };
 
         unsafe {
+            windows_irq_debug_log(format!(
+                "[IRQ] inject irq={} route={} vector=0x{:02x} dest=0x{:x} type=0x{:x} dest_mode=0x{:x} trigger=0x{:x}",
+                irq_line,
+                request_kind,
+                interrupt.Vector,
+                interrupt.Destination,
+                interrupt._bitfield & 0xff,
+                (interrupt._bitfield >> 8) & 0xf,
+                (interrupt._bitfield >> 12) & 0xf
+            ));
             let result = WHvRequestInterrupt(
                 self.partition,
                 &interrupt,
@@ -220,8 +1414,19 @@ impl IrqChipT for WhpxIrqChip {
             );
 
             if let Err(e) = result {
-                log::error!("❌ WHvRequestInterrupt FAILED for IRQ {} (vector {}): {}",
-                    irq_line, interrupt.Vector, e);
+                windows_irq_debug_log(format!(
+                    "[IRQ] request_failed irq={} route={} vector=0x{:02x} hr=0x{:x}",
+                    irq_line,
+                    request_kind,
+                    interrupt.Vector,
+                    e.code().0 as u32
+                ));
+                log::error!(
+                    "❌ WHvRequestInterrupt FAILED for IRQ {} (vector {}): {}",
+                    irq_line,
+                    interrupt.Vector,
+                    e
+                );
                 return Err(devices::Error::FailedSignalingUsedQueue(io::Error::other(
                     format!(
                         "WHPX interrupt injection failed for irq {} (vector {}): {}",
@@ -230,8 +1435,30 @@ impl IrqChipT for WhpxIrqChip {
                 )));
             }
         }
+        windows_irq_debug_log(format!(
+            "[IRQ] request_ok irq={} route={} vector=0x{:02x}",
+            irq_line, request_kind, interrupt.Vector
+        ));
 
-        log::debug!("✅ WHvRequestInterrupt succeeded for IRQ {} (vector {})", irq_line, interrupt.Vector);
+        log::debug!(
+            "✅ WHvRequestInterrupt succeeded for IRQ {} (vector {})",
+            irq_line,
+            interrupt.Vector
+        );
+        if let WhpxInterruptRoute::PicExtIntRequest { irq, .. } = route {
+            devices::legacy::windows_pic_stub::acknowledge_irq(irq);
+        }
+        if self.should_cancel_after_irq_delivery() {
+            self.cancel_blocked_vcpu_runs();
+        }
+        windows_irq_debug_log(format!(
+            "[IRQ] request irq={} route={} vector=0x{:02x} dest=0x{:x} type=0x{:x}",
+            irq_line,
+            request_kind,
+            interrupt.Vector,
+            interrupt.Destination,
+            interrupt._bitfield & 0xff
+        ));
 
         // Signal the vCPU thread so it can re-enter WHvRunVirtualProcessor and
         // deliver the queued interrupt if the guest is currently in HLT state.
@@ -747,6 +1974,11 @@ pub fn build_microvm(
         kernel_cmdline.insert_str(cmdline).unwrap();
     }
 
+    #[cfg(target_os = "windows")]
+    if let Some(extra_cmdline) = windows_kernel_cmdline_append() {
+        kernel_cmdline.insert_str(extra_cmdline.as_str()).unwrap();
+    }
+
     #[cfg(all(not(feature = "tee"), not(target_os = "windows")))]
     #[allow(unused_mut)]
     let mut vm = setup_vm(&guest_memory, vm_resources.nested_enabled)?;
@@ -937,7 +2169,15 @@ pub fn build_microvm(
     // PortIODeviceManager::register_devices() skips COM1 registration entirely.
     #[cfg(target_os = "windows")]
     if serial_devices.is_empty() {
-        let output: Option<Box<dyn io::Write + Send>> = Some(Box::new(io::stdout()));
+        let output: Option<Box<dyn io::Write + Send>> = if let Some(path) = &vm_resources.console_output
+        {
+            Some(Box::new(
+                open_windows_console_output_file(path)
+                    .map_err(StartMicrovmError::OpenConsoleFile)?,
+            ))
+        } else {
+            Some(Box::new(io::stdout()))
+        };
         let input: Option<Box<dyn devices::legacy::ReadableFd + Send>> =
             crate::windows::stdin_reader::WindowsStdinInput::new()
                 .ok()
@@ -1030,12 +2270,20 @@ pub fn build_microvm(
             utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK)
                 .map_err(|e| StartMicrovmError::Internal(Error::EventFd(e)))?,
         );
+        let pending_interrupt: PendingInterruptQueue =
+            Arc::new(Mutex::new(std::collections::VecDeque::new()));
         intc = Arc::new(Mutex::new(IrqChipDevice::new(Box::new(WhpxIrqChip::new(
             vm.partition(),
+            u32::from(vcpu_config.vcpu_count),
             irq_notify.clone(),
+            pending_interrupt.clone(),
         )))));
 
-        attach_legacy_devices(&mut pio_device_manager, &mut mmio_device_manager, intc.clone())?;
+        attach_legacy_devices(
+            &mut pio_device_manager,
+            &mut mmio_device_manager,
+            intc.clone(),
+        )?;
 
         vcpus = create_vcpus_x86_64(
             &vm,
@@ -1045,6 +2293,7 @@ pub fn build_microvm(
             &pio_device_manager.io_bus,
             &exit_evt,
             Some(irq_notify),
+            Some(pending_interrupt),
         )
         .map_err(StartMicrovmError::Internal)?;
 
@@ -1186,7 +2435,7 @@ pub fn build_microvm(
     #[cfg(not(feature = "tee"))]
     attach_rng_device(&mut vmm, event_manager, intc.clone())?;
     let mut console_id = 0;
-    if !vm_resources.disable_implicit_console {
+    if !vm_resources.disable_implicit_console && windows_attach_implicit_virtio_console() {
         attach_console_devices(
             &mut vmm,
             event_manager,
@@ -1272,9 +2521,19 @@ pub fn build_microvm(
     #[cfg(feature = "net")]
     attach_net_devices(&mut vmm, &vm_resources.net, intc.clone())?;
     #[cfg(target_os = "windows")]
-    attach_net_devices_windows(&mut vmm, &vm_resources.net_windows, event_manager, intc.clone())?;
+    attach_net_devices_windows(
+        &mut vmm,
+        &vm_resources.net_windows,
+        event_manager,
+        intc.clone(),
+    )?;
     #[cfg(target_os = "windows")]
-    attach_block_devices_windows(&mut vmm, &vm_resources.block_windows, event_manager, intc.clone())?;
+    attach_block_devices_windows(
+        &mut vmm,
+        &vm_resources.block_windows,
+        event_manager,
+        intc.clone(),
+    )?;
     #[cfg(feature = "snd")]
     if vm_resources.snd_device {
         attach_snd_device(&mut vmm, intc.clone())?;
@@ -1283,6 +2542,23 @@ pub fn build_microvm(
     if let Some(s) = &vm_resources.kernel_cmdline.epilog {
         vmm.kernel_cmdline.insert_str(s).unwrap();
     };
+
+    #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+    {
+        windows_irq_debug_log(format!("[CMDLINE] {}", vmm.kernel_cmdline.as_str()));
+        for ((device_type, device_id), info) in vmm.mmio_device_manager.get_device_info() {
+            windows_irq_debug_log(format!(
+                "[MMIODEV] type={:?} id={} info={:?}",
+                device_type, device_id, info
+            ));
+        }
+    }
+
+    // Log the final kernel command line
+    #[cfg(target_os = "windows")]
+    log::debug!("Final kernel cmdline: {}", vmm.kernel_cmdline.as_str());
+    #[cfg(not(target_os = "windows"))]
+    log::info!("Final kernel cmdline: {}", vmm.kernel_cmdline.as_str());
 
     // Write the kernel command line to guest memory. This is x86_64 specific, since on
     // aarch64 the command line will be specified through the FDT.
@@ -1582,7 +2858,7 @@ fn load_payload(
                     return Err(StartMicrovmError::MissingKernelConfig);
                 };
 
-            log::info!(
+            log::debug!(
                 "Windows: Loading kernel to guest memory: guest_addr=0x{:x}, entry=0x{:x}, size={} bytes",
                 kernel_guest_addr,
                 kernel_entry_addr,
@@ -1601,7 +2877,7 @@ fn load_payload(
                 .write(kernel_data, GuestAddress(kernel_guest_addr))
                 .unwrap();
 
-            log::info!(
+            log::debug!(
                 "Windows: Kernel loaded successfully, will start at entry point 0x{:x}",
                 kernel_entry_addr
             );
@@ -1864,7 +3140,7 @@ pub(crate) fn setup_vm(
     nested_enabled: bool,
     vcpu_count: u32,
 ) -> std::result::Result<Vm, StartMicrovmError> {
-    let mut vm = Vm::new(nested_enabled, vcpu_count)
+    let mut vm = Vm::new(nested_enabled, vcpu_count, true)
         .map_err(Error::Vm)
         .map_err(StartMicrovmError::Internal)?;
     vm.memory_init(guest_memory)
@@ -1960,7 +3236,7 @@ fn attach_legacy_devices(
         .map_err(StartMicrovmError::Internal)?;
 
     // Primary 8259A PIC at 0x20–0x21.
-    let pic_primary = Arc::new(Mutex::new(devices::legacy::Pic::new()));
+    let pic_primary = devices::legacy::windows_pic_stub::PicStub::primary();
     pio_device_manager
         .io_bus
         .insert(pic_primary, 0x20, 0x2)
@@ -1969,10 +3245,21 @@ fn attach_legacy_devices(
         .map_err(StartMicrovmError::Internal)?;
 
     // Secondary (cascaded) 8259A PIC at 0xA0–0xA1.
-    let pic_secondary = Arc::new(Mutex::new(devices::legacy::Pic::new()));
+    let pic_secondary = devices::legacy::windows_pic_stub::PicStub::secondary();
     pio_device_manager
         .io_bus
         .insert(pic_secondary, 0xA0, 0x2)
+        .map_err(device_manager::legacy::Error::BusError)
+        .map_err(Error::LegacyIOBus)
+        .map_err(StartMicrovmError::Internal)?;
+
+    // Legacy PCI configuration mechanism #1 ports (0xCF8-0xCFF).
+    // WHPX does not supply a chipset PCI root complex for this MMIO-only guest,
+    // but Linux still probes these ports during early x86 boot.
+    let pci_config = Arc::new(Mutex::new(devices::legacy::PciConfigIoStub::new()));
+    pio_device_manager
+        .io_bus
+        .insert(pci_config, 0xCF8, 0x8)
         .map_err(device_manager::legacy::Error::BusError)
         .map_err(Error::LegacyIOBus)
         .map_err(StartMicrovmError::Internal)?;
@@ -1987,41 +3274,109 @@ fn attach_legacy_devices(
         .map_err(Error::RegisterMMIODevice)
         .map_err(StartMicrovmError::Internal)?;
 
-    let (lapic_base, lapic_size) = devices::legacy::windows_apic_stub::ApicStub::lapic_range();
-    let lapic_stub = devices::legacy::windows_apic_stub::ApicStub::lapic();
-    mmio_device_manager
-        .bus
-        .insert(lapic_stub, lapic_base, lapic_size)
-        .map_err(device_manager::mmio::Error::BusError)
-        .map_err(Error::RegisterMMIODevice)
-        .map_err(StartMicrovmError::Internal)?;
-
-    log::info!("Registered APIC stub devices: IOAPIC at 0x{:x}, LAPIC at 0x{:x}", ioapic_base, lapic_base);
+    log::debug!("Registered IOAPIC stub device at 0x{:x}", ioapic_base);
 
     // PIT IRQ 0 timer thread (100 Hz).
-    // Injects IRQ 0 (vector 0x20) periodically so the kernel's jiffies counter
-    // advances during early-boot TSC calibration and scheduling setup.
+    // On Windows, IRQ0 begins as a legacy PIC ExtINT via LAPIC LINT0 and later
+    // migrates to IOAPIC delivery. Do not inject a blind fixed vector fallback.
     let intc_clone = intc.clone();
     std::thread::Builder::new()
         .name("pit-timer".into())
         .spawn(move || {
+            let mut last_route = "waiting";
             let mut count = 0u64;
+
             loop {
+                let route = if matches!(
+                    devices::legacy::windows_apic_stub::query_route(0),
+                    Some(route) if !route.masked && route.vector != 0
+                ) {
+                    "ioapic"
+                } else if devices::legacy::windows_pic_stub::query_irq_vector(0).is_some() {
+                    "pic"
+                } else {
+                    "waiting"
+                };
+
+                if route != last_route {
+                    windows_irq_debug_log(format!(
+                        "[PIT] route_change from={} to={} tick={}",
+                        last_route, route, count
+                    ));
+                    match route {
+                        "ioapic" => {
+                            let current =
+                                devices::legacy::windows_apic_stub::query_route(0).unwrap();
+                            log::debug!(
+                                "PIT timer: IRQ0 switched to IOAPIC vector=0x{:x} dest=0x{:x}",
+                                current.vector,
+                                current.destination
+                            );
+                        }
+                        "pic" => {
+                            let vector = devices::legacy::windows_pic_stub::query_irq_vector(0);
+                            match vector {
+                                Some(vector) => log::debug!(
+                                    "PIT timer: IRQ0 using legacy PIC ExtINT vector=0x{:x}",
+                                    vector
+                                ),
+                                None => log::debug!(
+                                    "PIT timer: IRQ0 switched to legacy PIC routing, but no vector is currently deliverable"
+                                ),
+                            }
+                        }
+                        _ => {
+                            log::debug!("PIT timer: waiting for guest IRQ0 routing (PIC or IOAPIC)")
+                        }
+                    }
+                    last_route = route;
+                }
+
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 count += 1;
+
+                if count <= 20 || count % 100 == 0 {
+                    windows_irq_debug_log(format!(
+                        "[PIT] tick={} route={} pic_irq0={:?} ioapic_irq0={:?}",
+                        count,
+                        route,
+                        devices::legacy::windows_pic_stub::query_irq_vector(0),
+                        devices::legacy::windows_apic_stub::query_route(0)
+                            .map(|r| (r.vector, r.masked, r.destination)),
+                    ));
+                }
+
                 if let Err(e) = intc_clone.lock().unwrap().set_irq(Some(0), None) {
-                    warn!("PIT IRQ0 injection failed after {} interrupts: {e:?}", count);
+                    windows_irq_debug_log(format!(
+                        "[PIT] set_irq_failed tick={} route={} err={:?}",
+                        count, last_route, e
+                    ));
+                    warn!(
+                        "PIT IRQ0 injection failed after {} ticks (route={}): {e:?}",
+                        count, last_route
+                    );
                     break;
                 }
-                // Log first 10 interrupts and every 100 interrupts (every second)
-                if count <= 10 || count % 100 == 0 {
-                    log::info!("⏰ PIT timer: injected {} IRQ 0 interrupts (vector 0x20)", count);
+
+                if count <= 20 || count % 100 == 0 {
+                    windows_irq_debug_log(format!(
+                        "[PIT] set_irq_ok tick={} route={}",
+                        count, last_route
+                    ));
+                }
+
+                if last_route != "waiting" && (count <= 10 || count % 100 == 0) {
+                    log::debug!(
+                        "PIT timer: injected {} IRQ0 ticks via {} routing",
+                        count,
+                        last_route
+                    );
                 }
             }
         })
         .map_err(|e| StartMicrovmError::Internal(Error::EventFd(e)))?;
 
-    log::info!("PIT timer thread started (100 Hz IRQ 0 injection)");
+    log::debug!("PIT timer thread started (100 Hz IRQ 0 routing)");
 
     Ok(())
 }
@@ -2133,6 +3488,7 @@ fn create_vcpus_x86_64(
     io_bus: &devices::Bus,
     exit_evt: &EventFd,
     irq_pending_evt: Option<Arc<utils::eventfd::EventFd>>,
+    pending_interrupt: Option<PendingInterruptQueue>,
 ) -> super::Result<Vec<Vcpu>> {
     let mut vcpus = Vec::with_capacity(vcpu_config.vcpu_count as usize);
     for cpu_index in 0..vcpu_config.vcpu_count {
@@ -2144,6 +3500,7 @@ fn create_vcpus_x86_64(
             io_bus.clone(),
             exit_evt.try_clone().map_err(Error::EventFd)?,
             irq_pending_evt.clone(),
+            pending_interrupt.clone(),
         )
         .map_err(Error::Vcpu)?;
 
@@ -2462,7 +3819,7 @@ fn autoconfigure_console_ports(
     // Redirect console output to a file if configured (implicit console only).
     if let Some(path) = &vm_resources.console_output {
         if !vm_resources.disable_implicit_console && creating_implicit_console {
-            let file = std::fs::File::create(path).map_err(OpenConsoleFile)?;
+            let file = open_windows_console_output_file(path).map_err(OpenConsoleFile)?;
             return Ok(vec![PortDescription::console(
                 port_io::input_to_raw_fd_dup(0).ok(),
                 Some(port_io::output_file(file).unwrap()),

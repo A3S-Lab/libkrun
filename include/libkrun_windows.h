@@ -9,8 +9,8 @@
  * absent.
  *
  * Key Windows differences from libkrun.h:
- *  - krun_set_kernel()       MUST be called before krun_start_enter().
- *                            There is no bundled kernel (libkrunfw) on Windows.
+ *  - krun_set_kernel()       Required unless libkrunfw.dll is available
+ *                            next to krun.dll to provide a bundled kernel.
  *  - krun_add_disk()         Windows-specific virtio-blk backend (raw file I/O).
  *  - krun_add_net_tcp()      Windows-specific virtio-net backed by a TCP socket.
  *  - krun_add_vsock_port_windows()  Maps a vsock port to a Named Pipe.
@@ -177,9 +177,10 @@ KRUN_API int32_t krun_set_vm_config(uint32_t ctx_id, uint8_t num_vcpus, uint32_t
 /**
  * Sets the path to the kernel to be loaded in the microVM.
  *
- * NOTE: On Windows this function MUST be called before krun_start_enter().
- * There is no bundled kernel on Windows.  Use KRUN_KERNEL_FORMAT_ELF for a
- * raw ELF vmlinux image (e.g. from libkrunfw-windows or a custom build).
+ * NOTE: On Windows this function must be called before krun_start_enter()
+ * unless libkrunfw.dll is available next to krun.dll to provide the bundled
+ * companion kernel. Use KRUN_KERNEL_FORMAT_ELF for a raw ELF vmlinux image
+ * (e.g. from libkrunfw-windows or a custom build).
  *
  * Arguments:
  *  "ctx_id"        - the configuration context ID.
@@ -780,7 +781,8 @@ KRUN_API int32_t krun_add_input_device_fd(uint32_t ctx_id, int input_fd);
  * This function does not return on success; the VMM calls exit() with the
  * workload's exit code once the microVM shuts down.
  *
- * PREREQUISITE: krun_set_kernel() must have been called first on Windows.
+ * PREREQUISITE: on Windows, either krun_set_kernel() must have been called
+ * first or libkrunfw.dll must be available to provide the bundled kernel.
  *
  * Arguments:
  *  "ctx_id" - the configuration context ID.

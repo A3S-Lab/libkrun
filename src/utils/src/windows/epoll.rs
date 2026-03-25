@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "windows")]
+use std::time::Instant;
 
 use bitflags::bitflags;
 use log::error;
@@ -84,6 +86,22 @@ pub struct Epoll {
     inner: Arc<Mutex<EpollInner>>,
 }
 
+#[cfg(target_os = "windows")]
+fn windows_epoll_debug_log(message: impl AsRef<str>) {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let message = message.as_ref();
+    for path in [
+        r"C:\Users\18770\.a3s\libkrun-event-manager.log",
+        r"D:\code\libkrun\tmp_event_manager.log",
+    ] {
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{message}");
+        }
+    }
+}
+
 impl Epoll {
     pub fn new() -> io::Result<Self> {
         Ok(Self {
@@ -145,6 +163,8 @@ impl Epoll {
         timeout: i32,
         events: &mut [EpollEvent],
     ) -> io::Result<usize> {
+        #[cfg(target_os = "windows")]
+        let wait_start = Instant::now();
         let inner = self
             .inner
             .lock()
@@ -183,6 +203,20 @@ impl Epoll {
         let wait_result = unsafe {
             WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, timeout_ms)
         };
+
+        #[cfg(target_os = "windows")]
+        {
+            let elapsed_ms = wait_start.elapsed().as_millis();
+            if wait_result != WAIT_TIMEOUT || elapsed_ms >= 1000 {
+                windows_epoll_debug_log(format!(
+                    "epoll_wait registered={} timeout_ms={} wait_result={} elapsed_ms={}",
+                    handles.len(),
+                    timeout,
+                    wait_result,
+                    elapsed_ms
+                ));
+            }
+        }
 
         if wait_result == WAIT_FAILED {
             let err = io::Error::last_os_error();

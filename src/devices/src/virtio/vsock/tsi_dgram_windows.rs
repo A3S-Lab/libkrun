@@ -136,18 +136,16 @@ impl Proxy for TsiDgramProxyWindowsWrapper {
         let addr_str = String::from_utf8_lossy(&req.addr);
 
         match Self::parse_address(&addr_str, self.family) {
-            Ok(addr) => {
-                match self.dgram_proxy.bind(&addr) {
-                    Ok(_) => {
-                        self.status = ProxyStatus::Connected;
-                        update.signal_queue = true;
-                    }
-                    Err(_) => {
-                        self.status = ProxyStatus::Closed;
-                        update.remove_proxy = ProxyRemoval::Immediate;
-                    }
+            Ok(addr) => match self.dgram_proxy.bind(&addr) {
+                Ok(_) => {
+                    self.status = ProxyStatus::Connected;
+                    update.signal_queue = true;
                 }
-            }
+                Err(_) => {
+                    self.status = ProxyStatus::Closed;
+                    update.remove_proxy = ProxyRemoval::Immediate;
+                }
+            },
             Err(_) => {
                 self.status = ProxyStatus::Closed;
                 update.remove_proxy = ProxyRemoval::Immediate;

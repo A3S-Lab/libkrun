@@ -48,9 +48,12 @@ impl BlockWindowsBuilder {
 
     /// Create a `BlockWindows` from `config` and append it to the device list.
     pub fn insert(&mut self, config: BlockWindowsConfig) -> Result<(), BlockWindowsError> {
-        let dev =
-            BlockWindows::new(config.block_id, &config.disk_image_path, config.is_disk_read_only)
-                .map_err(BlockWindowsError::OpenDisk)?;
+        let dev = BlockWindows::new(
+            config.block_id,
+            &config.disk_image_path,
+            config.is_disk_read_only,
+        )
+        .map_err(BlockWindowsError::OpenDisk)?;
         self.list.push_back(Arc::new(Mutex::new(dev)));
         Ok(())
     }

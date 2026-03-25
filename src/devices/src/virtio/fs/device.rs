@@ -1,6 +1,8 @@
 #[cfg(target_os = "macos")]
 use crossbeam_channel::Sender;
 use std::cmp;
+#[cfg(target_os = "windows")]
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -20,6 +22,28 @@ use super::worker::FsWorker;
 use super::ExportTable;
 use super::{defs, defs::uapi};
 use crate::virtio::InterruptTransport;
+
+#[cfg(target_os = "windows")]
+fn fs_device_debug_log(message: impl AsRef<str>) {
+    static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*VALUE.get_or_init(|| {
+        std::env::var("LIBKRUN_WINDOWS_VERBOSE_DEBUG")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+    }) {
+        return;
+    }
+    let message = message.as_ref();
+    eprintln!("[VIRTIOFS-DEV] {message}");
+    for path in [
+        r"C:\Users\18770\.a3s\libkrun-virtiofs-device.log",
+        r"D:\code\libkrun\tmp_virtiofs_device.log",
+    ] {
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{message}");
+        }
+    }
+}
 
 #[derive(Copy, Clone)]
 #[repr(C, packed)]
@@ -62,6 +86,8 @@ impl Fs {
         exit_code: Arc<AtomicI32>,
         queues: Vec<VirtQueue>,
     ) -> super::Result<Fs> {
+        #[cfg(target_os = "windows")]
+        fs_device_debug_log(format!("Fs::with_queues fs_id={} shared_dir={}", fs_id, shared_dir));
         let mut queue_events = Vec::new();
         for _ in 0..queues.len() {
             queue_events
@@ -188,6 +214,8 @@ impl VirtioDevice for Fs {
     }
 
     fn activate(&mut self, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> ActivateResult {
+        #[cfg(target_os = "windows")]
+        fs_device_debug_log(format!("Fs::activate tag={}", String::from_utf8_lossy(&self.config.tag)));
         if self.worker_thread.is_some() {
             panic!("virtio_fs: worker thread already exists");
         }

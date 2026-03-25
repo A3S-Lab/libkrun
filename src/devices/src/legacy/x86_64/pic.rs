@@ -28,7 +28,11 @@ impl BusDevice for Pic {
         if data.len() != 1 {
             return;
         }
-        data[0] = if offset < 2 { self.regs[offset as usize] } else { 0 };
+        data[0] = if offset < 2 {
+            self.regs[offset as usize]
+        } else {
+            0
+        };
     }
 
     fn write(&mut self, _vcpuid: u64, offset: u64, data: &[u8]) {

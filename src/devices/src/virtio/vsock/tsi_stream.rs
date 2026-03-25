@@ -887,8 +887,7 @@ impl Proxy for TsiStreamProxy {
                     // The guest hasn't provided RX descriptors yet.  Remove this
                     // proxy from epoll so MuxerThread doesn't busy-loop, and ask
                     // to be re-registered once the RX queue is replenished.
-                    update.polling =
-                        Some((self.id, self.fd.as_raw_fd(), EventSet::empty()));
+                    update.polling = Some((self.id, self.fd.as_raw_fd(), EventSet::empty()));
                     update.needs_rx_space = true;
                 }
 

@@ -124,18 +124,33 @@ impl MMIODeviceManager {
             mmio_device.register_queue_evt(queue_evt, i as u32);
         }
 
-        mmio_device.set_irq_line(self.irq);
+        let assigned_irq = if cfg!(target_os = "windows")
+            && type_id == devices::virtio::TYPE_VSOCK
+            && !matches!(
+                std::env::var("LIBKRUN_WHPX_SHARE_VSOCK_IRQ_WITH_PREV").as_deref(),
+                Ok("0")
+            )
+        {
+            // WHPX virtio-vsock still needs the old shared-IRQ behavior in the
+            // current Windows bring-up path. Keep it as the default, but allow
+            // opt-out experiments with LIBKRUN_WHPX_SHARE_VSOCK_IRQ_WITH_PREV=0.
+            self.irq.saturating_sub(1)
+        } else {
+            self.irq
+        };
+
+        mmio_device.set_irq_line(assigned_irq);
 
         self.bus
             .insert(Arc::new(Mutex::new(mmio_device)), self.mmio_base, MMIO_LEN)
             .map_err(Error::BusError)?;
-        let ret = (self.mmio_base, self.irq);
+        let ret = (self.mmio_base, assigned_irq);
         self.id_to_dev_info.insert(
             (DeviceType::Virtio(type_id), device_id),
             MMIODeviceInfo {
                 addr: self.mmio_base,
                 len: MMIO_LEN,
-                irq: self.irq,
+                irq: assigned_irq,
             },
         );
         self.mmio_base += MMIO_LEN;
@@ -304,7 +319,6 @@ impl MMIODeviceManager {
         Ok(())
     }
 
-    #[cfg(target_arch = "aarch64")]
     /// Gets the information of the devices registered up to some point in time.
     pub fn get_device_info(&self) -> &HashMap<(DeviceType, String), MMIODeviceInfo> {
         &self.id_to_dev_info

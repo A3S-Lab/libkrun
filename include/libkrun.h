@@ -800,9 +800,10 @@ int32_t krun_set_firmware(uint32_t ctx_id, const char *firmware_path);
  * On Linux and macOS, if this function is not called, libkrun will use the
  * kernel bundled in libkrunfw (if available).
  *
- * On Windows, this function MUST be called before krun_start_enter(); there
- * is no bundled kernel provider on Windows.  Use KRUN_KERNEL_FORMAT_ELF (1)
- * for a raw ELF vmlinux image (e.g. from libkrunfw-windows or a custom build).
+ * On Windows, this function must be called before krun_start_enter() unless
+ * libkrunfw.dll is available next to krun.dll to provide the bundled kernel.
+ * Use KRUN_KERNEL_FORMAT_ELF (1) for a raw ELF vmlinux image (e.g. from
+ * libkrunfw-windows or a custom build).
  *
  * Arguments:
  *  "ctx_id"        - the configuration context ID.

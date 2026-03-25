@@ -14,9 +14,9 @@ use std::sync::Mutex;
 #[cfg(target_os = "windows")]
 use std::os::windows::io::AsRawHandle;
 #[cfg(target_os = "windows")]
-use windows::Win32::System::IO::DeviceIoControl;
-#[cfg(target_os = "windows")]
 use windows::Win32::Foundation::BOOLEAN;
+#[cfg(target_os = "windows")]
+use windows::Win32::System::IO::DeviceIoControl;
 
 #[cfg(target_os = "windows")]
 const FSCTL_SET_SPARSE: u32 = 0x000900c4; // CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 49, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
@@ -88,10 +88,7 @@ impl Block {
     /// `read_only` maps to `O_RDONLY`; an attempt to write to a read-only
     /// device will be rejected with `VIRTIO_BLK_S_IOERR`.
     pub fn new(id: impl Into<String>, path: &str, read_only: bool) -> io::Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(!read_only)
-            .open(path)?;
+        let file = OpenOptions::new().read(true).write(!read_only).open(path)?;
 
         let disk_size = file.metadata()?.len();
         let nsectors = disk_size / SECTOR_SIZE;
@@ -198,8 +195,7 @@ impl Block {
                 } else {
                     let req_type = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
                     let sector = u64::from_le_bytes([
-                        hdr[8], hdr[9], hdr[10], hdr[11],
-                        hdr[12], hdr[13], hdr[14], hdr[15],
+                        hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13], hdr[14], hdr[15],
                     ]);
                     let data = &descs[1..status_desc_idx];
                     match req_type {
@@ -313,11 +309,7 @@ impl Block {
         }
     }
 
-    fn blk_get_id(
-        id: &str,
-        data_descs: &[DescriptorChain<'_>],
-        mem: &GuestMemoryMmap,
-    ) -> u8 {
+    fn blk_get_id(id: &str, data_descs: &[DescriptorChain<'_>], mem: &GuestMemoryMmap) -> u8 {
         // The device ID string is at most 20 bytes, NUL-padded.
         let id_bytes = id.as_bytes();
         let mut id_buf = [0u8; 20];
@@ -378,7 +370,9 @@ impl VirtioDevice for Block {
     fn read_config(&self, offset: u64, data: &mut [u8]) {
         // Expose capacity (in sectors) at offset 0 as little-endian u64.
         let config: [u8; CONFIG_SPACE_SIZE] = self.nsectors.to_le_bytes();
-        let end = (offset as usize).saturating_add(data.len()).min(CONFIG_SPACE_SIZE);
+        let end = (offset as usize)
+            .saturating_add(data.len())
+            .min(CONFIG_SPACE_SIZE);
         let start = (offset as usize).min(end);
         let slice = &config[start..end];
         data[..slice.len()].copy_from_slice(slice);

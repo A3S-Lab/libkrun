@@ -14,14 +14,13 @@ pub mod port_io {
     use std::io::{self, ErrorKind};
     use std::sync::{Arc, Mutex};
     use vm_memory::{bitmap::Bitmap, VolatileSlice};
+    use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
     use windows::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
     use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
-    use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
     use windows::Win32::System::Console::{
-        GetConsoleMode, GetConsoleScreenBufferInfo, GetStdHandle, SetConsoleMode,
-        CONSOLE_MODE, CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
-        ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_ERROR_HANDLE,
-        STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        GetConsoleMode, GetConsoleScreenBufferInfo, GetStdHandle, SetConsoleMode, CONSOLE_MODE,
+        CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
     use windows::Win32::System::Threading::GetCurrentProcess;
 
@@ -62,7 +61,10 @@ pub mod port_io {
     impl ConsoleInput {
         fn new(handle: HANDLE) -> io::Result<Self> {
             if handle == INVALID_HANDLE_VALUE {
-                return Err(io::Error::new(ErrorKind::NotFound, "Invalid console handle"));
+                return Err(io::Error::new(
+                    ErrorKind::NotFound,
+                    "Invalid console handle",
+                ));
             }
 
             let mut mode = CONSOLE_MODE(0);
@@ -222,9 +224,7 @@ pub mod port_io {
                     windows::Win32::Foundation::DUPLICATE_SAME_ACCESS,
                 )
             }
-            .map_err(|e| {
-                io::Error::other(format!("DuplicateHandle failed: {e}"))
-            })?;
+            .map_err(|e| io::Error::other(format!("DuplicateHandle failed: {e}")))?;
             dup
         };
 
@@ -331,9 +331,7 @@ pub mod port_io {
                     windows::Win32::Foundation::DUPLICATE_SAME_ACCESS,
                 )
             }
-            .map_err(|e| {
-                io::Error::other(format!("DuplicateHandle failed: {e}"))
-            })?;
+            .map_err(|e| io::Error::other(format!("DuplicateHandle failed: {e}")))?;
             dup
         };
 
@@ -341,7 +339,9 @@ pub mod port_io {
         let mut mode = CONSOLE_MODE(0);
         if unsafe { GetConsoleMode(handle, &mut mode).is_ok() } {
             let vt_mode = CONSOLE_MODE(mode.0 | ENABLE_VIRTUAL_TERMINAL_PROCESSING.0);
-            unsafe { let _ = SetConsoleMode(handle, vt_mode); }
+            unsafe {
+                let _ = SetConsoleMode(handle, vt_mode);
+            }
             return Ok(Box::new(ConsoleOutput { handle }));
         }
 
@@ -548,7 +548,11 @@ impl Console {
 
         // TX queue: guest writes data to host
         // Queue index 3 = port 0 TX, 5 = port 1 TX, etc.
-        let port_index = if queue_index >= 3 { (queue_index - 3) / 2 } else { return false };
+        let port_index = if queue_index >= 3 {
+            (queue_index - 3) / 2
+        } else {
+            return false;
+        };
 
         let output = match self.ports.get(port_index).and_then(|p| p.output.as_ref()) {
             Some(out) => out.clone(),
@@ -592,7 +596,11 @@ impl Console {
 
         // RX queue: host writes data to guest
         // Queue index 2 = port 0 RX, 4 = port 1 RX, etc.
-        let port_index = if queue_index >= 2 { (queue_index - 2) / 2 } else { return false };
+        let port_index = if queue_index >= 2 {
+            (queue_index - 2) / 2
+        } else {
+            return false;
+        };
 
         let input = match self.ports.get(port_index).and_then(|p| p.input.as_ref()) {
             Some(inp) => inp.clone(),
@@ -652,7 +660,7 @@ impl Console {
 
 impl VirtioDevice for Console {
     fn avail_features(&self) -> u64 {
-        (1 << 32) | (1 << 1)
+        (1 << 32) | (1 << 1) | (1 << 0)
     }
 
     fn acked_features(&self) -> u64 {
@@ -683,8 +691,29 @@ impl VirtioDevice for Console {
         &self.queue_events
     }
 
-    fn read_config(&self, _offset: u64, data: &mut [u8]) {
-        data.fill(0);
+    fn read_config(&self, offset: u64, data: &mut [u8]) {
+        let mut config = [0u8; 12];
+        let (cols, rows) = self
+            .ports
+            .first()
+            .and_then(|port| port.terminal.as_ref().map(|term| term.get_win_size()))
+            .unwrap_or((0, 0));
+        config[0..2].copy_from_slice(&cols.to_le_bytes());
+        config[2..4].copy_from_slice(&rows.to_le_bytes());
+        config[4..8].copy_from_slice(&(self.ports.len().max(1) as u32).to_le_bytes());
+
+        let start = offset as usize;
+        let Some(end) = start.checked_add(data.len()) else {
+            data.fill(0);
+            return;
+        };
+
+        if end > config.len() {
+            data.fill(0);
+            return;
+        }
+
+        data.copy_from_slice(&config[start..end]);
     }
 
     fn write_config(&mut self, _offset: u64, _data: &[u8]) {}

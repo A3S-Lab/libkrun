@@ -17,7 +17,7 @@ use super::packet::{
 use super::proxy::{
     NewProxyType, Proxy, ProxyError, ProxyRemoval, ProxyStatus, ProxyUpdate, RecvPkt,
 };
-use super::tsi_windows::{TsiStreamProxyWindows, TsiPipeProxyWindows};
+use super::tsi_windows::{TsiPipeProxyWindows, TsiStreamProxyWindows};
 use utils::epoll::EventSet;
 use vm_memory::GuestMemoryMmap;
 
@@ -62,9 +62,7 @@ impl TsiStreamProxyWindowsWrapper {
                 (Some(TsiStreamProxyWindows::new()), None)
             }
             // For now, treat AF_UNIX as Named Pipes on Windows
-            defs::LINUX_AF_UNIX => {
-                (None, Some(TsiPipeProxyWindows::new()))
-            }
+            defs::LINUX_AF_UNIX => (None, Some(TsiPipeProxyWindows::new())),
             _ => return Err(ProxyError::InvalidFamily),
         };
 
@@ -167,15 +165,18 @@ impl Proxy for TsiStreamProxyWindowsWrapper {
             // TCP connection
             let addr_str = String::from_utf8_lossy(&req.addr);
             match Self::parse_address(&addr_str, self.family) {
-                Ok(addr) => proxy.process_connect(&super::tsi_windows::stream_proxy::TsiConnectReq {
-                    addr: addr_str.to_string(),
-                }),
+                Ok(addr) => {
+                    proxy.process_connect(&super::tsi_windows::stream_proxy::TsiConnectReq {
+                        addr: addr_str.to_string(),
+                    })
+                }
                 Err(e) => Err(super::tsi_windows::stream_proxy::ProxyError::InvalidState),
             }
         } else if let Some(ref mut proxy) = self.pipe_proxy {
             // Named Pipe connection
             let pipe_name = String::from_utf8_lossy(&req.addr);
-            proxy.connect(&pipe_name)
+            proxy
+                .connect(&pipe_name)
                 .map_err(|_| super::tsi_windows::stream_proxy::ProxyError::InvalidState)
         } else {
             Err(super::tsi_windows::stream_proxy::ProxyError::InvalidState)
@@ -214,10 +215,8 @@ impl Proxy for TsiStreamProxyWindowsWrapper {
 
         if connected {
             self.status = ProxyStatus::Connected;
-            let mut response_pkt = VsockPacket::new_connect_response_pkt(
-                self.local_port,
-                self.peer_port,
-            );
+            let mut response_pkt =
+                VsockPacket::new_connect_response_pkt(self.local_port, self.peer_port);
             response_pkt.set_buf_alloc(defs::CONN_TX_BUF_SIZE);
             self.push_packet(response_pkt);
 
@@ -269,11 +268,11 @@ impl Proxy for TsiStreamProxyWindowsWrapper {
             Ok(bytes_sent) => {
                 self.tx_cnt += Wrapping(bytes_sent as u32);
                 // Update credit if needed
-                if self.tx_cnt - self.last_tx_cnt_sent >= Wrapping(defs::CONN_CREDIT_UPDATE_THRESHOLD) {
-                    let mut credit_pkt = VsockPacket::new_credit_update_pkt(
-                        self.local_port,
-                        self.peer_port,
-                    );
+                if self.tx_cnt - self.last_tx_cnt_sent
+                    >= Wrapping(defs::CONN_CREDIT_UPDATE_THRESHOLD)
+                {
+                    let mut credit_pkt =
+                        VsockPacket::new_credit_update_pkt(self.local_port, self.peer_port);
                     credit_pkt.set_buf_alloc(defs::CONN_TX_BUF_SIZE);
                     credit_pkt.set_fwd_cnt(self.tx_cnt.0);
                     self.push_packet(credit_pkt);
@@ -321,7 +320,8 @@ impl Proxy for TsiStreamProxyWindowsWrapper {
         } else if let Some(ref mut proxy) = self.pipe_proxy {
             // Named Pipe listen
             let pipe_name = String::from_utf8_lossy(&req.addr);
-            proxy.listen(&pipe_name)
+            proxy
+                .listen(&pipe_name)
                 .map_err(|_| super::tsi_windows::stream_proxy::ProxyError::InvalidState)
         } else {
             Err(super::tsi_windows::stream_proxy::ProxyError::InvalidState)
@@ -456,7 +456,9 @@ impl Proxy for TsiStreamProxyWindowsWrapper {
         // Handle write events
         if evset.contains(EventSet::OUT) && self.status == ProxyStatus::Connecting {
             // Connection established
-            update = self.confirm_connect(&VsockPacket::default()).unwrap_or_default();
+            update = self
+                .confirm_connect(&VsockPacket::default())
+                .unwrap_or_default();
         }
 
         update

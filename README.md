@@ -341,7 +341,7 @@ cargo test -p vmm --target x86_64-pc-windows-msvc --lib -- test_whpx_ --ignored 
 | `krun_add_net_unixstream` | `krun_add_net_tcp` (TcpStream address or NULL for disconnected) |
 | `krun_add_vsock_port` | `krun_add_vsock_port_windows` (Named Pipe name for AF_UNIX) |
 | `krun_add_disk` | same (uses file-backed block device) |
-| libkrunfw (bundled kernel) | `krun_set_kernel(ctx, path, KRUN_KERNEL_FORMAT_ELF, NULL, cmdline)` — **required on Windows** |
+| libkrunfw (bundled kernel) | Ship `libkrunfw.dll` next to `krun.dll` for automatic bundled-kernel loading, or call `krun_set_kernel(ctx, path, KRUN_KERNEL_FORMAT_ELF, NULL, cmdline)` explicitly |
 
 TSI for AF_INET/AF_INET6 (TCP and UDP) is enabled automatically when no virtio-net device is added, identical to Linux/macOS behavior.
 

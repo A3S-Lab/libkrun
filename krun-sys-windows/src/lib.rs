@@ -39,7 +39,11 @@
 //! ```
 
 #![cfg(windows)]
-#![allow(non_camel_case_types, non_upper_case_globals, clippy::missing_safety_doc)]
+#![allow(
+    non_camel_case_types,
+    non_upper_case_globals,
+    clippy::missing_safety_doc
+)]
 
 use std::ffi::{c_char, c_int, c_void};
 
@@ -50,30 +54,30 @@ use std::ffi::{c_char, c_int, c_void};
 // Logging
 pub const KRUN_LOG_TARGET_DEFAULT: c_int = -1;
 
-pub const KRUN_LOG_LEVEL_OFF: u32   = 0;
+pub const KRUN_LOG_LEVEL_OFF: u32 = 0;
 pub const KRUN_LOG_LEVEL_ERROR: u32 = 1;
-pub const KRUN_LOG_LEVEL_WARN: u32  = 2;
-pub const KRUN_LOG_LEVEL_INFO: u32  = 3;
+pub const KRUN_LOG_LEVEL_WARN: u32 = 2;
+pub const KRUN_LOG_LEVEL_INFO: u32 = 3;
 pub const KRUN_LOG_LEVEL_DEBUG: u32 = 4;
 pub const KRUN_LOG_LEVEL_TRACE: u32 = 5;
 
-pub const KRUN_LOG_STYLE_AUTO: u32   = 0;
+pub const KRUN_LOG_STYLE_AUTO: u32 = 0;
 pub const KRUN_LOG_STYLE_ALWAYS: u32 = 1;
-pub const KRUN_LOG_STYLE_NEVER: u32  = 2;
+pub const KRUN_LOG_STYLE_NEVER: u32 = 2;
 
 pub const KRUN_LOG_OPTION_NO_ENV: u32 = 1;
 
 // Disk formats
-pub const KRUN_DISK_FORMAT_RAW: u32   = 0;
+pub const KRUN_DISK_FORMAT_RAW: u32 = 0;
 pub const KRUN_DISK_FORMAT_QCOW2: u32 = 1;
-pub const KRUN_DISK_FORMAT_VMDK: u32  = 2;
+pub const KRUN_DISK_FORMAT_VMDK: u32 = 2;
 
 // Kernel formats
-pub const KRUN_KERNEL_FORMAT_RAW: u32        = 0;
-pub const KRUN_KERNEL_FORMAT_ELF: u32        = 1;
-pub const KRUN_KERNEL_FORMAT_PE_GZ: u32      = 2;
-pub const KRUN_KERNEL_FORMAT_IMAGE_BZ2: u32  = 3;
-pub const KRUN_KERNEL_FORMAT_IMAGE_GZ: u32   = 4;
+pub const KRUN_KERNEL_FORMAT_RAW: u32 = 0;
+pub const KRUN_KERNEL_FORMAT_ELF: u32 = 1;
+pub const KRUN_KERNEL_FORMAT_PE_GZ: u32 = 2;
+pub const KRUN_KERNEL_FORMAT_IMAGE_BZ2: u32 = 3;
+pub const KRUN_KERNEL_FORMAT_IMAGE_GZ: u32 = 4;
 pub const KRUN_KERNEL_FORMAT_IMAGE_ZSTD: u32 = 5;
 
 // TSI feature flags
@@ -81,14 +85,14 @@ pub const KRUN_TSI_HIJACK_INET: u32 = 1 << 0;
 pub const KRUN_TSI_HIJACK_UNIX: u32 = 1 << 1;
 
 // virtio-net feature flags
-pub const NET_FEATURE_CSUM: u32       = 1 << 0;
+pub const NET_FEATURE_CSUM: u32 = 1 << 0;
 pub const NET_FEATURE_GUEST_CSUM: u32 = 1 << 1;
 pub const NET_FEATURE_GUEST_TSO4: u32 = 1 << 7;
 pub const NET_FEATURE_GUEST_TSO6: u32 = 1 << 8;
-pub const NET_FEATURE_GUEST_UFO: u32  = 1 << 10;
-pub const NET_FEATURE_HOST_TSO4: u32  = 1 << 11;
-pub const NET_FEATURE_HOST_TSO6: u32  = 1 << 12;
-pub const NET_FEATURE_HOST_UFO: u32   = 1 << 14;
+pub const NET_FEATURE_GUEST_UFO: u32 = 1 << 10;
+pub const NET_FEATURE_HOST_TSO4: u32 = 1 << 11;
+pub const NET_FEATURE_HOST_TSO6: u32 = 1 << 12;
+pub const NET_FEATURE_HOST_UFO: u32 = 1 << 14;
 
 // ---------------------------------------------------------------------------
 // FFI declarations — extern "C" block mirrors libkrun_windows.h
@@ -106,12 +110,7 @@ extern "C" {
     /// `target_fd`: CRT fd, or `KRUN_LOG_TARGET_DEFAULT` (-1) for stderr.
     /// On Windows only -1, 1 (stdout), and 2 (stderr) are accepted; other
     /// values return `-EINVAL`.
-    pub fn krun_init_log(
-        target_fd: c_int,
-        level: u32,
-        style: u32,
-        options: u32,
-    ) -> i32;
+    pub fn krun_init_log(target_fd: c_int, level: u32, style: u32, options: u32) -> i32;
 
     // --- Context lifecycle ---
 
@@ -128,8 +127,9 @@ extern "C" {
 
     /// Sets the kernel image to load.
     ///
-    /// **REQUIRED on Windows** — must be called before `krun_start_enter`.
-    /// Use `KRUN_KERNEL_FORMAT_ELF` for a raw ELF vmlinux.
+    /// Required on Windows unless `libkrunfw.dll` is available next to
+    /// `krun.dll` to provide the bundled companion kernel. Use
+    /// `KRUN_KERNEL_FORMAT_ELF` for a raw ELF vmlinux.
     ///
     /// `initramfs` and `cmdline` may be null.
     pub fn krun_set_kernel(
@@ -152,11 +152,7 @@ extern "C" {
     pub fn krun_set_root(ctx_id: u32, root_path: *const c_char) -> i32;
 
     /// Adds a virtio-fs device with the given tag.
-    pub fn krun_add_virtiofs(
-        ctx_id: u32,
-        c_tag: *const c_char,
-        c_path: *const c_char,
-    ) -> i32;
+    pub fn krun_add_virtiofs(ctx_id: u32, c_tag: *const c_char, c_path: *const c_char) -> i32;
 
     /// Adds a virtio-fs device with an explicit DAX window size (bytes).
     pub fn krun_add_virtiofs2(
@@ -167,10 +163,7 @@ extern "C" {
     ) -> i32;
 
     /// No longer supported.  Always returns `-EINVAL`.
-    pub fn krun_set_mapped_volumes(
-        ctx_id: u32,
-        mapped_volumes: *const *const c_char,
-    ) -> i32;
+    pub fn krun_set_mapped_volumes(ctx_id: u32, mapped_volumes: *const *const c_char) -> i32;
 
     // --- Block devices (Windows) ---
 
@@ -203,10 +196,7 @@ extern "C" {
     /// `port_map`: null-terminated array of `"host_port:guest_port"` strings.
     /// Pass null to expose all listening guest ports; pass a pointer to a
     /// null entry to expose none.
-    pub fn krun_set_port_map(
-        ctx_id: u32,
-        port_map: *const *const c_char,
-    ) -> i32;
+    pub fn krun_set_port_map(ctx_id: u32, port_map: *const *const c_char) -> i32;
 
     // --- VSock / TSI ---
 
@@ -219,11 +209,7 @@ extern "C" {
     /// Maps guest vsock `port` to a Windows Named Pipe (`\\.\pipe\<name>`).
     ///
     /// `c_pipe_name`: pipe name without the `\\.\pipe\` prefix.
-    pub fn krun_add_vsock_port_windows(
-        ctx_id: u32,
-        port: u32,
-        c_pipe_name: *const c_char,
-    ) -> i32;
+    pub fn krun_add_vsock_port_windows(ctx_id: u32, port: u32, c_pipe_name: *const c_char) -> i32;
 
     /// Disables the implicit vsock device created by libkrun automatically.
     pub fn krun_disable_implicit_vsock(ctx_id: u32) -> i32;
@@ -231,19 +217,13 @@ extern "C" {
     // --- Console ---
 
     /// Redirects implicit console output to a file.
-    pub fn krun_set_console_output(
-        ctx_id: u32,
-        c_filepath: *const c_char,
-    ) -> i32;
+    pub fn krun_set_console_output(ctx_id: u32, c_filepath: *const c_char) -> i32;
 
     /// Disables the implicit console device.
     pub fn krun_disable_implicit_console(ctx_id: u32) -> i32;
 
     /// Sets the `console=` kernel command-line argument.
-    pub fn krun_set_kernel_console(
-        ctx_id: u32,
-        console_id: *const c_char,
-    ) -> i32;
+    pub fn krun_set_kernel_console(ctx_id: u32, console_id: *const c_char) -> i32;
 
     /// Adds a virtio-console device (auto-configured single-port).
     pub fn krun_add_virtio_console_default(
@@ -254,11 +234,7 @@ extern "C" {
     ) -> i32;
 
     /// Adds a legacy serial device (ttyS0, ttyS1, …).
-    pub fn krun_add_serial_console_default(
-        ctx_id: u32,
-        input_fd: c_int,
-        output_fd: c_int,
-    ) -> i32;
+    pub fn krun_add_serial_console_default(ctx_id: u32, input_fd: c_int, output_fd: c_int) -> i32;
 
     /// Adds a multi-port virtio-console device.  Returns the console_id (≥ 0).
     pub fn krun_add_virtio_console_multiport(ctx_id: u32) -> i32;
@@ -283,10 +259,7 @@ extern "C" {
     // --- Workload execution ---
 
     /// Sets the working directory inside the guest.
-    pub fn krun_set_workdir(
-        ctx_id: u32,
-        workdir_path: *const c_char,
-    ) -> i32;
+    pub fn krun_set_workdir(ctx_id: u32, workdir_path: *const c_char) -> i32;
 
     /// Sets the executable path, arguments, and environment.
     ///
@@ -300,16 +273,10 @@ extern "C" {
     ) -> i32;
 
     /// Sets environment variables for the guest executable.
-    pub fn krun_set_env(
-        ctx_id: u32,
-        envp: *const *const c_char,
-    ) -> i32;
+    pub fn krun_set_env(ctx_id: u32, envp: *const *const c_char) -> i32;
 
     /// Sets resource limits passed to the guest init process.
-    pub fn krun_set_rlimits(
-        ctx_id: u32,
-        c_rlimits: *const *const c_char,
-    ) -> i32;
+    pub fn krun_set_rlimits(ctx_id: u32, c_rlimits: *const *const c_char) -> i32;
 
     /// Stores a UID to drop privileges to.  On Windows this is a no-op.
     pub fn krun_setuid(ctx_id: u32, uid: u32) -> i32;
@@ -320,10 +287,7 @@ extern "C" {
     // --- Firmware metadata ---
 
     /// Sets SMBIOS OEM strings exposed to the guest.
-    pub fn krun_set_smbios_oem_strings(
-        ctx_id: u32,
-        oem_strings: *const *const c_char,
-    ) -> i32;
+    pub fn krun_set_smbios_oem_strings(ctx_id: u32, oem_strings: *const *const c_char) -> i32;
 
     // --- Sound ---
 
@@ -350,25 +314,13 @@ extern "C" {
 
     pub fn krun_set_gpu_options(ctx_id: u32, virgl_flags: u32) -> i32;
 
-    pub fn krun_set_gpu_options2(
-        ctx_id: u32,
-        virgl_flags: u32,
-        shm_size: u64,
-    ) -> i32;
+    pub fn krun_set_gpu_options2(ctx_id: u32, virgl_flags: u32, shm_size: u64) -> i32;
 
-    pub fn krun_set_display_backend(
-        ctx_id: u32,
-        vtable: *const c_void,
-        vtable_size: usize,
-    ) -> i32;
+    pub fn krun_set_display_backend(ctx_id: u32, vtable: *const c_void, vtable_size: usize) -> i32;
 
     pub fn krun_add_display(ctx_id: u32, width: u32, height: u32) -> i32;
 
-    pub fn krun_display_set_refresh_rate(
-        ctx_id: u32,
-        display_id: u32,
-        refresh_rate: u32,
-    ) -> i32;
+    pub fn krun_display_set_refresh_rate(ctx_id: u32, display_id: u32, refresh_rate: u32) -> i32;
 
     pub fn krun_display_set_edid(
         ctx_id: u32,
@@ -384,11 +336,7 @@ extern "C" {
         height_mm: u16,
     ) -> i32;
 
-    pub fn krun_display_set_dpi(
-        ctx_id: u32,
-        display_id: u32,
-        dpi: u32,
-    ) -> i32;
+    pub fn krun_display_set_dpi(ctx_id: u32, display_id: u32, dpi: u32) -> i32;
 
     // --- Input device stubs (return -ENOTSUP without the input feature) ---
 
@@ -407,6 +355,7 @@ extern "C" {
     /// Starts the microVM.  Does not return on success; calls `exit()` with
     /// the workload's exit code.  Returns `-EINVAL` if configuration is invalid.
     ///
-    /// **PREREQUISITE**: `krun_set_kernel()` must have been called.
+    /// **PREREQUISITE**: either `krun_set_kernel()` must have been called, or
+    /// `libkrunfw.dll` must be available to provide the bundled kernel.
     pub fn krun_start_enter(ctx_id: u32) -> i32;
 }

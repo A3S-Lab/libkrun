@@ -18,19 +18,37 @@ pub trait FileReadWriteVolatile {
     fn write_volatile(&mut self, slice: VolatileSlice) -> Result<usize>;
 
     fn read_vectored_volatile(&mut self, bufs: &[VolatileSlice]) -> Result<usize> {
-        if let Some(&slice) = bufs.iter().find(|b| !b.is_empty()) {
-            self.read_volatile(slice)
-        } else {
-            Ok(0)
+        let mut total = 0usize;
+        for &slice in bufs {
+            if slice.is_empty() {
+                continue;
+            }
+
+            let bytes = self.read_volatile(slice)?;
+            total += bytes;
+
+            if bytes < slice.len() {
+                break;
+            }
         }
+        Ok(total)
     }
 
     fn write_vectored_volatile(&mut self, bufs: &[VolatileSlice]) -> Result<usize> {
-        if let Some(&slice) = bufs.iter().find(|b| !b.is_empty()) {
-            self.write_volatile(slice)
-        } else {
-            Ok(0)
+        let mut total = 0usize;
+        for &slice in bufs {
+            if slice.is_empty() {
+                continue;
+            }
+
+            let bytes = self.write_volatile(slice)?;
+            total += bytes;
+
+            if bytes < slice.len() {
+                break;
+            }
         }
+        Ok(total)
     }
 }
 
@@ -38,20 +56,44 @@ pub trait FileReadWriteAtVolatile {
     fn read_at_volatile(&self, slice: VolatileSlice, offset: u64) -> Result<usize>;
     fn write_at_volatile(&self, slice: VolatileSlice, offset: u64) -> Result<usize>;
 
-    fn read_vectored_at_volatile(&self, bufs: &[VolatileSlice], offset: u64) -> Result<usize> {
-        if let Some(&slice) = bufs.first() {
-            self.read_at_volatile(slice, offset)
-        } else {
-            Ok(0)
+    fn read_vectored_at_volatile(&self, bufs: &[VolatileSlice], mut offset: u64) -> Result<usize> {
+        let mut total = 0usize;
+        for &slice in bufs {
+            if slice.is_empty() {
+                continue;
+            }
+
+            let bytes = self.read_at_volatile(slice, offset)?;
+            total += bytes;
+            offset = offset.saturating_add(bytes as u64);
+
+            if bytes < slice.len() {
+                break;
+            }
         }
+        Ok(total)
     }
 
-    fn write_vectored_at_volatile(&self, bufs: &[VolatileSlice], offset: u64) -> Result<usize> {
-        if let Some(&slice) = bufs.first() {
-            self.write_at_volatile(slice, offset)
-        } else {
-            Ok(0)
+    fn write_vectored_at_volatile(
+        &self,
+        bufs: &[VolatileSlice],
+        mut offset: u64,
+    ) -> Result<usize> {
+        let mut total = 0usize;
+        for &slice in bufs {
+            if slice.is_empty() {
+                continue;
+            }
+
+            let bytes = self.write_at_volatile(slice, offset)?;
+            total += bytes;
+            offset = offset.saturating_add(bytes as u64);
+
+            if bytes < slice.len() {
+                break;
+            }
         }
+        Ok(total)
     }
 }
 
@@ -93,6 +135,18 @@ impl FileReadWriteAtVolatile for File {
         cloned.seek(SeekFrom::Start(offset))?;
         FileReadWriteVolatile::write_volatile(&mut cloned, slice)
     }
+
+    fn read_vectored_at_volatile(&self, bufs: &[VolatileSlice], offset: u64) -> Result<usize> {
+        let mut cloned = self.try_clone()?;
+        cloned.seek(SeekFrom::Start(offset))?;
+        FileReadWriteVolatile::read_vectored_volatile(&mut cloned, bufs)
+    }
+
+    fn write_vectored_at_volatile(&self, bufs: &[VolatileSlice], offset: u64) -> Result<usize> {
+        let mut cloned = self.try_clone()?;
+        cloned.seek(SeekFrom::Start(offset))?;
+        FileReadWriteVolatile::write_vectored_volatile(&mut cloned, bufs)
+    }
 }
 
 impl FileReadWriteAtVolatile for &File {
@@ -106,5 +160,17 @@ impl FileReadWriteAtVolatile for &File {
         let mut cloned = self.try_clone()?;
         cloned.seek(SeekFrom::Start(offset))?;
         FileReadWriteVolatile::write_volatile(&mut cloned, slice)
+    }
+
+    fn read_vectored_at_volatile(&self, bufs: &[VolatileSlice], offset: u64) -> Result<usize> {
+        let mut cloned = self.try_clone()?;
+        cloned.seek(SeekFrom::Start(offset))?;
+        FileReadWriteVolatile::read_vectored_volatile(&mut cloned, bufs)
+    }
+
+    fn write_vectored_at_volatile(&self, bufs: &[VolatileSlice], offset: u64) -> Result<usize> {
+        let mut cloned = self.try_clone()?;
+        cloned.seek(SeekFrom::Start(offset))?;
+        FileReadWriteVolatile::write_vectored_volatile(&mut cloned, bufs)
     }
 }

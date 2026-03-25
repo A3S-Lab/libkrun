@@ -41,11 +41,12 @@ fn copy_krun_dll() {
         .to_path_buf();
 
     let dst = bin_dir.join("krun.dll");
-    if !dst.exists() {
-        std::fs::copy(&src, &dst)
-            .unwrap_or_else(|e| panic!("failed to copy krun.dll: {e}"));
-        println!("cargo:warning=copied {} -> {}", src.display(), dst.display());
-    }
+    std::fs::copy(&src, &dst).unwrap_or_else(|e| panic!("failed to copy krun.dll: {e}"));
+    println!(
+        "cargo:warning=copied {} -> {}",
+        src.display(),
+        dst.display()
+    );
 
     println!("cargo:rerun-if-changed={}", src.display());
 }

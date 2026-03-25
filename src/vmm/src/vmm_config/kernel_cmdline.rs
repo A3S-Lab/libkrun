@@ -12,7 +12,8 @@ pub const DEFAULT_KERNEL_CMDLINE: &str = "reboot=k panic=-1 panic_print=0 nomodu
 #[cfg(target_os = "windows")]
 pub const DEFAULT_KERNEL_CMDLINE: &str =
     "reboot=k panic=-1 panic_print=0 nomodule console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 \
-     rootfstype=virtiofs rw quiet no-kvmapf noapic nolapic";
+     rootfstype=virtiofs rw no-kvmapf lpj=1000000 tsc=reliable \
+     i8042.noaux i8042.nomux i8042.nopnp";
 
 /// Strongly typed data structure used to configure the boot source of the
 /// microvm.

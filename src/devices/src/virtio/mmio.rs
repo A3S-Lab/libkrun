@@ -8,6 +8,8 @@
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::io;
+#[cfg(target_os = "windows")]
+use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -26,6 +28,41 @@ const MMIO_MAGIC_VALUE: u32 = 0x7472_6976;
 
 //current version specified by the mmio standard (legacy devices used 1 here)
 const MMIO_VERSION: u32 = 2;
+
+#[cfg(target_os = "windows")]
+fn mmio_debug_enabled() -> bool {
+    static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("LIBKRUN_WINDOWS_VERBOSE_DEBUG")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn mmio_debug_log(message: impl AsRef<str>) {
+    if !mmio_debug_enabled() {
+        return;
+    }
+    let message = message.as_ref();
+    if message.contains("device_status device=fs")
+        || message.contains("device_activate_ok device=fs")
+        || message.contains("device_activate_failed device=fs")
+        || message.contains("interrupt_signal target=devices::virtio::mmio[fs]")
+        || message.contains("set_irq_line target=devices::virtio::mmio[fs]")
+        || message.contains("queue_notify device=fs")
+    {
+        eprintln!("[MMIO-DBG] {message}");
+    }
+    for path in [
+        r"C:\Users\18770\.a3s\libkrun-virtio-mmio.log",
+        r"D:\code\libkrun\tmp_virtio_mmio.log",
+    ] {
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{message}");
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum CreateMmioTransportError {
@@ -111,6 +148,11 @@ impl InterruptTransport {
 
     fn set_irq_line(&mut self, irq_line: u32) {
         debug!(target: &self.0.log_target, "set_irq_line: {irq_line}");
+        #[cfg(target_os = "windows")]
+        mmio_debug_log(format!(
+            "set_irq_line target={} irq_line={}",
+            self.0.log_target, irq_line
+        ));
         match Arc::get_mut(&mut self.0) {
             None => {
                 error!("Cannot change irq_line of activated device");
@@ -123,6 +165,14 @@ impl InterruptTransport {
 
     fn try_signal(&self, status: u32) -> Result<(), crate::Error> {
         self.status().fetch_or(status as usize, Ordering::SeqCst);
+        #[cfg(target_os = "windows")]
+        mmio_debug_log(format!(
+            "interrupt_signal target={} irq_line={:?} status=0x{:x} aggregate=0x{:x}",
+            self.0.log_target,
+            self.0.irq_line,
+            status,
+            self.status().load(Ordering::SeqCst)
+        ));
         self.intc()
             .lock()
             .unwrap()
@@ -278,6 +328,8 @@ impl MmioTransport {
     #[allow(unused_assignments)]
     fn set_device_status(&mut self, status: u32) {
         use device_status::*;
+        #[cfg(target_os = "windows")]
+        let prev_status = self.device_status;
         // match changed bits
         match !self.device_status & status {
             ACKNOWLEDGE if self.device_status == INIT => {
@@ -292,16 +344,33 @@ impl MmioTransport {
             DRIVER_OK if self.device_status == (ACKNOWLEDGE | DRIVER | FEATURES_OK) => {
                 let device_activated = self.locked_device().is_activated();
                 if !device_activated {
-                    let activation_result = self.locked_device()
+                    let activation_result = self
+                        .locked_device()
                         .activate(self.mem.clone(), self.interrupt.clone());
 
                     match activation_result {
                         Ok(()) => {
                             self.device_status = status;
+                            #[cfg(target_os = "windows")]
+                            mmio_debug_log(format!(
+                                "device_activate_ok device={} prev=0x{:x} next=0x{:x}",
+                                self.locked_device().device_name(),
+                                prev_status,
+                                self.device_status
+                            ));
                         }
                         Err(e) => {
                             error!("virtio-mmio: device activation failed: {:?}", e);
                             self.device_status |= FAILED;
+                            #[cfg(target_os = "windows")]
+                            mmio_debug_log(format!(
+                                "device_activate_failed device={} prev=0x{:x} requested=0x{:x} now=0x{:x} err={:?}",
+                                self.locked_device().device_name(),
+                                prev_status,
+                                status,
+                                self.device_status,
+                                e
+                            ));
                         }
                     }
                 } else {
@@ -330,6 +399,14 @@ impl MmioTransport {
                 );
             }
         }
+        #[cfg(target_os = "windows")]
+        mmio_debug_log(format!(
+            "device_status device={} prev=0x{:x} requested=0x{:x} now=0x{:x}",
+            self.locked_device().device_name(),
+            prev_status,
+            status,
+            self.device_status
+        ));
     }
 }
 
@@ -353,7 +430,20 @@ impl BusDevice for MmioTransport {
                     }
                     0x34 => self.with_queue(0, |q| u32::from(q.get_max_size())),
                     0x44 => self.with_queue(0, |q| q.ready as u32),
-                    0x60 => self.interrupt.status().load(Ordering::SeqCst) as u32,
+                    0x60 => {
+                        let status = self.interrupt.status().load(Ordering::SeqCst) as u32;
+                        #[cfg(target_os = "windows")]
+                        {
+                            if status != 0 {
+                                let device_name = self.locked_device().device_name().to_string();
+                                mmio_debug_log(format!(
+                                    "interrupt_status_read device={} value=0x{:x}",
+                                    device_name, status
+                                ));
+                            }
+                        }
+                        status
+                    }
                     0x70 => self.device_status,
                     0xfc => self.config_generation,
                     0xb0..=0xbc => {
@@ -428,11 +518,29 @@ impl BusDevice for MmioTransport {
                     0x38 => self.update_queue_field(|q| q.size = v as u16),
                     0x44 => self.update_queue_field(|q| q.ready = v == 1),
                     0x50 => {
+                        #[cfg(target_os = "windows")]
+                        {
+                            let device_name = self.locked_device().device_name().to_string();
+                            mmio_debug_log(format!(
+                                "queue_notify device={} queue={} status=0x{:x}",
+                                device_name, v, self.device_status
+                            ));
+                        }
                         if let Some(eventfd) = self.queue_evts.get(&v) {
                             eventfd.write(v as u64).unwrap();
                         }
                     }
                     0x64 => {
+                        #[cfg(target_os = "windows")]
+                        {
+                            let device_name = self.locked_device().device_name().to_string();
+                            mmio_debug_log(format!(
+                                "interrupt_ack device={} value=0x{:x} status_before=0x{:x}",
+                                device_name,
+                                v,
+                                self.interrupt.status().load(Ordering::SeqCst)
+                            ));
+                        }
                         if self.check_device_status(device_status::DRIVER_OK, 0) {
                             self.interrupt
                                 .status()

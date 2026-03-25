@@ -10,3 +10,6 @@ description = "Windows companion library for libkrun: bundles a pre-built x86_64
 [lib]
 name = "libkrunfw"
 crate-type = ["cdylib"]
+
+[build-dependencies]
+flate2 = "1.1"

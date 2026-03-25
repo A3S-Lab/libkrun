@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fmt::Formatter;
 use std::io;
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "windows")]
+use std::time::Instant;
 
 use utils::epoll::{self, Epoll, EpollEvent};
 
@@ -39,6 +41,22 @@ pub struct EventManager {
     epoll: Epoll,
     subscribers: HashMap<Pollable, Arc<Mutex<dyn Subscriber>>>,
     ready_events: Vec<EpollEvent>,
+}
+
+#[cfg(target_os = "windows")]
+fn windows_event_manager_debug_log(message: impl AsRef<str>) {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let message = message.as_ref();
+    for path in [
+        r"C:\Users\18770\.a3s\libkrun-event-manager.log",
+        r"D:\code\libkrun\tmp_event_manager.log",
+    ] {
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{message}");
+        }
+    }
 }
 
 impl EventManager {
@@ -135,6 +153,8 @@ impl EventManager {
     }
 
     pub fn run_with_timeout(&mut self, milliseconds: i32) -> Result<usize> {
+        #[cfg(target_os = "windows")]
+        let wait_start = Instant::now();
         let event_count = self
             .epoll
             .wait(
@@ -144,6 +164,16 @@ impl EventManager {
             )
             .map_err(Error::Poll)?;
 
+        #[cfg(target_os = "windows")]
+        {
+            let elapsed_ms = wait_start.elapsed().as_millis();
+            if event_count > 0 || elapsed_ms >= 1000 {
+                windows_event_manager_debug_log(format!(
+                    "run_with_timeout timeout_ms={} event_count={} elapsed_ms={}",
+                    milliseconds, event_count, elapsed_ms
+                ));
+            }
+        }
         self.dispatch_events(event_count);
         Ok(event_count)
     }
@@ -154,7 +184,21 @@ impl EventManager {
             let pollable = event.fd();
 
             if let Some(subscriber) = self.subscribers.get(&pollable).cloned() {
+                #[cfg(target_os = "windows")]
+                let process_start = Instant::now();
                 subscriber.lock().unwrap().process(&event, self);
+                #[cfg(target_os = "windows")]
+                {
+                    let elapsed_ms = process_start.elapsed().as_millis();
+                    if elapsed_ms >= 25 {
+                        windows_event_manager_debug_log(format!(
+                            "dispatch pollable={} events=0x{:x} elapsed_ms={}",
+                            pollable,
+                            event.events(),
+                            elapsed_ms
+                        ));
+                    }
+                }
             }
         }
     }

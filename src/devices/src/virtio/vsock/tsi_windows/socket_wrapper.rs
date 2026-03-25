@@ -8,24 +8,18 @@ use std::ptr;
 
 use windows::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::Networking::WinSock::{
-    accept, bind, closesocket, connect, ioctlsocket, listen, recv, send, socket,
-    getsockname, getpeername, setsockopt, shutdown,
-    AF_INET, AF_INET6, AF_UNSPEC,
-    FIONBIO, INVALID_SOCKET,
-    IN_ADDR, IN6_ADDR, IPPROTO_TCP, IPPROTO_UDP,
-    SD_BOTH, SD_RECEIVE, SD_SEND,
-    SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_STORAGE,
-    SOCKET, SOCKET_ERROR,
-    SOCK_DGRAM, SOCK_STREAM,
-    SOL_SOCKET, SO_REUSEADDR,
-    WSAGetLastError, WSAStartup, WSADATA,
+    accept, bind, closesocket, connect, getpeername, getsockname, ioctlsocket, listen, recv, send,
+    setsockopt, shutdown, socket, WSAGetLastError, WSAStartup, AF_INET, AF_INET6, AF_UNSPEC,
+    FIONBIO, IN6_ADDR, INVALID_SOCKET, IN_ADDR, IPPROTO_TCP, IPPROTO_UDP, SD_BOTH, SD_RECEIVE,
+    SD_SEND, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_STORAGE, SOCKET, SOCKET_ERROR,
+    SOCK_DGRAM, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR, WSADATA,
 };
 
 /// Address family for sockets
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddressFamily {
-    Inet,   // IPv4
-    Inet6,  // IPv6
+    Inet,  // IPv4
+    Inet6, // IPv6
 }
 
 impl AddressFamily {
@@ -40,8 +34,8 @@ impl AddressFamily {
 /// Socket type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SockType {
-    Stream,  // TCP
-    Dgram,   // UDP
+    Stream, // TCP
+    Dgram,  // UDP
 }
 
 impl SockType {
@@ -232,12 +226,7 @@ impl WindowsSocket {
     /// Send data
     pub fn send(&self, buf: &[u8]) -> io::Result<usize> {
         unsafe {
-            let result = send(
-                self.socket,
-                buf.as_ptr() as *const u8,
-                buf.len() as i32,
-                0,
-            );
+            let result = send(self.socket, buf.as_ptr() as *const u8, buf.len() as i32, 0);
 
             if result == SOCKET_ERROR {
                 return Err(io::Error::last_os_error());
@@ -344,10 +333,7 @@ unsafe fn socket_addr_to_sockaddr(addr: &SocketAddr) -> io::Result<(*const SOCKA
             let boxed = Box::new(sockaddr);
             let ptr = Box::into_raw(boxed);
 
-            Ok((
-                ptr as *const SOCKADDR,
-                mem::size_of::<SOCKADDR_IN>() as i32,
-            ))
+            Ok((ptr as *const SOCKADDR, mem::size_of::<SOCKADDR_IN>() as i32))
         }
         SocketAddr::V6(addr_v6) => {
             let mut sockaddr: SOCKADDR_IN6 = mem::zeroed();

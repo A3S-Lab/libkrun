@@ -1,9 +1,11 @@
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +44,9 @@
 #define MAX_TOKENS 16384
 
 static int jsoneq(const char *, jsmntok_t *, const char *);
+static void debug_log(const char *fmt, ...);
+static void console_trace(const char *fmt, ...);
+extern char **environ;
 
 #ifdef SEV
 static char *sev_get_luks_passphrase(int *);
@@ -49,6 +54,192 @@ static char *snp_get_luks_passphrase(char *, char *, char *, int *);
 #endif
 
 char DEFAULT_KRUN_INIT[] = "/bin/sh";
+
+static bool is_internal_exec_arg(const char *arg)
+{
+    return strcmp(arg, "tsi_hijack") == 0 || strcmp(arg, "tsi_hijack_unix") == 0;
+}
+
+static char **sanitize_exec_argv(int argc, char **argv, char *exec0)
+{
+    char **filtered_argv;
+    int i, j;
+
+    filtered_argv = malloc((MAX_ARGS + 1) * sizeof(char *));
+    if (!filtered_argv) {
+        return NULL;
+    }
+
+    filtered_argv[0] = exec0;
+    j = 1;
+
+    for (i = 1; i < argc && j < MAX_ARGS; i++) {
+        if (is_internal_exec_arg(argv[i])) {
+            debug_log("init.krun: stripping internal exec arg '%s'", argv[i]);
+            continue;
+        }
+
+        filtered_argv[j] = argv[i];
+        j++;
+    }
+
+    filtered_argv[j] = NULL;
+    return filtered_argv;
+}
+
+static void debug_log(const char *fmt, ...)
+{
+    const char *path = getenv("KRUN_DEBUG_LOG");
+    FILE *fp;
+    va_list ap;
+
+    if (!path || !*path) {
+        return;
+    }
+
+    fp = fopen(path, "a");
+    if (!fp) {
+        return;
+    }
+
+    va_start(ap, fmt);
+    vfprintf(fp, fmt, ap);
+    va_end(ap);
+    fputc('\n', fp);
+    fclose(fp);
+}
+
+static void console_trace(const char *fmt, ...)
+{
+    va_list ap;
+    va_list ap_copy;
+    FILE *fp;
+
+    va_start(ap, fmt);
+    va_copy(ap_copy, ap);
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+    fflush(stderr);
+
+    fp = fopen("/init.trace.log", "a");
+    if (fp) {
+        vfprintf(fp, fmt, ap_copy);
+        fputc('\n', fp);
+        fclose(fp);
+    }
+
+    va_end(ap_copy);
+    va_end(ap);
+}
+
+static bool should_import_cmdline_env(const char *name)
+{
+    return strncmp(name, "KRUN_", 5) == 0 || strncmp(name, "BOX_", 4) == 0 ||
+           strncmp(name, "A3S_", 4) == 0 || strncmp(name, "LD_", 3) == 0;
+}
+
+static void trim_cmdline_token_quotes(char *token)
+{
+    size_t len = strlen(token);
+
+    if (len >= 2 && token[0] == '"' && token[len - 1] == '"') {
+        memmove(token, token + 1, len - 2);
+        token[len - 2] = '\0';
+    }
+}
+
+static void import_cmdline_env_if_needed(void)
+{
+    const char *required_env[] = {
+        "KRUN_INIT",
+        "KRUN_WORKDIR",
+        "KRUN_INIT_PID1",
+        "BOX_EXEC_EXEC",
+    };
+    bool need_import = false;
+    char buf[32768];
+    char *cursor;
+    int fd;
+    ssize_t len;
+    int imported = 0;
+
+    for (size_t i = 0; i < sizeof(required_env) / sizeof(required_env[0]); i++) {
+        if (!getenv(required_env[i])) {
+            need_import = true;
+            break;
+        }
+    }
+
+    if (!need_import) {
+        return;
+    }
+
+    fd = open("/proc/cmdline", O_RDONLY);
+    if (fd < 0) {
+        return;
+    }
+
+    len = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (len <= 0) {
+        return;
+    }
+    buf[len] = '\0';
+
+    cursor = buf;
+    while (*cursor) {
+        char *token = cursor;
+        bool in_quotes = false;
+        char *eq;
+        char *value;
+
+        while (*cursor && isspace((unsigned char)*cursor)) {
+            cursor++;
+        }
+        if (*cursor == '\0') {
+            break;
+        }
+
+        token = cursor;
+        while (*cursor) {
+            if (*cursor == '"') {
+                in_quotes = !in_quotes;
+            } else if (!in_quotes && isspace((unsigned char)*cursor)) {
+                break;
+            }
+            cursor++;
+        }
+
+        if (*cursor) {
+            *cursor = '\0';
+            cursor++;
+        }
+
+        trim_cmdline_token_quotes(token);
+
+        eq = strchr(token, '=');
+        if (!eq) {
+            continue;
+        }
+
+        *eq = '\0';
+        value = eq + 1;
+        trim_cmdline_token_quotes(value);
+
+        if (!should_import_cmdline_env(token) || getenv(token)) {
+            continue;
+        }
+
+        if (setenv(token, value, 0) == 0) {
+            imported++;
+        }
+    }
+
+    if (imported > 0) {
+        debug_log("init.krun: imported %d env vars from /proc/cmdline",
+                  imported);
+    }
+}
 
 static void set_rlimits(const char *rlimits)
 {
@@ -1055,6 +1246,7 @@ int main(int argc, char **argv)
     char *krun_root_fstype;
     char *krun_root_options;
     char *env_init_pid1;
+    char *env_strip_internal_args;
     char *config_workdir, *env_workdir;
     char *rlimits;
     char **config_argv, **exec_argv;
@@ -1087,10 +1279,20 @@ int main(int argc, char **argv)
         exit(-1);
     }
 #endif
+    debug_log("init.krun: start argc=%d", argc);
+    console_trace("init.krun: entered main argc=%d", argc);
     if (mount_filesystems() < 0) {
+        debug_log("init.krun: mount_filesystems failed errno=%d", errno);
         printf("Couldn't mount filesystems, bailing out\n");
         exit(-2);
     }
+    debug_log("init.krun: mount_filesystems ok");
+    console_trace("init.krun: mount_filesystems ok");
+    import_cmdline_env_if_needed();
+    console_trace("init.krun: after cmdline env import KRUN_INIT=%s KRUN_INIT_PID1=%s BOX_EXEC_EXEC=%s",
+                  getenv("KRUN_INIT") ? getenv("KRUN_INIT") : "<null>",
+                  getenv("KRUN_INIT_PID1") ? getenv("KRUN_INIT_PID1") : "<null>",
+                  getenv("BOX_EXEC_EXEC") ? getenv("BOX_EXEC_EXEC") : "<null>");
 
     krun_root = getenv("KRUN_BLOCK_ROOT_DEVICE");
     if (krun_root) {
@@ -1104,9 +1306,11 @@ int main(int argc, char **argv)
 
         if (try_mount(krun_root, "/newroot", krun_root_fstype, 0,
                       krun_root_options) < 0) {
+            debug_log("init.krun: try_mount(%s) failed errno=%d", krun_root, errno);
             perror("mount KRUN_BLOCK_ROOT_DEVICE");
             exit(-1);
         }
+        debug_log("init.krun: switched block root device=%s", krun_root);
 
         chdir("/newroot");
 
@@ -1128,18 +1332,22 @@ int main(int argc, char **argv)
 
         // we must mount filesystems again after chrooting
         if (mount_filesystems() < 0) {
+            debug_log("init.krun: post-chroot mount_filesystems failed errno=%d", errno);
             printf("Couldn't mount filesystems, bailing out\n");
             exit(-2);
         }
+        debug_log("init.krun: post-chroot mount_filesystems ok");
     }
 
     if (mount(NULL, "/", NULL, MS_REC | MS_SHARED, NULL) < 0) {
         perror("Couldn't set shared propagation on the root mount");
         exit(-1);
     }
+    console_trace("init.krun: root propagation ok");
 
     setsid();
     ioctl(0, TIOCSCTTY, 1);
+    console_trace("init.krun: tty/session configured");
 
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd >= 0) {
@@ -1154,6 +1362,7 @@ int main(int argc, char **argv)
     config_workdir = NULL;
 
     config_parse_file(&config_argv, &config_workdir);
+    console_trace("init.krun: config parsed");
 
     krun_home = getenv("KRUN_HOME");
     if (krun_home) {
@@ -1179,24 +1388,65 @@ int main(int argc, char **argv)
 
     env_workdir = getenv("KRUN_WORKDIR");
     if (env_workdir) {
-        chdir(env_workdir);
+        if (chdir(env_workdir) < 0) {
+            debug_log("init.krun: chdir(%s) failed errno=%d", env_workdir, errno);
+        } else {
+            debug_log("init.krun: chdir(%s) ok", env_workdir);
+        }
     } else if (config_workdir) {
-        chdir(config_workdir);
+        if (chdir(config_workdir) < 0) {
+            debug_log("init.krun: chdir(config=%s) failed errno=%d", config_workdir, errno);
+        } else {
+            debug_log("init.krun: chdir(config=%s) ok", config_workdir);
+        }
     }
 
     exec_argv = argv;
     krun_init = getenv("KRUN_INIT");
     if (krun_init) {
         exec_argv[0] = krun_init;
+        debug_log("init.krun: KRUN_INIT=%s", krun_init);
     } else if (config_argv) {
         exec_argv = config_argv;
+        debug_log("init.krun: using config argv[0]=%s", exec_argv[0]);
     } else {
         exec_argv[0] = &DEFAULT_KRUN_INIT[0];
+        debug_log("init.krun: using default init=%s", exec_argv[0]);
+    }
+
+    env_strip_internal_args = getenv("KRUN_STRIP_INTERNAL_ARGS");
+    if (env_strip_internal_args && *env_strip_internal_args == '1' && exec_argv == argv) {
+        char **filtered_argv = sanitize_exec_argv(argc, argv, exec_argv[0]);
+        if (filtered_argv) {
+            exec_argv = filtered_argv;
+        } else {
+            debug_log("init.krun: sanitize_exec_argv allocation failed");
+        }
     }
 
     env_init_pid1 = getenv("KRUN_INIT_PID1");
     if (env_init_pid1 && *env_init_pid1 == '1') {
         init_pid1 = true;
+    }
+    debug_log("init.krun: init_pid1=%d", init_pid1);
+    console_trace("init.krun: selected exec=%s init_pid1=%d",
+                  exec_argv && exec_argv[0] ? exec_argv[0] : "<null>",
+                  init_pid1);
+    debug_log("init.krun: getenv(LD_PRELOAD)=%s",
+              getenv("LD_PRELOAD") ? getenv("LD_PRELOAD") : "<null>");
+    debug_log("init.krun: getenv(LD_AUDIT)=%s",
+              getenv("LD_AUDIT") ? getenv("LD_AUDIT") : "<null>");
+    debug_log("init.krun: getenv(tsi_hijack)=%s",
+              getenv("tsi_hijack") ? getenv("tsi_hijack") : "<null>");
+    debug_log("init.krun: getenv(tsi_hijack_unix)=%s",
+              getenv("tsi_hijack_unix") ? getenv("tsi_hijack_unix") : "<null>");
+    for (int argi = 0; exec_argv && exec_argv[argi]; argi++) {
+        debug_log("init.krun: exec_argv[%d]=%s", argi, exec_argv[argi]);
+    }
+    for (int envi = 0; environ && environ[envi]; envi++) {
+        if (strncmp(environ[envi], "LD_", 3) == 0 || strstr(environ[envi], "tsi") != NULL) {
+            debug_log("init.krun: environ[%d]=%s", envi, environ[envi]);
+        }
     }
 
 #ifdef __TIMESYNC__
@@ -1220,10 +1470,17 @@ int main(int argc, char **argv)
     if (child == 0) { // child
     exec_init:
         if (setup_redirects() < 0) {
+            debug_log("init.krun: setup_redirects failed errno=%d", errno);
             exit(125);
         }
+        console_trace("init.krun: setup_redirects ok");
+        debug_log("init.krun: execvp(%s) starting", exec_argv[0]);
+        console_trace("init.krun: execvp(%s) starting", exec_argv[0]);
         if (execvp(exec_argv[0], exec_argv) < 0) {
             saved_errno = errno;
+            debug_log("init.krun: execvp(%s) failed errno=%d", exec_argv[0], saved_errno);
+            console_trace("init.krun: execvp(%s) failed errno=%d", exec_argv[0],
+                          saved_errno);
             printf("Couldn't execute '%s' inside the vm: %s\n", exec_argv[0],
                    strerror(errno));
             // Use the same exit code as chroot and podman do.

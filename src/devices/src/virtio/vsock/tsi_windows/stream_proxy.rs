@@ -92,8 +92,8 @@ impl TsiStreamProxyWindows {
         };
 
         // Create socket
-        let socket = WindowsSocket::new(family, SockType::Stream)
-            .map_err(ProxyError::CreatingSocket)?;
+        let socket =
+            WindowsSocket::new(family, SockType::Stream).map_err(ProxyError::CreatingSocket)?;
 
         // Set non-blocking mode
         socket
@@ -137,13 +137,11 @@ impl TsiStreamProxyWindows {
         }
 
         // Parse address from request
-        let addr = parse_address(req.family, &req.addr, req.port)
-            .ok_or(ProxyError::InvalidAddress)?;
+        let addr =
+            parse_address(req.family, &req.addr, req.port).ok_or(ProxyError::InvalidAddress)?;
 
         // Connect to remote address
-        self.socket
-            .connect(&addr)
-            .map_err(ProxyError::Connecting)?;
+        self.socket.connect(&addr).map_err(ProxyError::Connecting)?;
 
         self.status = ProxyStatus::Connecting;
 
@@ -160,8 +158,8 @@ impl TsiStreamProxyWindows {
         }
 
         // Parse bind address from request
-        let addr = parse_address(req.family, &req.addr, req.port)
-            .ok_or(ProxyError::InvalidAddress)?;
+        let addr =
+            parse_address(req.family, &req.addr, req.port).ok_or(ProxyError::InvalidAddress)?;
 
         // Bind to address
         self.socket.bind(&addr).map_err(ProxyError::Binding)?;

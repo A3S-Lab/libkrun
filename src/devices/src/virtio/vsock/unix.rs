@@ -577,8 +577,7 @@ impl Proxy for UnixProxy {
                 update.signal_queue = signal_queue;
 
                 if no_rx_space {
-                    update.polling =
-                        Some((self.id, self.fd.as_raw_fd(), EventSet::empty()));
+                    update.polling = Some((self.id, self.fd.as_raw_fd(), EventSet::empty()));
                     update.needs_rx_space = true;
                 }
 

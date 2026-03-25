@@ -16,10 +16,10 @@ use super::reaper::ReaperThread;
 use super::timesync::TimesyncThread;
 #[cfg(not(target_os = "windows"))]
 use super::tsi_dgram::TsiDgramProxy;
-#[cfg(not(target_os = "windows"))]
-use super::tsi_stream::TsiStreamProxy;
 #[cfg(target_os = "windows")]
 use super::tsi_dgram_windows::TsiDgramProxyWindowsWrapper;
+#[cfg(not(target_os = "windows"))]
+use super::tsi_stream::TsiStreamProxy;
 #[cfg(target_os = "windows")]
 use super::tsi_stream_windows::TsiStreamProxyWindowsWrapper;
 use super::unix::UnixProxy;

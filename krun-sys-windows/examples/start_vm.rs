@@ -49,10 +49,7 @@ unsafe fn run(kernel_path: &str, disk_path: &str) {
 
     // 3. Kernel  — REQUIRED on Windows
     let kernel = CString::new(kernel_path).unwrap();
-    let cmdline = CString::new(
-        "console=ttyS0 root=/dev/vda rw panic=1 init=/bin/sh",
-    )
-    .unwrap();
+    let cmdline = CString::new("console=ttyS0 root=/dev/vda rw panic=1 init=/bin/sh").unwrap();
     check!(krun_set_kernel(
         ctx_id,
         kernel.as_ptr(),
@@ -63,7 +60,7 @@ unsafe fn run(kernel_path: &str, disk_path: &str) {
     println!("[OK] krun_set_kernel");
 
     // 4. Disk image
-    let disk  = CString::new(disk_path).unwrap();
+    let disk = CString::new(disk_path).unwrap();
     let blkid = CString::new("root").unwrap();
     check!(krun_add_disk(ctx_id, blkid.as_ptr(), disk.as_ptr(), false));
     println!("[OK] krun_add_disk");

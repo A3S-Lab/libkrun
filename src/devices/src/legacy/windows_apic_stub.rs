@@ -1,61 +1,132 @@
-// Windows APIC/IOAPIC stub device
-// This is a minimal stub that handles APIC/IOAPIC MMIO accesses without crashing.
-// It returns safe default values to allow the kernel to boot even when APIC is accessed.
-
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::bus::BusDevice;
 
-const IOAPIC_BASE: u64 = 0xfec00000;
-const IOAPIC_SIZE: u64 = 0x1000;
-const LAPIC_BASE: u64 = 0xfee00000;
-const LAPIC_SIZE: u64 = 0x1000;
+fn windows_apic_debug_log(message: impl AsRef<str>) {
+    static VALUE: OnceLock<bool> = OnceLock::new();
+    if !*VALUE.get_or_init(|| {
+        std::env::var("LIBKRUN_WINDOWS_VERBOSE_DEBUG")
+            .or_else(|_| std::env::var("LIBKRUN_WINDOWS_IO_DEBUG"))
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+    }) {
+        return;
+    }
+    use std::io::Write;
 
-// LAPIC register offsets
+    for path in [r"C:\Users\18770\.a3s\libkrun-whpx-io-current.log", "tmp_whpx_io.log"] {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{}", message.as_ref());
+        }
+    }
+}
+
+const IOAPIC_BASE: u64 = 0xfec0_0000;
+const IOAPIC_SIZE: u64 = 0x1000;
+const LAPIC_BASE: u64 = 0xfee0_0000;
+const LAPIC_SIZE: u64 = 0x1000;
+const IOAPIC_NUM_PINS: usize = 24;
+
 const LAPIC_ID: u64 = 0x20;
 const LAPIC_VERSION: u64 = 0x30;
 const LAPIC_TPR: u64 = 0x80;
 const LAPIC_EOI: u64 = 0xB0;
 const LAPIC_SPURIOUS: u64 = 0xF0;
-const LAPIC_ISR_BASE: u64 = 0x100;  // In-Service Register (8 registers, 0x100-0x170)
-const LAPIC_TMR_BASE: u64 = 0x180;  // Trigger Mode Register (8 registers)
-const LAPIC_IRR_BASE: u64 = 0x200;  // Interrupt Request Register (8 registers)
-const LAPIC_ESR: u64 = 0x280;       // Error Status Register
-const LAPIC_ICR_LOW: u64 = 0x300;   // Interrupt Command Register (low)
-const LAPIC_ICR_HIGH: u64 = 0x310;  // Interrupt Command Register (high)
-const LAPIC_TIMER_LVT: u64 = 0x320; // Timer Local Vector Table
+const LAPIC_ISR_BASE: u64 = 0x100;
+const LAPIC_TMR_BASE: u64 = 0x180;
+const LAPIC_IRR_BASE: u64 = 0x200;
+const LAPIC_ESR: u64 = 0x280;
+const LAPIC_ICR_LOW: u64 = 0x300;
+const LAPIC_ICR_HIGH: u64 = 0x310;
+const LAPIC_TIMER_LVT: u64 = 0x320;
 const LAPIC_TIMER_INITIAL: u64 = 0x380;
 const LAPIC_TIMER_CURRENT: u64 = 0x390;
-const LAPIC_TIMER_DIVIDE: u64 = 0x3E0;
+const LAPIC_TIMER_DIVIDE: u64 = 0x3e0;
 
-// IOAPIC register offsets
-const IOREGSEL: u64 = 0x00;  // Register Select (index)
-const IOWIN: u64 = 0x10;     // Data Window (read/write selected register)
+const IOREGSEL: u64 = 0x00;
+const IOWIN: u64 = 0x10;
 
-// IOAPIC register indices (written to IOREGSEL)
 const IOAPIC_ID: u8 = 0x00;
 const IOAPIC_VER: u8 = 0x01;
 const IOAPIC_ARB: u8 = 0x02;
-const IOAPIC_REDTBL_BASE: u8 = 0x10;  // Redirection table starts at 0x10
+const IOAPIC_REDTBL_BASE: u8 = 0x10;
 
-/// Stub APIC device that handles MMIO reads/writes without crashing
+const IOAPIC_LVT_DELIV_MODE_SHIFT: u64 = 8;
+const IOAPIC_LVT_DEST_MODE_SHIFT: u64 = 11;
+const IOAPIC_LVT_TRIGGER_MODE_SHIFT: u64 = 15;
+const IOAPIC_LVT_MASKED_SHIFT: u64 = 16;
+const IOAPIC_LVT_DEST_IDX_SHIFT: u64 = 56;
+const IOAPIC_DM_MASK: u64 = 0x7;
+const IOAPIC_VECTOR_MASK: u64 = 0xff;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IoApicRoute {
+    pub vector: u8,
+    pub delivery_mode: u8,
+    pub destination_mode_logical: bool,
+    pub trigger_mode_level: bool,
+    pub masked: bool,
+    pub destination: u8,
+}
+
+#[derive(Debug)]
+struct IoApicState {
+    redirection_table: [u64; IOAPIC_NUM_PINS],
+}
+
+impl Default for IoApicState {
+    fn default() -> Self {
+        Self {
+            redirection_table: [1 << IOAPIC_LVT_MASKED_SHIFT; IOAPIC_NUM_PINS],
+        }
+    }
+}
+
+fn ioapic_state() -> &'static Mutex<IoApicState> {
+    static STATE: OnceLock<Mutex<IoApicState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(IoApicState::default()))
+}
+
+fn decode_route(entry: u64) -> IoApicRoute {
+    IoApicRoute {
+        vector: (entry & IOAPIC_VECTOR_MASK) as u8,
+        delivery_mode: ((entry >> IOAPIC_LVT_DELIV_MODE_SHIFT) & IOAPIC_DM_MASK) as u8,
+        destination_mode_logical: ((entry >> IOAPIC_LVT_DEST_MODE_SHIFT) & 1) != 0,
+        trigger_mode_level: ((entry >> IOAPIC_LVT_TRIGGER_MODE_SHIFT) & 1) != 0,
+        masked: ((entry >> IOAPIC_LVT_MASKED_SHIFT) & 1) != 0,
+        destination: ((entry >> IOAPIC_LVT_DEST_IDX_SHIFT) & 0xff) as u8,
+    }
+}
+
+pub fn query_route(irq: u32) -> Option<IoApicRoute> {
+    let index = usize::try_from(irq).ok()?;
+    let state = ioapic_state().lock().ok()?;
+    state
+        .redirection_table
+        .get(index)
+        .copied()
+        .map(decode_route)
+}
+
 #[derive(Debug)]
 pub struct ApicStub {
     base: u64,
-    // LAPIC state
     spurious_vector: u32,
     tpr: u32,
-    // IOAPIC state
-    ioregsel: u8,  // Currently selected register index
+    ioregsel: u8,
 }
 
 impl ApicStub {
     pub fn new(base: u64) -> Self {
-        ApicStub {
+        Self {
             base,
-            spurious_vector: 0xFF,  // Default spurious vector
+            spurious_vector: 0xff,
             tpr: 0,
-            ioregsel: 0,  // Default to register 0
+            ioregsel: 0,
         }
     }
 
@@ -77,111 +148,109 @@ impl ApicStub {
 
     fn read_lapic_register(&self, offset: u64) -> u32 {
         match offset {
-            LAPIC_ID => {
-                // Return APIC ID 0 for BSP (Bootstrap Processor)
-                0x00000000
-            }
-            LAPIC_VERSION => {
-                // Version 0x14 (Pentium 4/Xeon), 24 LVT entries
-                // Bit 0-7: Version (0x14)
-                // Bit 16-23: Max LVT entry (0x05 = 6 entries)
-                0x00050014
-            }
-            LAPIC_TPR => {
-                // Task Priority Register
-                self.tpr
-            }
-            LAPIC_EOI => {
-                // EOI register - write-only, return 0
-                0
-            }
-            LAPIC_SPURIOUS => {
-                // Spurious Interrupt Vector Register
-                // Bit 0-7: Spurious Vector (0xFF)
-                // Bit 8: APIC Software Enable (1 = enabled)
-                // Bit 9: Focus Processor Checking (0 = enabled)
-                self.spurious_vector | 0x100  // APIC enabled
-            }
-            LAPIC_ISR_BASE..=0x170 => {
-                // In-Service Register - all zeros (no interrupts in service)
-                0
-            }
-            LAPIC_TMR_BASE..=0x1F0 => {
-                // Trigger Mode Register - all zeros (edge-triggered)
-                0
-            }
-            LAPIC_IRR_BASE..=0x270 => {
-                // Interrupt Request Register - all zeros (no pending interrupts)
-                0
-            }
-            LAPIC_ESR => {
-                // Error Status Register - no errors
-                0
-            }
-            LAPIC_ICR_LOW | LAPIC_ICR_HIGH => {
-                // Interrupt Command Register - idle (bit 12 = 0)
-                0
-            }
-            LAPIC_TIMER_LVT => {
-                // Timer LVT - masked
-                0x00010000  // Bit 16 = masked
-            }
-            LAPIC_TIMER_INITIAL => {
-                // Timer Initial Count - 0 (timer not running)
-                0
-            }
-            LAPIC_TIMER_CURRENT => {
-                // Timer Current Count - 0
-                0
-            }
-            LAPIC_TIMER_DIVIDE => {
-                // Timer Divide Configuration - divide by 1
-                0x0000000B
-            }
-            _ => {
-                // Unknown register - return 0
-                0
-            }
+            LAPIC_ID => 0x0000_0000,
+            LAPIC_VERSION => 0x0005_0014,
+            LAPIC_TPR => self.tpr,
+            LAPIC_EOI => 0,
+            LAPIC_SPURIOUS => self.spurious_vector | 0x100,
+            LAPIC_ISR_BASE..=0x170 => 0,
+            LAPIC_TMR_BASE..=0x1f0 => 0,
+            LAPIC_IRR_BASE..=0x270 => 0,
+            LAPIC_ESR => 0,
+            LAPIC_ICR_LOW | LAPIC_ICR_HIGH => 0,
+            LAPIC_TIMER_LVT => 0x0001_0000,
+            LAPIC_TIMER_INITIAL => 0,
+            LAPIC_TIMER_CURRENT => 0,
+            LAPIC_TIMER_DIVIDE => 0x0000_000b,
+            _ => 0,
         }
+    }
+
+    fn read_ioapic_redirection_register(&self) -> u32 {
+        let register_index = usize::from(self.ioregsel - IOAPIC_REDTBL_BASE);
+        let pin = register_index / 2;
+        let high = (register_index & 1) != 0;
+        let state = ioapic_state().lock().unwrap();
+        let entry = state.redirection_table[pin];
+        if high {
+            (entry >> 32) as u32
+        } else {
+            entry as u32
+        }
+    }
+
+    fn write_ioapic_redirection_register(&self, value: u32) {
+        let register_index = usize::from(self.ioregsel - IOAPIC_REDTBL_BASE);
+        let pin = register_index / 2;
+        let high = (register_index & 1) != 0;
+        let mut state = ioapic_state().lock().unwrap();
+        let entry = &mut state.redirection_table[pin];
+
+        if high {
+            *entry = (*entry & 0x0000_0000_ffff_ffff) | ((value as u64) << 32);
+        } else {
+            *entry = (*entry & 0xffff_ffff_0000_0000) | u64::from(value);
+        }
+
+        let route = decode_route(*entry);
+        log::debug!(
+            "IOAPIC route irq={} reg=0x{:02x} value=0x{:08x} -> vector=0x{:02x} delivery={} dest_mode={} trigger={} masked={} dest=0x{:02x}",
+            pin,
+            self.ioregsel,
+            value,
+            route.vector,
+            route.delivery_mode,
+            if route.destination_mode_logical {
+                "logical"
+            } else {
+                "physical"
+            },
+            if route.trigger_mode_level {
+                "level"
+            } else {
+                "edge"
+            },
+            route.masked,
+            route.destination,
+        );
+        windows_apic_debug_log(format!(
+            "[IOAPIC] irq={} reg=0x{:02x} value=0x{:08x} vector=0x{:02x} delivery={} dest_mode={} trigger={} masked={} dest=0x{:02x}",
+            pin,
+            self.ioregsel,
+            value,
+            route.vector,
+            route.delivery_mode,
+            if route.destination_mode_logical {
+                "logical"
+            } else {
+                "physical"
+            },
+            if route.trigger_mode_level {
+                "level"
+            } else {
+                "edge"
+            },
+            route.masked,
+            route.destination,
+        ));
     }
 
     fn read_ioapic_register(&self, offset: u64) -> u32 {
         match offset {
-            IOREGSEL => {
-                // Return currently selected register index
-                self.ioregsel as u32
-            }
-            IOWIN => {
-                // Read from the register selected by IOREGSEL
-                match self.ioregsel {
-                    IOAPIC_ID => {
-                        // IOAPIC ID register
-                        // Bits 24-27: APIC ID (0 for single IOAPIC)
-                        0x00000000
-                    }
-                    IOAPIC_VER => {
-                        // IOAPIC Version register
-                        // Bits 0-7: Version (0x20 = 82093AA)
-                        // Bits 16-23: Maximum Redirection Entry (23 = 24 entries, 0-23)
-                        0x00170020  // Version 0x20, 24 entries (0x17 = 23)
-                    }
-                    IOAPIC_ARB => {
-                        // IOAPIC Arbitration ID (read-only, same as ID)
-                        0x00000000
-                    }
-                    IOAPIC_REDTBL_BASE..=0x3F => {
-                        // Redirection Table entries (0x10-0x3F = 24 entries * 2 registers each)
-                        // Each entry is 64 bits, accessed as two 32-bit registers
-                        // Return masked (bit 16 = 1) to indicate interrupt is disabled
-                        0x00010000  // Masked
-                    }
-                    _ => {
-                        // Unknown register index - return all 1s to indicate invalid/non-existent
-                        log::warn!("IOAPIC: read from unknown register index 0x{:02x}, returning 0xFFFFFFFF", self.ioregsel);
-                        0xFFFFFFFF
-                    }
+            IOREGSEL => self.ioregsel as u32,
+            IOWIN => match self.ioregsel {
+                IOAPIC_ID => 0x0000_0000,
+                IOAPIC_VER => 0x0017_0020,
+                IOAPIC_ARB => 0x0000_0000,
+                IOAPIC_REDTBL_BASE..=0x3f => self.read_ioapic_redirection_register(),
+                _ => {
+                    log::warn!(
+                        "IOAPIC: read from unknown register index 0x{:02x}, returning 0xFFFFFFFF",
+                        self.ioregsel
+                    );
+                    0xffff_ffff
                 }
-            }
+            },
             _ => {
                 log::warn!("IOAPIC: read from unknown offset 0x{:x}", offset);
                 0
@@ -193,17 +262,14 @@ impl ApicStub {
 impl BusDevice for ApicStub {
     fn read(&mut self, _base: u64, offset: u64, data: &mut [u8]) {
         let value = if self.base == LAPIC_BASE {
-            // LAPIC read
             self.read_lapic_register(offset)
         } else {
-            // IOAPIC read
             self.read_ioapic_register(offset)
         };
 
-        // Write the value to the data buffer (little-endian)
         let bytes_to_copy = data.len().min(4);
-        for i in 0..bytes_to_copy {
-            data[i] = ((value >> (i * 8)) & 0xFF) as u8;
+        for (i, slot) in data.iter_mut().take(bytes_to_copy).enumerate() {
+            *slot = ((value >> (i * 8)) & 0xff) as u8;
         }
 
         if self.base == LAPIC_BASE {
@@ -214,8 +280,8 @@ impl BusDevice for ApicStub {
                 value
             );
         } else {
-            log::info!(
-                "📥 IOAPIC read at offset=0x{:x}, len={}, value=0x{:08x} (ioregsel=0x{:02x})",
+            log::trace!(
+                "IOAPIC read at offset=0x{:x}, len={}, value=0x{:08x} (ioregsel=0x{:02x})",
                 offset,
                 data.len(),
                 value,
@@ -225,79 +291,94 @@ impl BusDevice for ApicStub {
     }
 
     fn write(&mut self, _base: u64, offset: u64, data: &[u8]) {
-        // Parse the written value (little-endian)
         let mut value: u32 = 0;
         for (i, &byte) in data.iter().enumerate().take(4) {
             value |= (byte as u32) << (i * 8);
         }
 
         if self.base == LAPIC_BASE {
-            // LAPIC write
             match offset {
-                LAPIC_TPR => {
-                    self.tpr = value & 0xFF;
-                    log::debug!("LAPIC TPR write: 0x{:02x}", self.tpr);
-                }
-                LAPIC_EOI => {
-                    log::debug!("LAPIC EOI write (interrupt acknowledged)");
-                }
-                LAPIC_SPURIOUS => {
-                    self.spurious_vector = value;
-                    let enabled = (value & 0x100) != 0;
-                    log::debug!(
-                        "LAPIC Spurious Vector write: 0x{:08x} (APIC {})",
-                        value,
-                        if enabled { "enabled" } else { "disabled" }
-                    );
-                }
+                LAPIC_TPR => self.tpr = value & 0xff,
+                LAPIC_EOI => log::trace!("LAPIC EOI write"),
+                LAPIC_SPURIOUS => self.spurious_vector = value,
                 LAPIC_ICR_LOW | LAPIC_ICR_HIGH => {
-                    log::debug!("LAPIC ICR write at offset=0x{:x}: 0x{:08x}", offset, value);
+                    log::trace!("LAPIC ICR write at offset=0x{:x}: 0x{:08x}", offset, value)
                 }
                 LAPIC_TIMER_INITIAL => {
-                    log::debug!("LAPIC Timer Initial Count write: 0x{:08x}", value);
+                    log::trace!("LAPIC Timer Initial Count write: 0x{:08x}", value)
                 }
                 LAPIC_TIMER_DIVIDE => {
-                    log::debug!("LAPIC Timer Divide Config write: 0x{:08x}", value);
+                    log::trace!("LAPIC Timer Divide Config write: 0x{:08x}", value)
                 }
-                _ => {
-                    log::trace!(
-                        "LAPIC write at offset=0x{:x}, len={}, value=0x{:08x}",
-                        offset,
-                        data.len(),
-                        value
-                    );
-                }
+                _ => log::trace!(
+                    "LAPIC write at offset=0x{:x}, len={}, value=0x{:08x}",
+                    offset,
+                    data.len(),
+                    value
+                ),
             }
         } else {
-            // IOAPIC write
             match offset {
                 IOREGSEL => {
-                    // Write to register select
-                    self.ioregsel = (value & 0xFF) as u8;
-                    log::info!(
-                        "📤 IOAPIC IOREGSEL write: 0x{:02x} (selecting register)",
-                        self.ioregsel
-                    );
+                    self.ioregsel = (value & 0xff) as u8;
+                    log::trace!("IOAPIC IOREGSEL write: 0x{:02x}", self.ioregsel);
+                }
+                IOWIN if (IOAPIC_REDTBL_BASE..=0x3f).contains(&self.ioregsel) => {
+                    self.write_ioapic_redirection_register(value);
                 }
                 IOWIN => {
-                    // Write to the register selected by IOREGSEL
-                    log::info!(
-                        "📤 IOAPIC IOWIN write: reg=0x{:02x}, value=0x{:08x}",
+                    log::trace!(
+                        "IOAPIC IOWIN write: reg=0x{:02x}, value=0x{:08x}",
                         self.ioregsel,
                         value
                     );
-                    // For now, just log the write. In a full implementation,
-                    // we would store redirection table entries, etc.
                 }
-                _ => {
-                    log::warn!(
-                        "IOAPIC write at unknown offset=0x{:x}, len={}, value=0x{:08x}",
-                        offset,
-                        data.len(),
-                        value
-                    );
-                }
+                _ => log::warn!(
+                    "IOAPIC write at unknown offset=0x{:x}, len={}, value=0x{:08x}",
+                    offset,
+                    data.len(),
+                    value
+                ),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::bus::BusDevice;
+
+    use super::{query_route, ApicStub, IoApicRoute, IOAPIC_REDTBL_BASE, IOREGSEL, IOWIN};
+
+    #[test]
+    fn ioapic_redirection_table_is_persistent() {
+        let mut stub = ApicStub::new(super::IOAPIC_BASE);
+
+        stub.write(0, IOREGSEL, &[IOAPIC_REDTBL_BASE, 0, 0, 0]);
+        stub.write(0, IOWIN, &[0x31, 0x08, 0x00, 0x00]);
+        stub.write(0, IOREGSEL, &[IOAPIC_REDTBL_BASE + 1, 0, 0, 0]);
+        stub.write(0, IOWIN, &[0x00, 0x00, 0x00, 0x02]);
+
+        assert_eq!(
+            query_route(0).unwrap(),
+            IoApicRoute {
+                vector: 0x31,
+                delivery_mode: 0,
+                destination_mode_logical: true,
+                trigger_mode_level: false,
+                masked: false,
+                destination: 0x02,
+            }
+        );
+
+        let mut low = [0u8; 4];
+        let mut high = [0u8; 4];
+        stub.write(0, IOREGSEL, &[IOAPIC_REDTBL_BASE, 0, 0, 0]);
+        stub.read(0, IOWIN, &mut low);
+        stub.write(0, IOREGSEL, &[IOAPIC_REDTBL_BASE + 1, 0, 0, 0]);
+        stub.read(0, IOWIN, &mut high);
+
+        assert_eq!(u32::from_le_bytes(low), 0x0000_0831);
+        assert_eq!(u32::from_le_bytes(high), 0x0200_0000);
     }
 }

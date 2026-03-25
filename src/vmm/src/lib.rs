@@ -68,7 +68,58 @@ use kernel::cmdline::Cmdline as KernelCmdline;
 use polly::event_manager::{self, EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::EventFd;
+use vm_memory::Bytes;
 use vm_memory::GuestMemoryMmap;
+
+#[cfg(target_os = "windows")]
+fn windows_vmm_debug_log(message: impl AsRef<str>) {
+    use std::io::Write;
+
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(r"C:\Users\18770\.a3s\libkrun-whpx-exit-current.log")
+    {
+        let _ = writeln!(file, "{}", message.as_ref());
+    }
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn windows_format_hex(bytes: &[u8]) -> String {
+    bytes.iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn windows_dump_guest_boot_layout(guest_memory: &GuestMemoryMmap) {
+    use vm_memory::GuestAddress;
+
+    let ebda_segment = guest_memory.read_obj::<u16>(GuestAddress(0x40E)).ok();
+    let conventional_kb = guest_memory.read_obj::<u16>(GuestAddress(0x413)).ok();
+    let ebda_addr = ebda_segment.map(|segment| u64::from(segment) << 4);
+
+    let mut mp_window = [0u8; 32];
+    let mp_bytes = if guest_memory
+        .read_slice(&mut mp_window, GuestAddress(arch::x86_64::layout::EBDA_START))
+        .is_ok()
+    {
+        windows_format_hex(&mp_window)
+    } else {
+        String::from("<read-failed>")
+    };
+
+    windows_vmm_debug_log(format!(
+        "[BOOTMEM] bda_40e={:#06x} bda_413={}KB ebda_addr={:#07x} ebda_start={:#07x} mp_sig={:?} mp_bytes={}",
+        ebda_segment.unwrap_or_default(),
+        conventional_kb.unwrap_or_default(),
+        ebda_addr.unwrap_or_default(),
+        arch::x86_64::layout::EBDA_START,
+        &mp_window[..4],
+        mp_bytes
+    ));
+}
 
 /// Success exit code.
 pub const FC_EXIT_CODE_OK: u8 = 0;
@@ -295,6 +346,33 @@ impl Vmm {
                 vcpus.len() as u8,
             )
             .map_err(Error::ConfigureSystem)?;
+
+            #[cfg(target_os = "windows")]
+            {
+                const EBDA_SEGMENT: u16 = (arch::x86_64::layout::EBDA_START >> 4) as u16;
+                const CONVENTIONAL_MEM_KB: u16 = (arch::x86_64::layout::EBDA_START >> 10) as u16;
+
+                // Linux consults BDA:0x40E to locate the EBDA when scanning for the
+                // legacy MP floating pointer. Without this, the MP table written at
+                // 0x9FC00 can be missed and the guest may stay on legacy PIC mode.
+                self.guest_memory
+                    .write_obj(EBDA_SEGMENT, vm_memory::GuestAddress(0x40E))
+                    .map_err(|_| Error::ConfigureSystem(arch::Error::ZeroPageSetup))?;
+                self.guest_memory
+                    .write_obj(CONVENTIONAL_MEM_KB, vm_memory::GuestAddress(0x413))
+                    .map_err(|_| Error::ConfigureSystem(arch::Error::ZeroPageSetup))?;
+                windows::acpi::install_minimal_acpi_tables(&self.guest_memory, vcpus.len() as u8)
+                    .map_err(|_| Error::ConfigureSystem(arch::Error::ZeroPageSetup))?;
+                let (rsdp_addr, rsdt_addr, madt_addr) = windows::acpi::table_addresses();
+                windows_vmm_debug_log(format!(
+                    "[ACPI] rsdp={:#07x} rsdt={:#07x} madt={:#07x} cpus={}",
+                    rsdp_addr,
+                    rsdt_addr,
+                    madt_addr,
+                    vcpus.len()
+                ));
+                windows_dump_guest_boot_layout(&self.guest_memory);
+            }
         }
 
         #[cfg(target_arch = "aarch64")]
@@ -361,6 +439,8 @@ impl Vmm {
     /// Waits for all vCPUs to exit and terminates the Firecracker process.
     pub fn stop(&mut self, exit_code: i32) {
         info!("Vmm is stopping.");
+        #[cfg(target_os = "windows")]
+        windows_vmm_debug_log(format!("[VMM] stop exit_code={exit_code}"));
 
         for observer in &self.exit_observers {
             observer
@@ -430,6 +510,11 @@ impl Subscriber for Vmm {
                 debug!("using vcpu exit code: {vcpu_exit_code}");
                 vcpu_exit_code as i32
             };
+            #[cfg(target_os = "windows")]
+            windows_vmm_debug_log(format!(
+                "[VMM] exit_evt vcpu_exit_code={} vmm_exit_code={} final_exit_code={}",
+                vcpu_exit_code, vmm_exit_code, exit_code
+            ));
             self.stop(exit_code);
         } else {
             error!("Spurious EventManager event for handler: Vmm");

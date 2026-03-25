@@ -9,10 +9,10 @@
 //! guest RX queue.  When no backend is connected TX frames are silently
 //! dropped and the RX queue is never filled.
 
+use std::io;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Mutex;
-use std::io;
 
 use polly::event_manager::{EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
@@ -20,19 +20,18 @@ use utils::eventfd::{EventFd, EFD_NONBLOCK};
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
 use super::{
-    ActivateError, ActivateResult, DeviceState, InterruptTransport, Queue,
-    VirtioDevice, TYPE_NET,
+    ActivateError, ActivateResult, DeviceState, InterruptTransport, Queue, VirtioDevice, TYPE_NET,
 };
 
 // ── virtio-net feature bits ───────────────────────────────────────────────────
 const VIRTIO_F_VERSION_1: u32 = 32;
-const VIRTIO_NET_F_CSUM: u32 = 0;        // device handles partial checksums
-const VIRTIO_NET_F_GUEST_CSUM: u32 = 1;  // driver handles partial checksums
-const VIRTIO_NET_F_MAC: u32 = 5;         // device has a MAC address
-const VIRTIO_NET_F_HOST_TSO4: u32 = 11;  // device can receive TSOv4
-const VIRTIO_NET_F_HOST_TSO6: u32 = 12;  // device can receive TSOv6
-const VIRTIO_NET_F_GUEST_TSO4: u32 = 7;  // driver can receive TSOv4
-const VIRTIO_NET_F_GUEST_TSO6: u32 = 8;  // driver can receive TSOv6
+const VIRTIO_NET_F_CSUM: u32 = 0; // device handles partial checksums
+const VIRTIO_NET_F_GUEST_CSUM: u32 = 1; // driver handles partial checksums
+const VIRTIO_NET_F_MAC: u32 = 5; // device has a MAC address
+const VIRTIO_NET_F_HOST_TSO4: u32 = 11; // device can receive TSOv4
+const VIRTIO_NET_F_HOST_TSO6: u32 = 12; // device can receive TSOv6
+const VIRTIO_NET_F_GUEST_TSO4: u32 = 7; // driver can receive TSOv4
+const VIRTIO_NET_F_GUEST_TSO6: u32 = 8; // driver can receive TSOv6
 
 // ── queue indices ─────────────────────────────────────────────────────────────
 const RX_INDEX: usize = 0;
@@ -122,7 +121,11 @@ impl Net {
     /// `mac` is the 6-byte MAC address advertised to the guest.
     /// `backend` is an optional TCP stream used for packet I/O.  When `None`
     /// all TX frames are silently dropped and no RX frames are ever produced.
-    pub fn new(id: impl Into<String>, mac: [u8; 6], backend: Option<TcpStream>) -> io::Result<Self> {
+    pub fn new(
+        id: impl Into<String>,
+        mac: [u8; 6],
+        backend: Option<TcpStream>,
+    ) -> io::Result<Self> {
         // Validate MAC address
         if mac[0] & 0x01 != 0 {
             return Err(io::Error::new(
@@ -200,7 +203,13 @@ impl Net {
                 // Read the virtio-net header first
                 if hdr_bytes_read < VIRTIO_NET_HDR_SIZE {
                     let to_read = (VIRTIO_NET_HDR_SIZE - hdr_bytes_read).min(len);
-                    if mem.read_slice(&mut hdr_bytes[hdr_bytes_read..hdr_bytes_read + to_read], desc.addr).is_err() {
+                    if mem
+                        .read_slice(
+                            &mut hdr_bytes[hdr_bytes_read..hdr_bytes_read + to_read],
+                            desc.addr,
+                        )
+                        .is_err()
+                    {
                         break;
                     }
                     hdr_bytes_read += to_read;
@@ -229,7 +238,11 @@ impl Net {
 
                 // Handle checksum offload even without backend (for correctness)
                 if hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
-                    Self::compute_checksum(&mut frame_data, hdr.csum_start as usize, hdr.csum_offset as usize);
+                    Self::compute_checksum(
+                        &mut frame_data,
+                        hdr.csum_start as usize,
+                        hdr.csum_offset as usize,
+                    );
                 }
 
                 // Handle TSO/GSO - for now just validate
@@ -335,7 +348,13 @@ impl Net {
                 if hdr_written < VIRTIO_NET_HDR_SIZE {
                     let hdr_remaining = VIRTIO_NET_HDR_SIZE - hdr_written;
                     let hdr_to_write = hdr_remaining.min(desc_len);
-                    if mem.write_slice(&hdr_bytes[hdr_written..hdr_written + hdr_to_write], desc.addr).is_err() {
+                    if mem
+                        .write_slice(
+                            &hdr_bytes[hdr_written..hdr_written + hdr_to_write],
+                            desc.addr,
+                        )
+                        .is_err()
+                    {
                         break;
                     }
                     hdr_written += hdr_to_write;
@@ -435,7 +454,9 @@ impl VirtioDevice for Net {
         let max_pairs: u16 = 1;
         cfg[8..10].copy_from_slice(&max_pairs.to_le_bytes());
 
-        let end = (offset as usize).saturating_add(data.len()).min(CONFIG_SPACE_SIZE);
+        let end = (offset as usize)
+            .saturating_add(data.len())
+            .min(CONFIG_SPACE_SIZE);
         let start = (offset as usize).min(end);
         let slice = &cfg[start..end];
         data[..slice.len()].copy_from_slice(slice);

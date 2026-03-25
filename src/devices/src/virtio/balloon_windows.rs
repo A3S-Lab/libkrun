@@ -5,7 +5,9 @@ use polly::event_manager::{EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::{EventFd, EFD_NONBLOCK};
 use vm_memory::{ByteValued, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
-use windows::Win32::System::Memory::{DiscardVirtualMemory, VirtualAlloc, MEM_RESET, PAGE_READWRITE};
+use windows::Win32::System::Memory::{
+    DiscardVirtualMemory, VirtualAlloc, MEM_RESET, PAGE_READWRITE,
+};
 
 const IFQ_INDEX: usize = 0; // Inflate queue
 const DFQ_INDEX: usize = 1; // Deflate queue
@@ -14,6 +16,21 @@ const PHQ_INDEX: usize = 3; // Page-hinting queue
 const FRQ_INDEX: usize = 4; // Free page reporting queue
 
 const AVAIL_FEATURES: u64 = (1 << 32) | (1 << 1) | (1 << 5) | (1 << 6);
+
+#[cfg(target_os = "windows")]
+fn balloon_debug_log(message: impl AsRef<str>) {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let message = message.as_ref();
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(r"D:\code\libkrun\tmp_event_manager.log")
+    {
+        let _ = writeln!(file, "{message}");
+    }
+}
 
 #[derive(Copy, Clone, Debug, Default)]
 #[repr(C, packed)]
@@ -105,8 +122,8 @@ impl Balloon {
     }
 
     /// Process page-hinting queue: guest hints that pages can be reclaimed.
-    /// Unlike inflate, this is a soft hint - pages remain accessible but can be
-    /// reclaimed by the OS if needed. Uses MEM_RESET for lazy reclamation.
+    /// On Windows this hint is advisory only, so acknowledge it without
+    /// walking every PFN on the event-manager thread.
     fn process_phq(&mut self) -> bool {
         let DeviceState::Activated(ref mem, _) = self.state else {
             return false;
@@ -116,31 +133,6 @@ impl Balloon {
 
         while let Some(head) = self.queues[PHQ_INDEX].pop(mem) {
             let index = head.index;
-
-            for desc in head.into_iter() {
-                // Each PFN is 4 bytes (u32)
-                let pfn_count = (desc.len as usize) / 4;
-                let mut pfn_bytes = vec![0u8; pfn_count * 4];
-
-                if mem.read_slice(&mut pfn_bytes, desc.addr).is_ok() {
-                    // Convert bytes to u32 PFNs (little-endian)
-                    for chunk in pfn_bytes.chunks_exact(4) {
-                        let pfn = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                        let gpa = GuestAddress((pfn as u64) << 12); // PFN to GPA (4KB pages)
-                        if let Ok(host_addr) = mem.get_host_address(gpa) {
-                            // Use MEM_RESET for soft hinting - pages remain valid but can be reclaimed
-                            unsafe {
-                                let _ = VirtualAlloc(
-                                    Some(host_addr as *const _),
-                                    4096,
-                                    MEM_RESET,
-                                    PAGE_READWRITE,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
 
             have_used = true;
             if let Err(e) = self.queues[PHQ_INDEX].add_used(mem, index, 0) {
@@ -233,6 +225,16 @@ impl Balloon {
         let Ok(self_subscriber) = event_manager.subscriber(self.activate_evt.as_raw_fd()) else {
             return;
         };
+
+        #[cfg(target_os = "windows")]
+        balloon_debug_log(format!(
+            "balloon register_runtime_events activate_fd={} queue_fds={:?}",
+            self.activate_evt.as_raw_fd(),
+            self.queue_events
+                .iter()
+                .map(|evt| evt.as_raw_fd())
+                .collect::<Vec<_>>()
+        ));
 
         for evt in &self.queue_events {
             let fd = evt.as_raw_fd();

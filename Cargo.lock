@@ -5,6 +5,9 @@ version = 4
 [[package]]
 name = "a3s-libkrun-sys"
 version = "0.1.0"
+dependencies = [
+ "windows-sys 0.59.0",
+]
 
 [[package]]
 name = "addr2line"
@@ -908,6 +911,9 @@ dependencies = [
 [[package]]
 name = "libkrunfw-windows"
 version = "5.0.0"
+dependencies = [
+ "flate2",
+]
 
 [[package]]
 name = "libloading"

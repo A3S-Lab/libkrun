@@ -4,9 +4,7 @@ use polly::event_manager::{EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::{EventFd, EFD_NONBLOCK};
 use vm_memory::{Bytes, GuestMemoryMmap};
-use windows::Win32::Security::Cryptography::{
-    BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-};
+use windows::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
 
 use super::{ActivateError, ActivateResult, DeviceState, InterruptTransport, Queue, VirtioDevice};
 
@@ -17,6 +15,21 @@ const VIRTIO_F_VERSION_1: u32 = 32;
 const VIRTIO_ID_RNG: u32 = 4;
 
 const AVAIL_FEATURES: u64 = 1 << VIRTIO_F_VERSION_1 as u64;
+
+#[cfg(target_os = "windows")]
+fn rng_debug_log(message: impl AsRef<str>) {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let message = message.as_ref();
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(r"D:\code\libkrun\tmp_event_manager.log")
+    {
+        let _ = writeln!(file, "{message}");
+    }
+}
 
 pub struct Rng {
     queues: Vec<Queue>,
@@ -46,6 +59,16 @@ impl Rng {
             return;
         };
 
+        #[cfg(target_os = "windows")]
+        rng_debug_log(format!(
+            "rng register_runtime_events activate_fd={} queue_fds={:?}",
+            self.activate_evt.as_raw_fd(),
+            self.queue_events
+                .iter()
+                .map(|evt| evt.as_raw_fd())
+                .collect::<Vec<_>>()
+        ));
+
         let fd = self.queue_events[REQ_INDEX].as_raw_fd();
         let event = EpollEvent::new(EventSet::IN, fd as u64);
         if let Err(e) = event_manager.register(fd, event, self_subscriber.clone()) {
@@ -73,11 +96,7 @@ impl Rng {
 
                 // Use Windows BCryptGenRandom for cryptographically secure random data
                 let result = unsafe {
-                    BCryptGenRandom(
-                        None,
-                        &mut rand_bytes,
-                        BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-                    )
+                    BCryptGenRandom(None, &mut rand_bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG)
                 };
 
                 if result.is_err() {

@@ -1,0 +1,13 @@
+# Required for libkrun Windows/WHPX x86_64.
+# Keep this file free of CONFIG_* mentions in comments because
+# scripts/kconfig/merge_config.sh matches them textually.
+
+CONFIG_VIRTIO_MMIO=y
+CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y
+CONFIG_X86_MPPARSE=y
+
+# Build the core transports into the kernel image so the bundled vmlinux can
+# boot without relying on external modules.
+CONFIG_VIRTIO_BLK=y
+CONFIG_VIRTIO_VSOCKETS=y
+CONFIG_HW_RANDOM_VIRTIO=y

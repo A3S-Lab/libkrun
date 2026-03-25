@@ -30,12 +30,12 @@ pub mod machine_config;
 /// Wrapper for configuring the vsock devices attached to the microVM.
 pub mod vsock;
 
+/// Wrapper for configuring the Windows virtio-blk devices.
+#[cfg(target_os = "windows")]
+pub mod block_windows;
 /// Wrapper for configuring the network devices attached to the microVM.
 #[cfg(feature = "net")]
 pub mod net;
 /// Wrapper for configuring the Windows virtio-net devices.
 #[cfg(target_os = "windows")]
 pub mod net_windows;
-/// Wrapper for configuring the Windows virtio-blk devices.
-#[cfg(target_os = "windows")]
-pub mod block_windows;

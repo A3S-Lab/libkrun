@@ -48,6 +48,8 @@ use vmm::resources::{
 };
 #[cfg(feature = "blk")]
 use vmm::vmm_config::block::{BlockDeviceConfig, BlockRootConfig};
+#[cfg(target_os = "windows")]
+use vmm::vmm_config::block_windows::BlockWindowsConfig;
 #[cfg(not(feature = "tee"))]
 use vmm::vmm_config::external_kernel::{ExternalKernel, KernelFormat};
 #[cfg(not(feature = "tee"))]
@@ -63,8 +65,6 @@ use vmm::vmm_config::machine_config::VmConfig;
 use vmm::vmm_config::net::NetworkInterfaceConfig;
 #[cfg(target_os = "windows")]
 use vmm::vmm_config::net_windows::NetWindowsConfig;
-#[cfg(target_os = "windows")]
-use vmm::vmm_config::block_windows::BlockWindowsConfig;
 use vmm::vmm_config::vsock::VsockDeviceConfig;
 
 #[cfg(feature = "nitro")]
@@ -105,10 +105,26 @@ type KrunGid = u32;
 static KRUN_NITRO_DEBUG: Mutex<bool> = Mutex::new(false);
 
 // Path to the init binary to be executed inside the VM.
+#[cfg(not(target_os = "windows"))]
+const INIT_PATH: &str = "/init.krun";
+#[cfg(target_os = "windows")]
 const INIT_PATH: &str = "/init.krun";
 
 static KRUNFW: LazyLock<Option<libloading::Library>> =
     LazyLock::new(|| unsafe { libloading::Library::new(KRUNFW_NAME).ok() });
+
+#[cfg(target_os = "windows")]
+fn windows_boot_debug_log(message: impl AsRef<str>) {
+    use std::io::Write;
+
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(r"C:\Users\18770\.a3s\libkrun-boot-current.log")
+    {
+        let _ = writeln!(file, "{}", message.as_ref());
+    }
+}
 
 pub struct KrunfwBindings {
     get_kernel: libloading::Symbol<
@@ -461,9 +477,45 @@ fn log_level_to_filter_str(level: u32) -> &'static str {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn windows_verbose_debug_enabled() -> bool {
+    std::env::var("LIBKRUN_WINDOWS_VERBOSE_DEBUG")
+        .or_else(|_| std::env::var("LIBKRUN_WINDOWS_IO_DEBUG"))
+        .or_else(|_| std::env::var("LIBKRUN_WINDOWS_VCPU_DEBUG"))
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn effective_log_filter(level: u32) -> String {
+    let base = log_level_to_filter_str(level);
+    if windows_verbose_debug_enabled() || level <= 2 {
+        return base.to_string();
+    }
+
+    format!(
+        "{base},\
+devices::virtio::mmio=warn,\
+devices::virtio::fs::device=warn,\
+devices::virtio::fs::worker=warn,\
+devices::virtio::fs::server=warn,\
+devices::virtio::fs::windows::passthrough=warn,\
+devices::legacy::windows_apic_stub=warn,\
+devices::legacy::windows_pic_stub=warn,\
+vmm::builder=warn,\
+vmm::windows::vstate=warn,\
+vmm::windows::whpx_vcpu=warn"
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+fn effective_log_filter(level: u32) -> String {
+    log_level_to_filter_str(level).to_string()
+}
+
 #[no_mangle]
 pub extern "C" fn krun_set_log_level(level: u32) -> i32 {
-    let filter = log_level_to_filter_str(level);
+    let filter = effective_log_filter(level);
     env_logger::Builder::from_env(Env::default().default_filter_or(filter)).init();
 
     #[cfg(feature = "nitro")]
@@ -501,7 +553,7 @@ pub unsafe extern "C" fn krun_init_log(target: RawFd, level: u32, style: u32, op
         _ => return -libc::EINVAL,
     };
 
-    let filter = log_level_to_filter_str(level);
+    let filter = effective_log_filter(level);
 
     let write_style = match style {
         log_defs::KRUN_LOG_STYLE_AUTO => "auto",
@@ -524,7 +576,7 @@ pub unsafe extern "C" fn krun_init_log(target: RawFd, level: u32, style: u32, op
         )
     } else {
         let mut builder = env_logger::Builder::new();
-        builder.parse_filters(filter).parse_write_style(write_style);
+        builder.parse_filters(&filter).parse_write_style(write_style);
         builder
     };
     builder.target(target).init();
@@ -1175,8 +1227,13 @@ pub unsafe extern "C" fn krun_add_net_tcp(
     match CTX_MAP.lock().unwrap().entry(ctx_id) {
         Entry::Occupied(mut ctx_cfg) => {
             let cfg = ctx_cfg.get_mut();
-            if cfg.vmr
-                .add_net_device_windows(NetWindowsConfig { iface_id, mac, tcp_addr })
+            if cfg
+                .vmr
+                .add_net_device_windows(NetWindowsConfig {
+                    iface_id,
+                    mac,
+                    tcp_addr,
+                })
                 .is_err()
             {
                 return -libc::EINVAL;
@@ -1217,7 +1274,8 @@ pub unsafe extern "C" fn krun_add_disk(
     match CTX_MAP.lock().unwrap().entry(ctx_id) {
         Entry::Occupied(mut ctx_cfg) => {
             let cfg = ctx_cfg.get_mut();
-            if cfg.vmr
+            if cfg
+                .vmr
                 .add_block_device_windows(BlockWindowsConfig {
                     block_id,
                     disk_image_path: disk_path,
@@ -1423,6 +1481,20 @@ unsafe fn collapse_str_array(array: &[*const c_char]) -> Result<String, std::str
     Ok(strvec.join(" "))
 }
 
+fn default_guest_env() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        String::new()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        env::vars()
+            .map(|(key, value)| format!(" {key}=\"{value}\""))
+            .collect()
+    }
+}
+
 #[allow(clippy::format_collect)]
 #[allow(clippy::missing_safety_doc)]
 #[no_mangle]
@@ -1463,9 +1535,7 @@ pub unsafe extern "C" fn krun_set_exec(
             }
         }
     } else {
-        env::vars()
-            .map(|(key, value)| format!(" {key}=\"{value}\""))
-            .collect()
+        default_guest_env()
     };
 
     match CTX_MAP.lock().unwrap().entry(ctx_id) {
@@ -1474,6 +1544,15 @@ pub unsafe extern "C" fn krun_set_exec(
             cfg.set_exec_path(exec_path.to_string());
             cfg.set_env(env);
             cfg.set_args(args);
+            #[cfg(target_os = "windows")]
+            windows_boot_debug_log(format!(
+                "krun_set_exec ctx={} exec_path={} args={} env_has_box_windows_port_fwd={} env_has_krun_init_pid1={}",
+                ctx_id,
+                exec_path,
+                cfg.get_args(),
+                cfg.get_env().contains("BOX_WINDOWS_PORT_FWD"),
+                cfg.get_env().contains("KRUN_INIT_PID1"),
+            ));
         }
         Entry::Vacant(_) => return -libc::ENOENT,
     }
@@ -1495,9 +1574,7 @@ pub unsafe extern "C" fn krun_set_env(ctx_id: u32, c_envp: *const *const c_char)
             }
         }
     } else {
-        env::vars()
-            .map(|(key, value)| format!(" {key}=\"{value}\""))
-            .collect()
+        default_guest_env()
     };
 
     match CTX_MAP.lock().unwrap().entry(ctx_id) {
@@ -2739,18 +2816,32 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         return -libc::EINVAL;
     }
 
+    #[cfg(target_os = "windows")]
+    let windows_internal_env = " KRUN_STRIP_INTERNAL_ARGS=1";
+    #[cfg(not(target_os = "windows"))]
+    let windows_internal_env = "";
+
     let kernel_cmdline = KernelCmdlineConfig {
         prolog: Some(format!("{DEFAULT_KERNEL_CMDLINE} init={INIT_PATH}")),
         krun_env: Some(format!(
-            " {} {} {} {} {}",
+            " {} {} {} {} {}{}",
             ctx_cfg.get_exec_path(),
             ctx_cfg.get_workdir(),
             ctx_cfg.get_block_root(),
             ctx_cfg.get_rlimits(),
             ctx_cfg.get_env(),
+            windows_internal_env,
         )),
         epilog: Some(format!(" -- {}", ctx_cfg.get_args())),
     };
+
+    #[cfg(target_os = "windows")]
+    windows_boot_debug_log(format!(
+        "krun_start_enter ctx={} krun_env={} epilog={}",
+        ctx_id,
+        kernel_cmdline.krun_env.as_deref().unwrap_or(""),
+        kernel_cmdline.epilog.as_deref().unwrap_or(""),
+    ));
 
     if ctx_cfg.vmr.set_kernel_cmdline(kernel_cmdline).is_err() {
         return -libc::EINVAL;

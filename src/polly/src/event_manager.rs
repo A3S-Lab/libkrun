@@ -6,9 +6,9 @@ use std::fmt::Formatter;
 use std::io;
 #[cfg(not(target_os = "windows"))]
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::sync::{Arc, Mutex};
 #[cfg(target_os = "windows")]
 use utils::epoll::RawFd;
-use std::sync::{Arc, Mutex};
 
 use utils::epoll::{self, Epoll, EpollEvent};
 

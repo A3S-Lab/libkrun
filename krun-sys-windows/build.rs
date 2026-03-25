@@ -16,8 +16,8 @@ fn main() {
         return;
     }
 
-    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH")
-        .unwrap_or_else(|_| "x86_64".to_string());
+    let target_arch =
+        std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "x86_64".to_string());
     // MSVC triple used for the prebuilt subdirectory name.
     let triple = format!("{}-pc-windows-msvc", target_arch);
 
@@ -30,16 +30,23 @@ fn main() {
             .join(&triple)
     };
 
-    let krun_lib = lib_dir.join("krun.lib");
+    let krun_lib = {
+        let canonical = lib_dir.join("krun.lib");
+        if canonical.exists() {
+            canonical
+        } else {
+            lib_dir.join("krun.dll.lib")
+        }
+    };
     if !krun_lib.exists() {
         // Emit a warning instead of panicking so that `cargo check` and IDE
         // tools work without a pre-built library.  The linker will produce a
         // clear error if krun.lib is genuinely absent during `cargo build`.
         println!(
-            "cargo:warning=krun.lib not found at {}. \
+            "cargo:warning=krun import library not found at {}. \
              Build libkrun first (`cargo build --release -p libkrun \
              --target {triple}`) and either set LIBKRUN_DIR to the output \
-             directory or copy krun.lib into krun-sys-windows/prebuilt/{triple}/",
+             directory or copy krun.lib/krun.dll.lib into krun-sys-windows/prebuilt/{triple}/",
             krun_lib.display(),
             triple = triple,
         );
@@ -59,8 +66,5 @@ fn main() {
 
     // --- Rerun triggers ---
     println!("cargo:rerun-if-env-changed=LIBKRUN_DIR");
-    println!(
-        "cargo:rerun-if-changed=prebuilt/{}/krun.lib",
-        triple
-    );
+    println!("cargo:rerun-if-changed=prebuilt/{}/krun.lib", triple);
 }

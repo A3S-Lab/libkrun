@@ -44,6 +44,10 @@ const OFS_STATUS: u64 = 4;
 /// Offset of the data port (port 0x60)
 const OFS_DATA: u64 = 0;
 
+#[cfg(target_os = "windows")]
+/// Offset of port 0x61 (speaker/NMI latch) within the existing 0x60..0x64 range.
+const OFS_PORT61: u64 = 1;
+
 /// i8042 commands
 /// These values are written by the guest driver to port 0x64.
 const CMD_READ_CTR: u8 = 0x20; // Read control register
@@ -86,6 +90,10 @@ pub struct I8042Device {
     /// The i8042 output port.
     outp: u8,
 
+    #[cfg(target_os = "windows")]
+    /// Port 0x61 latch used by Linux PIT calibration on WHPX.
+    port61: u8,
+
     /// The last command sent to port 0x64.
     cmd: u8,
 
@@ -104,6 +112,8 @@ impl I8042Device {
             control: CB_POST_OK | CB_KBD_INT,
             cmd: 0,
             outp: 0,
+            #[cfg(target_os = "windows")]
+            port61: 0,
             status: SB_KBD_ENABLED,
             buf: [0; BUF_SIZE],
             bhead: Wrapping(0),
@@ -215,6 +225,8 @@ impl BusDevice for I8042Device {
                     }
                 }
             }
+            #[cfg(target_os = "windows")]
+            OFS_PORT61 => data[0] = self.port61 | 0x20,
             _ => {}
         }
     }
@@ -294,6 +306,8 @@ impl BusDevice for I8042Device {
                     warn!("Failed to trigger i8042 kbd interrupt {err:?}");
                 }
             }
+            #[cfg(target_os = "windows")]
+            OFS_PORT61 => self.port61 = data[0],
             _ => {}
         }
     }
@@ -332,8 +346,11 @@ mod tests {
         i8042.write(0, OFS_STATUS, &data);
         assert_eq!(reset_evt.read().unwrap(), 2);
 
-        // Check if reading with offset 1 doesn't have side effects.
+        // Check if reading with offset 1 doesn't affect the reset path.
         i8042.read(0, 1, &mut data);
+        #[cfg(target_os = "windows")]
+        assert_eq!(data[0], 0x20);
+        #[cfg(not(target_os = "windows"))]
         assert_eq!(data[0], CMD_RESET_CPU);
     }
 
@@ -375,6 +392,22 @@ mod tests {
         assert_ne!(i8042.status & SB_OUT_DATA_AVAIL, 0);
         i8042.read(0, OFS_DATA, &mut data);
         assert_eq!(data[0], 0xFA);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_i8042_port61_windows() {
+        let mut i8042 = I8042Device::new(
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+            EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+        );
+        let mut data = [0x03];
+
+        i8042.write(0, OFS_PORT61, &data);
+        data[0] = 0;
+        i8042.read(0, OFS_PORT61, &mut data);
+
+        assert_eq!(data[0], 0x23);
     }
 
     #[test]

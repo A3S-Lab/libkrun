@@ -42,11 +42,11 @@ pub use libc::stat64;
 #[derive(Debug, Default, Copy, Clone)]
 pub struct stat64 {
     pub st_dev: u64,
-    pub st_ino: u64,     // 64-bit: supports > 65535 files
+    pub st_ino: u64, // 64-bit: supports > 65535 files
     pub st_mode: u32,
     pub st_nlink: u32,
-    pub st_uid: u32,     // 32-bit: matches FUSE uid field
-    pub st_gid: u32,     // 32-bit: matches FUSE gid field
+    pub st_uid: u32, // 32-bit: matches FUSE uid field
+    pub st_gid: u32, // 32-bit: matches FUSE gid field
     pub st_rdev: u32,
     pub st_size: i64,
     pub st_atime: i64,

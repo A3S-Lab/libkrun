@@ -47,8 +47,8 @@ impl TsiDgramProxyWindows {
         };
 
         // Create UDP socket
-        let socket = WindowsSocket::new(family, SockType::Dgram)
-            .map_err(ProxyError::CreatingSocket)?;
+        let socket =
+            WindowsSocket::new(family, SockType::Dgram).map_err(ProxyError::CreatingSocket)?;
 
         // Set non-blocking mode
         socket
@@ -175,15 +175,7 @@ mod tests {
         let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap();
         let queue = Arc::new(Mutex::new(VirtQueue::new(256)));
 
-        let proxy = TsiDgramProxyWindows::new(
-            1,
-            2,
-            defs::LINUX_AF_INET,
-            8080,
-            9090,
-            mem,
-            queue,
-        );
+        let proxy = TsiDgramProxyWindows::new(1, 2, defs::LINUX_AF_INET, 8080, 9090, mem, queue);
 
         assert!(proxy.is_ok());
         let proxy = proxy.unwrap();

@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "blk")]
 use crate::vmm_config::block::{BlockBuilder, BlockConfigError, BlockDeviceConfig};
+#[cfg(target_os = "windows")]
+use crate::vmm_config::block_windows::{
+    BlockWindowsBuilder, BlockWindowsConfig, BlockWindowsError,
+};
 use crate::vmm_config::external_kernel::ExternalKernel;
 use crate::vmm_config::firmware::FirmwareConfig;
 #[cfg(not(feature = "tee"))]
@@ -25,10 +29,6 @@ use crate::vmm_config::kernel_cmdline::{KernelCmdlineConfig, KernelCmdlineConfig
 use crate::vmm_config::machine_config::{VmConfig, VmConfigError};
 #[cfg(feature = "net")]
 use crate::vmm_config::net::{NetBuilder, NetworkInterfaceConfig, NetworkInterfaceError};
-#[cfg(target_os = "windows")]
-use crate::vmm_config::block_windows::{
-    BlockWindowsBuilder, BlockWindowsConfig, BlockWindowsError,
-};
 #[cfg(target_os = "windows")]
 use crate::vmm_config::net_windows::{NetWindowsBuilder, NetWindowsConfig, NetWindowsError};
 use crate::vmm_config::vsock::*;
