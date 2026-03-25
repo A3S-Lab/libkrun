@@ -3,6 +3,10 @@
 `libkrunfw-windows` embeds a single x86_64 Linux `vmlinux` at
 `src/libkrunfw-win/kernel/vmlinux`.
 
+Full setup guide:
+
+- [VMLINUX_SETUP.md](./VMLINUX_SETUP.md)
+
 For the current Windows/WHPX backend, the guest must support
 `virtio_mmio.device=` kernel command-line discovery on x86_64. The stock WSL2
 kernel does not enable this, so a plain upstream `microsoft-standard-WSL2`
@@ -58,6 +62,9 @@ make -j"$(nproc)" vmlinux
 Then copy the resulting `vmlinux` to:
 
 `src/libkrunfw-win/kernel/vmlinux`
+
+For a step-by-step guide including dependency installation, validation, and
+common failure modes, see [VMLINUX_SETUP.md](./VMLINUX_SETUP.md).
 
 ## Validation
 

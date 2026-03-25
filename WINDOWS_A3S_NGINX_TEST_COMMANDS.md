@@ -2,6 +2,13 @@
 
 Use these commands in a normal Windows PowerShell window.
 
+Before running these commands, make sure the Windows guest kernel file exists at
+`D:\code\libkrun\src\libkrunfw-win\kernel\vmlinux`.
+
+Setup guide:
+
+- `D:\code\libkrun\src\libkrunfw-win\VMLINUX_SETUP.md`
+
 ## 1. Set runtime DLL path
 
 ```powershell

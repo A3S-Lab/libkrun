@@ -46,7 +46,8 @@ fn validate_kernel_config(vmlinux_path: &PathBuf) {
     if !missing.is_empty() {
         panic!(
             "kernel/vmlinux is not compatible with libkrun WHPX x86_64 MMIO discovery. Missing: {}. \
-             Rebuild or replace the bundled kernel with one that enables these options.",
+             Rebuild or replace the bundled kernel with one that enables these options. \
+             See src/libkrunfw-win/VMLINUX_SETUP.md.",
             missing.join(", ")
         );
     }
@@ -61,7 +62,8 @@ fn main() {
     if !vmlinux.exists() {
         panic!(
             "kernel/vmlinux not found. Place a Windows-capable x86_64 ELF vmlinux in \
-             src/libkrunfw-win/kernel/ before building libkrunfw-windows."
+             src/libkrunfw-win/kernel/ before building libkrunfw-windows. See \
+             src/libkrunfw-win/VMLINUX_SETUP.md for extraction and setup steps."
         );
     }
 
