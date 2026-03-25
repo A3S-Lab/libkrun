@@ -320,10 +320,26 @@ sudo make [FEATURE_OPTIONS] install
 * **Windows Hypervisor Platform** enabled (Settings → Optional Features, or `DISM /Online /Enable-Feature /FeatureName:HypervisorPlatform`)
 * A working [Rust](https://www.rust-lang.org/) toolchain with the `x86_64-pc-windows-msvc` target (`rustup target add x86_64-pc-windows-msvc`)
 * MSVC build tools (Visual Studio Build Tools 2019 or later)
+* A Windows-capable x86_64 ELF guest kernel at `src/libkrunfw-win/kernel/vmlinux`
+
+#### Windows kernel setup
+
+The Windows companion library expects a local `vmlinux` file at:
+
+`src/libkrunfw-win/kernel/vmlinux`
+
+That file is not stored in normal Git history because it is too large. Build it
+locally from the WSL2 kernel source, then copy it into place before building
+`libkrunfw-windows` / `libkrun`.
+
+Setup guide:
+
+- [`src/libkrunfw-win/VMLINUX_SETUP.md`](src/libkrunfw-win/VMLINUX_SETUP.md)
 
 #### Compiling
 
 ```powershell
+cargo build -p libkrunfw-windows --target x86_64-pc-windows-msvc --release
 cargo build -p libkrun --target x86_64-pc-windows-msvc --release
 ```
 
@@ -334,6 +350,10 @@ cargo build -p libkrun --target x86_64-pc-windows-msvc --release
 cargo test -p vmm --target x86_64-pc-windows-msvc --lib -- test_whpx_ --ignored --test-threads=1
 ```
 
+For a minimal end-to-end `a3s-box` nginx smoke flow on Windows, see:
+
+- [`WINDOWS_A3S_NGINX_TEST_COMMANDS.md`](WINDOWS_A3S_NGINX_TEST_COMMANDS.md)
+
 #### API differences from Linux/macOS
 
 | API | Windows equivalent |
@@ -341,7 +361,7 @@ cargo test -p vmm --target x86_64-pc-windows-msvc --lib -- test_whpx_ --ignored 
 | `krun_add_net_unixstream` | `krun_add_net_tcp` (TcpStream address or NULL for disconnected) |
 | `krun_add_vsock_port` | `krun_add_vsock_port_windows` (Named Pipe name for AF_UNIX) |
 | `krun_add_disk` | same (uses file-backed block device) |
-| libkrunfw (bundled kernel) | Ship `libkrunfw.dll` next to `krun.dll` for automatic bundled-kernel loading, or call `krun_set_kernel(ctx, path, KRUN_KERNEL_FORMAT_ELF, NULL, cmdline)` explicitly |
+| libkrunfw (bundled kernel) | Build `libkrunfw-windows` with a local `src/libkrunfw-win/kernel/vmlinux`, ship `libkrunfw.dll` next to `krun.dll` for automatic kernel loading, or call `krun_set_kernel(ctx, path, KRUN_KERNEL_FORMAT_ELF, NULL, cmdline)` explicitly |
 
 TSI for AF_INET/AF_INET6 (TCP and UDP) is enabled automatically when no virtio-net device is added, identical to Linux/macOS behavior.
 
@@ -416,7 +436,7 @@ contributor availability.
 | Item | Platform | Notes |
 |------|----------|-------|
 | Windows multi-vCPU | Windows | WHPX supports multiple virtual processors; libkrun currently wires a single vCPU on Windows. SMP boot protocol (INIT/SIPI) needs to be implemented. |
-| libkrunfw-windows | Windows | A companion library that bundles a pre-built x86_64 ELF vmlinux for Windows, eliminating the need for callers to supply their own kernel via `krun_set_kernel`. |
+| libkrunfw-windows distribution | Windows | The companion library exists, but a stable binary distribution path for the Windows guest `vmlinux` is still needed so callers do not have to build and place `src/libkrunfw-win/kernel/vmlinux` manually. |
 | virtio-snd real backend | Windows | The current Windows backend is a NullBackend (no audio). Wiring to Windows Audio Session API (WASAPI) is planned. |
 | virtiofs: mknod / link / copy_file_range | Windows | Three syscalls are not yet implemented in the Windows passthrough driver (`fs/windows/passthrough.rs`): `mknod` (special file creation), `link` (hard links), and `copy_file_range` (in-kernel file copy). |
 | virtio-net TSO on Windows | Windows | Packet segmentation for TCP Segment Offload (TSO) is not yet implemented in the Windows TcpStream backend (`net_windows.rs`). |
