@@ -16,6 +16,5 @@ Current documentation kept in this repository:
 - `docs/blog/`
 - `tests/README.md`
 - `tests/windows/README.md`
-- `WINDOWS_A3S_NGINX_TEST_COMMANDS.md`
 
 Removed outdated status, report, cleanup, and temporary testing documents.

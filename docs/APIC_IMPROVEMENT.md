@@ -295,7 +295,7 @@ Select-String -Path test.log -Pattern "Exit #" | Select-Object -First 50
 - **APIC Stub实现**: `src/devices/src/legacy/windows_apic_stub.rs`
 - **APIC注册**: `src/vmm/src/builder.rs:1977-1996`
 - **RIP跟踪**: `src/vmm/src/windows/whpx_vcpu.rs:1047-1088`
-- **测试程序**: `examples/test_kernel_boot.rs`
+- **测试程序**: `krun-sys-windows/examples/test_kernel_boot.rs`
 
 ---
 

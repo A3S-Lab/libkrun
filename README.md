@@ -350,10 +350,6 @@ cargo build -p libkrun --target x86_64-pc-windows-msvc --release
 cargo test -p vmm --target x86_64-pc-windows-msvc --lib -- test_whpx_ --ignored --test-threads=1
 ```
 
-For a minimal end-to-end `a3s-box` nginx smoke flow on Windows, see:
-
-- [`WINDOWS_A3S_NGINX_TEST_COMMANDS.md`](WINDOWS_A3S_NGINX_TEST_COMMANDS.md)
-
 #### API differences from Linux/macOS
 
 | API | Windows equivalent |
