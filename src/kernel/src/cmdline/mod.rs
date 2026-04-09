@@ -154,6 +154,26 @@ impl Cmdline {
         Ok(())
     }
 
+    /// Inserts a string, replacing non-printable ASCII characters with '?'.
+    /// This is safe for use with strings that may contain emoji or special characters
+    /// (e.g., from macOS system info) that would otherwise cause InvalidAscii errors.
+    pub fn insert_str_safe<T: AsRef<str>>(&mut self, slug: T) -> Result<()> {
+        let s = slug.as_ref();
+        let sanitized: String = s.chars().map(|c| if valid_char(c) { c } else { '?' }).collect();
+        let trimmed = sanitized.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+
+        self.has_capacity(trimmed.len())?;
+
+        self.start_push();
+        self.line.push_str(trimmed);
+        self.end_push();
+
+        Ok(())
+    }
+
     /// Returns the cmdline in progress without nul termination.
     pub fn as_str(&self) -> &str {
         self.line.as_str()

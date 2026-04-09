@@ -1948,9 +1948,9 @@ pub fn build_microvm(
     #[allow(unused_mut)]
     let mut kernel_cmdline = Cmdline::new(arch::CMDLINE_MAX_SIZE);
     if let Some(cmdline) = payload_config.kernel_cmdline {
-        kernel_cmdline.insert_str(cmdline.as_str()).unwrap();
+        kernel_cmdline.insert_str_safe(cmdline.as_str()).unwrap();
     } else if let Some(cmdline) = &vm_resources.kernel_cmdline.prolog {
-        kernel_cmdline.insert_str(cmdline).unwrap();
+        kernel_cmdline.insert_str_safe(cmdline).unwrap();
     } else {
         kernel_cmdline.insert_str(DEFAULT_KERNEL_CMDLINE).unwrap();
     }
@@ -1978,7 +1978,7 @@ pub fn build_microvm(
             format!("console={kernel_console}").as_str(),
         );
         kernel_cmdline = Cmdline::new(arch::CMDLINE_MAX_SIZE);
-        kernel_cmdline.insert_str(cmdline).unwrap();
+        kernel_cmdline.insert_str_safe(cmdline).unwrap();
     }
 
     #[cfg(target_os = "windows")]
@@ -2547,7 +2547,7 @@ pub fn build_microvm(
     }
 
     if let Some(s) = &vm_resources.kernel_cmdline.epilog {
-        vmm.kernel_cmdline.insert_str(s).unwrap();
+        vmm.kernel_cmdline.insert_str_safe(s).unwrap();
     };
 
     #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
