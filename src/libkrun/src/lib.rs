@@ -209,7 +209,7 @@ impl ContextConfig {
 
     fn get_workdir(&self) -> String {
         match &self.workdir {
-            Some(workdir) => format!("KRUN_WORKDIR={workdir}"),
+            Some(workdir) => format!("KRUN_WORKDIR={}", sanitize_to_ascii(workdir)),
             None => "".to_string(),
         }
     }
@@ -220,7 +220,7 @@ impl ContextConfig {
 
     fn get_exec_path(&self) -> String {
         match &self.exec_path {
-            Some(exec_path) => format!("KRUN_INIT={exec_path}"),
+            Some(exec_path) => format!("KRUN_INIT={}", sanitize_to_ascii(exec_path)),
             None => "".to_string(),
         }
     }
@@ -238,12 +238,12 @@ impl ContextConfig {
         #[cfg(feature = "blk")]
         match &self.block_root {
             Some(block_root) => {
-                let mut res = format!("KRUN_BLOCK_ROOT_DEVICE={}", block_root.device);
+                let mut res = format!("KRUN_BLOCK_ROOT_DEVICE={}", sanitize_to_ascii(&block_root.device));
                 if let Some(fstype) = &block_root.fstype {
-                    res += &format!(" KRUN_BLOCK_ROOT_FSTYPE={fstype}");
+                    res += &format!(" KRUN_BLOCK_ROOT_FSTYPE={}", sanitize_to_ascii(fstype));
                 }
                 if let Some(options) = &block_root.options {
-                    res += &format!(" KRUN_BLOCK_ROOT_OPTIONS={options}");
+                    res += &format!(" KRUN_BLOCK_ROOT_OPTIONS={}", sanitize_to_ascii(options));
                 }
                 res
             }
@@ -270,7 +270,7 @@ impl ContextConfig {
 
     fn get_args(&self) -> String {
         match &self.args {
-            Some(args) => args.clone(),
+            Some(args) => sanitize_to_ascii(args),
             None => "".to_string(),
         }
     }
@@ -281,7 +281,7 @@ impl ContextConfig {
 
     fn get_rlimits(&self) -> String {
         match &self.rlimits {
-            Some(rlimits) => format!("KRUN_RLIMITS={rlimits}"),
+            Some(rlimits) => format!("KRUN_RLIMITS={}", sanitize_to_ascii(rlimits)),
             None => "".to_string(),
         }
     }
@@ -1466,6 +1466,23 @@ pub unsafe extern "C" fn krun_set_workdir(ctx_id: u32, c_workdir_path: *const c_
     KRUN_SUCCESS
 }
 
+/// Sanitize a string to only contain ASCII printable characters (0x20-0x7E).
+/// Non-ASCII characters are replaced with underscores to ensure compatibility
+/// with the kernel command line which only accepts ASCII.
+fn sanitize_to_ascii(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Collapse a str array into a space-separated string of quoted values,
+/// with environment variable values sanitized to ASCII for kernel cmdline compatibility.
 unsafe fn collapse_str_array(array: &[*const c_char]) -> Result<String, std::str::Utf8Error> {
     let mut strvec = Vec::new();
 
@@ -1474,7 +1491,11 @@ unsafe fn collapse_str_array(array: &[*const c_char]) -> Result<String, std::str
             break;
         } else {
             let s = CStr::from_ptr(*item).to_str()?;
-            strvec.push(format!("\"{s}\""));
+            // Sanitize non-ASCII characters to prevent InvalidAscii panics
+            // in the kernel command line (e.g., LANG=zh_CN.UTF-8 -> LANG=zh_CN.UTF-8
+            // with non-ASCII chars replaced by underscores)
+            let sanitized = sanitize_to_ascii(s);
+            strvec.push(format!("\"{sanitized}\""));
         }
     }
 
@@ -1490,7 +1511,7 @@ fn default_guest_env() -> String {
     #[cfg(not(target_os = "windows"))]
     {
         env::vars()
-            .map(|(key, value)| format!(" {key}=\"{value}\""))
+            .map(|(key, value)| format!(" {key}=\"{}\"", sanitize_to_ascii(&value)))
             .collect()
     }
 }

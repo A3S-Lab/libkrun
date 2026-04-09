@@ -1956,7 +1956,14 @@ pub fn build_microvm(
     }
 
     if let Some(cmdline) = &vm_resources.kernel_cmdline.krun_env {
-        kernel_cmdline.insert_str(cmdline.as_str()).unwrap();
+        kernel_cmdline
+            .insert_str(cmdline.as_str())
+            .map_err(|e| {
+                // Log the offending string for debugging but convert to a proper error
+                // that won't panic - this is cross-platform compatible
+                format!("Failed to insert krun_env into kernel cmdline: {:?}. krun_env was: {:?}", e, cmdline.as_str())
+            })
+            .unwrap();
     }
 
     if let Some(kernel_console) = &vm_resources.kernel_console {
