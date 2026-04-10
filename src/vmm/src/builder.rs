@@ -3668,6 +3668,7 @@ fn attach_fs_devices(
         let id = format!("{}{}", String::from(fs.lock().unwrap().id()), i);
 
         // Set no_fsync option if enabled
+        #[cfg(target_os = "macos")]
         if config.no_fsync {
             fs.lock().unwrap().set_no_fsync(true);
         }

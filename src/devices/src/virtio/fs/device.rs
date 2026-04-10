@@ -148,6 +148,7 @@ impl Fs {
         self.passthrough_cfg.export_fsid
     }
 
+    #[cfg(target_os = "macos")]
     pub fn set_no_fsync(&mut self, no_fsync: bool) {
         self.passthrough_cfg.no_fsync = no_fsync;
     }
