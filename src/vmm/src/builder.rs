@@ -1957,7 +1957,7 @@ pub fn build_microvm(
 
     if let Some(cmdline) = &vm_resources.kernel_cmdline.krun_env {
         kernel_cmdline
-            .insert_str(cmdline.as_str())
+            .insert_str_safe(cmdline.as_str())
             .map_err(|e| {
                 // Log the offending string for debugging but convert to a proper error
                 // that won't panic - this is cross-platform compatible
@@ -1983,7 +1983,7 @@ pub fn build_microvm(
 
     #[cfg(target_os = "windows")]
     if let Some(extra_cmdline) = windows_kernel_cmdline_append() {
-        kernel_cmdline.insert_str(extra_cmdline.as_str()).unwrap();
+        kernel_cmdline.insert_str_safe(extra_cmdline.as_str()).unwrap();
     }
 
     #[cfg(all(not(feature = "tee"), not(target_os = "windows")))]
