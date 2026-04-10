@@ -175,7 +175,7 @@ clean-sysroot:
 
 
 $(LIBRARY_RELEASE_$(OS)): $(INIT_BINARY)
-	cargo build --release $(FEATURE_FLAGS)
+	cargo build -p libkrun --release $(FEATURE_FLAGS)
 ifeq ($(SEV),1)
 	mv target/release/libkrun.so target/release/$(KRUN_BASE_$(OS))
 endif
@@ -194,7 +194,7 @@ endif
 	cp target/release/$(KRUN_BASE_$(OS)) $(LIBRARY_RELEASE_$(OS))
 
 $(LIBRARY_DEBUG_$(OS)): $(INIT_BINARY)
-	cargo build $(FEATURE_FLAGS)
+	cargo build -p libkrun $(FEATURE_FLAGS)
 ifeq ($(SEV),1)
 	mv target/debug/libkrun.so target/debug/$(KRUN_BASE_$(OS))
 endif
