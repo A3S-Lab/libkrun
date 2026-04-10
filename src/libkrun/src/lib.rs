@@ -667,6 +667,7 @@ pub unsafe extern "C" fn krun_set_root(ctx_id: u32, c_root_path: *const c_char) 
                 shared_dir,
                 // Default to a conservative 512 MB window.
                 shm_size: Some(1 << 29),
+                #[cfg(target_os = "macos")]
                 no_fsync: false,
             });
         }
@@ -700,6 +701,7 @@ pub unsafe extern "C" fn krun_add_virtiofs(
                 fs_id: tag.to_string(),
                 shared_dir: path.to_string(),
                 shm_size: None,
+                #[cfg(target_os = "macos")]
                 no_fsync: false,
             });
         }
@@ -734,6 +736,7 @@ pub unsafe extern "C" fn krun_add_virtiofs2(
                 fs_id: tag.to_string(),
                 shared_dir: path.to_string(),
                 shm_size: Some(shm_size.try_into().unwrap()),
+                #[cfg(target_os = "macos")]
                 no_fsync: false,
             });
         }
@@ -2543,6 +2546,8 @@ pub unsafe extern "C" fn krun_set_root_disk_remount(
                 shared_dir: empty_root.to_string_lossy().into(),
                 // Default to a conservative 512 MB window.
                 shm_size: Some(1 << 29),
+                #[cfg(target_os = "macos")]
+                no_fsync: false,
             });
 
             ctx_cfg.set_block_root(device, fstype, options);
