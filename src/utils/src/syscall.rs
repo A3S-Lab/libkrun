@@ -20,3 +20,50 @@ impl SyscallReturnCode {
         self.into_result().map(|_| ())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_into_result_success() {
+        let code = SyscallReturnCode(0);
+        assert_eq!(code.into_result().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_into_result_positive() {
+        let code = SyscallReturnCode(42);
+        assert_eq!(code.into_result().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_into_result_negative_one() {
+        let code = SyscallReturnCode(-1);
+        assert!(code.into_result().is_err());
+    }
+
+    #[test]
+    fn test_into_empty_result_success() {
+        let code = SyscallReturnCode(0);
+        assert!(code.into_empty_result().is_ok());
+    }
+
+    #[test]
+    fn test_into_empty_result_error() {
+        let code = SyscallReturnCode(-1);
+        assert!(code.into_empty_result().is_err());
+    }
+
+    #[test]
+    fn test_into_result_large_positive() {
+        let code = SyscallReturnCode(i32::MAX);
+        assert_eq!(code.into_result().unwrap(), i32::MAX);
+    }
+
+    #[test]
+    fn test_into_result_large_negative() {
+        let code = SyscallReturnCode(-100);
+        assert!(code.into_result().is_err());
+    }
+}

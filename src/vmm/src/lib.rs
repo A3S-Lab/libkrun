@@ -479,6 +479,121 @@ impl Vmm {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fc_exit_codes() {
+        assert_eq!(FC_EXIT_CODE_OK, 0);
+        assert_eq!(FC_EXIT_CODE_GENERIC_ERROR, 1);
+        assert_eq!(FC_EXIT_CODE_UNEXPECTED_ERROR, 2);
+        assert_eq!(FC_EXIT_CODE_BAD_SYSCALL, 148);
+        assert_eq!(FC_EXIT_CODE_SIGBUS, 149);
+        assert_eq!(FC_EXIT_CODE_SIGSEGV, 150);
+        assert_eq!(FC_EXIT_CODE_BAD_CONFIGURATION, 152);
+        assert_eq!(FC_EXIT_CODE_ARG_PARSING, 153);
+    }
+
+    #[test]
+    fn test_error_debug_format() {
+        // Test that Error implements Debug correctly
+        let error = Error::VcpuResume;
+        assert_eq!(format!("{:?}", error), "VcpuResume");
+    }
+
+    #[test]
+    fn test_error_display_vcpu_resume() {
+        let error = Error::VcpuResume;
+        assert_eq!(format!("{}", error), "vCPUs resume failed.");
+    }
+
+    #[test]
+    fn test_error_display_event_fd() {
+        let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "test error");
+        let error = Error::EventFd(io_error);
+        assert!(format!("{}", error).contains("Event fd error"));
+    }
+
+    #[test]
+    fn test_error_display_vm() {
+        // Test VM error display (requires vstate::Error)
+        // We can at least verify the error variant exists and formats
+        #[cfg(target_os = "linux")]
+        {
+            use crate::linux::vstate::Error as VstateError;
+            // Create a mock error through debug formatting
+            let error = Error::Vm(crate::linux::vstate::Error::VmFdNotOpened);
+            let display = format!("{}", error);
+            assert!(display.contains("Vm error"));
+        }
+    }
+
+    #[test]
+    fn test_error_display_kvm_context() {
+        #[cfg(target_os = "linux")]
+        {
+            let error = Error::KvmContext(crate::linux::vstate::Error::KvmFdNotOpened);
+            let display = format!("{}", error);
+            assert!(display.contains("Failed to validate KVM support"));
+        }
+    }
+
+    #[test]
+    fn test_error_display_vcpu() {
+        #[cfg(target_os = "linux")]
+        {
+            let error = Error::Vcpu(crate::linux::vstate::Error::VcpuNotFound);
+            let display = format!("{}", error);
+            assert!(display.contains("Vcpu error"));
+        }
+    }
+
+    #[test]
+    fn test_vmm_events_observer_default_trait() {
+        // Test that the default trait implementations work
+        struct TestObserver;
+        impl VmmEventsObserver for TestObserver {}
+
+        let observer = TestObserver;
+        assert!(observer.on_vmm_boot().is_ok());
+        assert!(observer.on_vmm_stop().is_ok());
+    }
+
+    #[test]
+    fn test_vmm_events_observer_custom_impl() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct TestObserver {
+            boot_called: Arc<AtomicBool>,
+            stop_called: Arc<AtomicBool>,
+        }
+        impl VmmEventsObserver for TestObserver {
+            fn on_vmm_boot(&mut self) -> std::result::Result<(), utils::errno::Error> {
+                self.boot_called.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            fn on_vmm_stop(&mut self) -> std::result::Result<(), utils::errno::Error> {
+                self.stop_called.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let boot_called = Arc::new(AtomicBool::new(false));
+        let stop_called = Arc::new(AtomicBool::new(false));
+
+        let mut observer = TestObserver {
+            boot_called: boot_called.clone(),
+            stop_called: stop_called.clone(),
+        };
+
+        assert!(observer.on_vmm_boot().is_ok());
+        assert!(observer.on_vmm_stop().is_ok());
+        assert!(boot_called.load(Ordering::SeqCst));
+        assert!(stop_called.load(Ordering::SeqCst));
+    }
+}
+
 impl Subscriber for Vmm {
     /// Handle a read event (EPOLLIN).
     fn process(&mut self, event: &EpollEvent, _: &mut EventManager) {

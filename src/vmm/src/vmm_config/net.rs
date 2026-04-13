@@ -69,3 +69,33 @@ impl NetBuilder {
             .map_err(NetworkInterfaceError::CreateNetworkDevice)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_network_interface_error_debug() {
+        let error = NetworkInterfaceError::DeviceIdNotFound;
+        assert_eq!(format!("{:?}", error), "DeviceIdNotFound");
+    }
+
+    #[test]
+    fn test_network_interface_error_display() {
+        let error = NetworkInterfaceError::DeviceIdNotFound;
+        let display_str = format!("{}", error);
+        assert!(display_str.contains("Invalid interface ID"));
+    }
+
+    #[test]
+    fn test_net_builder_new() {
+        let builder = NetBuilder::new();
+        assert!(builder.list.is_empty());
+    }
+
+    #[test]
+    fn test_net_builder_default() {
+        let builder = NetBuilder::default();
+        assert!(builder.list.is_empty());
+    }
+}

@@ -89,3 +89,124 @@ impl ShmManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_arch_info() -> ArchMemoryInfo {
+        ArchMemoryInfo {
+            shm_start_addr: 0x1_0000_0000,
+            page_size: 4096,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_shm_manager_new() {
+        let info = create_test_arch_info();
+        let manager = ShmManager::new(&info);
+
+        assert!(manager.fs_regions.is_empty());
+        assert!(manager.gpu_region.is_none());
+    }
+
+    #[test]
+    fn test_shm_region_clone() {
+        let region = ShmRegion {
+            guest_addr: GuestAddress(0x1000),
+            size: 4096,
+        };
+        let cloned = region.clone();
+        assert_eq!(region.guest_addr, cloned.guest_addr);
+        assert_eq!(region.size, cloned.size);
+    }
+
+    #[test]
+    fn test_shm_manager_regions_empty() {
+        let info = create_test_arch_info();
+        let manager = ShmManager::new(&info);
+
+        let regions = manager.regions();
+        assert!(regions.is_empty());
+    }
+
+    #[test]
+    fn test_create_region() {
+        let info = create_test_arch_info();
+        let mut manager = ShmManager::new(&info);
+
+        let region = manager.create_region(4096).unwrap();
+        assert_eq!(region.guest_addr, GuestAddress(0x1_0000_0000));
+        assert_eq!(region.size, 4096);
+    }
+
+    #[test]
+    fn test_create_region_aligned() {
+        let info = create_test_arch_info();
+        let mut manager = ShmManager::new(&info);
+
+        // Request size that is not page-aligned
+        let region = manager.create_region(100).unwrap();
+        // Should be aligned up to page size
+        assert!(region.size >= 100);
+        assert_eq!(region.size % 4096, 0);
+    }
+
+    #[test]
+    fn test_create_region_out_of_space() {
+        let info = create_test_arch_info();
+        let mut manager = ShmManager::new(&info);
+
+        // Set next_guest_addr close to overflow
+        manager.next_guest_addr = u64::MAX - 100;
+
+        let result = manager.create_region(4096);
+        assert!(matches!(result, Err(Error::OutOfSpace)));
+    }
+
+    #[test]
+    fn test_create_gpu_region() {
+        let info = create_test_arch_info();
+        let mut manager = ShmManager::new(&info);
+
+        let result = manager.create_gpu_region(8192);
+        assert!(result.is_ok());
+
+        let gpu_region = manager.gpu_region();
+        assert!(gpu_region.is_some());
+        assert_eq!(gpu_region.unwrap().size, 8192);
+    }
+
+    #[test]
+    fn test_create_gpu_region_duplicated() {
+        let info = create_test_arch_info();
+        let mut manager = ShmManager::new(&info);
+
+        manager.create_gpu_region(4096).unwrap();
+        let result = manager.create_gpu_region(4096);
+        assert!(matches!(result, Err(Error::DuplicatedGpuRegion)));
+    }
+
+    #[test]
+    fn test_regions_with_gpu() {
+        let info = create_test_arch_info();
+        let mut manager = ShmManager::new(&info);
+
+        manager.create_gpu_region(4096).unwrap();
+
+        let regions = manager.regions();
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].0, GuestAddress(0x1_0000_0000));
+        assert_eq!(regions[0].1, 4096);
+    }
+
+    #[test]
+    fn test_error_debug() {
+        let err = Error::DuplicatedGpuRegion;
+        assert_eq!(format!("{:?}", err), "DuplicatedGpuRegion");
+
+        let err = Error::OutOfSpace;
+        assert_eq!(format!("{:?}", err), "OutOfSpace");
+    }
+}

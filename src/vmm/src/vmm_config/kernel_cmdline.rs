@@ -41,3 +41,93 @@ impl Display for KernelCmdlineConfigError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_kernel_cmdline_config_default() {
+        let config = KernelCmdlineConfig::default();
+        assert!(config.prolog.is_none());
+        assert!(config.krun_env.is_none());
+        assert!(config.epilog.is_none());
+    }
+
+    #[test]
+    fn test_kernel_cmdline_config_clone() {
+        let config = KernelCmdlineConfig {
+            prolog: Some("earlyprintk=ttyS0".to_string()),
+            krun_env: Some("HOME=/".to_string()),
+            epilog: Some("quiet".to_string()),
+        };
+        let cloned = config.clone();
+        assert_eq!(config, cloned);
+    }
+
+    #[test]
+    fn test_kernel_cmdline_config_eq() {
+        let config1 = KernelCmdlineConfig {
+            prolog: Some("console=ttyS0".to_string()),
+            krun_env: None,
+            epilog: Some("quiet".to_string()),
+        };
+        let config2 = KernelCmdlineConfig {
+            prolog: Some("console=ttyS0".to_string()),
+            krun_env: None,
+            epilog: Some("quiet".to_string()),
+        };
+        assert_eq!(config1, config2);
+    }
+
+    #[test]
+    fn test_kernel_cmdline_config_neq() {
+        let config1 = KernelCmdlineConfig {
+            prolog: Some("console=ttyS0".to_string()),
+            krun_env: None,
+            epilog: None,
+        };
+        let config2 = KernelCmdlineConfig {
+            prolog: Some("console=ttyS1".to_string()),
+            krun_env: None,
+            epilog: None,
+        };
+        assert_ne!(config1, config2);
+    }
+
+    #[test]
+    fn test_kernel_cmdline_config_error_debug() {
+        let error = KernelCmdlineConfigError::InvalidKernelCommandLine("bad cmdline".to_string());
+        let debug_str = format!("{:?}", error);
+        assert!(debug_str.contains("InvalidKernelCommandLine"));
+        assert!(debug_str.contains("bad cmdline"));
+    }
+
+    #[test]
+    fn test_kernel_cmdline_config_error_display() {
+        let error = KernelCmdlineConfigError::InvalidKernelCommandLine("empty command".to_string());
+        let display_str = format!("{}", error);
+        assert!(display_str.contains("The kernel command line is invalid"));
+        assert!(display_str.contains("empty command"));
+    }
+
+    #[test]
+    fn test_default_kernel_cmdline_not_empty() {
+        // Verify that the default kernel cmdline is not empty for all platforms
+        assert!(!DEFAULT_KERNEL_CMDLINE.is_empty());
+        assert!(DEFAULT_KERNEL_CMDLINE.contains("reboot=k"));
+        assert!(DEFAULT_KERNEL_CMDLINE.contains("panic="));
+    }
+
+    #[test]
+    fn test_kernel_cmdline_config_with_all_fields() {
+        let config = KernelCmdlineConfig {
+            prolog: Some("earlyprintk".to_string()),
+            krun_env: Some("DEBUG=1".to_string()),
+            epilog: Some("quiet splash".to_string()),
+        };
+        assert!(config.prolog.is_some());
+        assert!(config.krun_env.is_some());
+        assert!(config.epilog.is_some());
+    }
+}

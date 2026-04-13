@@ -182,3 +182,109 @@ pub enum VsockError {
 }
 
 type Result<T> = std::result::Result<T, VsockError>;
+
+#[cfg(test)]
+mod tests {
+    use super::defs::{LINUX_AF_INET, LINUX_AF_INET6, LINUX_AF_UNIX};
+    use super::*;
+
+    #[test]
+    fn test_tsi_flags_empty() {
+        let flags = TsiFlags::empty();
+        assert!(!flags.tsi_enabled());
+        assert!(!flags.contains(TsiFlags::HIJACK_INET));
+        assert!(!flags.contains(TsiFlags::HIJACK_UNIX));
+    }
+
+    #[test]
+    fn test_tsi_flags_hijack_inet() {
+        let flags = TsiFlags::HIJACK_INET;
+        assert!(flags.tsi_enabled());
+        assert!(flags.contains(TsiFlags::HIJACK_INET));
+        assert!(!flags.contains(TsiFlags::HIJACK_UNIX));
+    }
+
+    #[test]
+    fn test_tsi_flags_hijack_unix() {
+        let flags = TsiFlags::HIJACK_UNIX;
+        assert!(flags.tsi_enabled());
+        assert!(!flags.contains(TsiFlags::HIJACK_INET));
+        assert!(flags.contains(TsiFlags::HIJACK_UNIX));
+    }
+
+    #[test]
+    fn test_tsi_flags_both() {
+        let flags = TsiFlags::HIJACK_INET | TsiFlags::HIJACK_UNIX;
+        assert!(flags.tsi_enabled());
+        assert!(flags.contains(TsiFlags::HIJACK_INET));
+        assert!(flags.contains(TsiFlags::HIJACK_UNIX));
+    }
+
+    #[test]
+    fn test_vsock_error_debug() {
+        let err = VsockError::BufDescTooSmall;
+        assert_eq!(format!("{:?}", err), "BufDescTooSmall");
+
+        let err = VsockError::HdrDescTooSmall(42);
+        assert_eq!(format!("{:?}", err), "HdrDescTooSmall(42)");
+
+        let err = VsockError::EventFd(std::io::Error::from_raw_os_error(0));
+        assert_eq!(format!("{:?}", err), "EventFd(Custom { kind: Other, error: \"\" })");
+    }
+
+    #[test]
+    fn test_vsock_constants() {
+        // Verify key constants have expected values
+        assert_eq!(TYPE_VSOCK, 19);
+        assert_eq!(super::defs::VSOCK_DEV_ID, "vsock");
+        assert_eq!(super::defs::NUM_QUEUES, 3);
+        assert_eq!(super::defs::QUEUE_SIZES, &[256, 256, 256]);
+        assert_eq!(super::defs::MAX_PKT_BUF_SIZE, 64 * 1024);
+        assert_eq!(super::defs::MUXER_RXQ_SIZE, 256);
+        assert_eq!(super::defs::CONN_TX_BUF_SIZE, 8 * 1024 * 1024);
+        assert_eq!(super::defs::SOCK_STREAM, 1);
+        assert_eq!(super::defs::SOCK_DGRAM, 2);
+        assert_eq!(super::defs::TSI_PROXY_PORT, 620);
+        assert_eq!(super::defs::TSI_PROXY_CREATE, 1024);
+        assert_eq!(super::defs::TSI_CONNECT, 1025);
+        assert_eq!(super::defs::TSI_GETNAME, 1026);
+        assert_eq!(super::defs::TSI_SENDTO_ADDR, 1027);
+        assert_eq!(super::defs::TSI_SENDTO_DATA, 1028);
+        assert_eq!(super::defs::TSI_LISTEN, 1029);
+        assert_eq!(super::defs::TSI_ACCEPT, 1030);
+        assert_eq!(super::defs::TSI_PROXY_RELEASE, 1031);
+    }
+
+    #[test]
+    fn test_linux_address_family_constants() {
+        assert_eq!(LINUX_AF_UNIX, 1);
+        assert_eq!(LINUX_AF_INET, 2);
+        assert_eq!(LINUX_AF_INET6, 10);
+    }
+
+    #[test]
+    fn test_vsock_uapi_constants() {
+        use super::defs::uapi::*;
+
+        assert_eq!(VIRTIO_F_IN_ORDER, 35);
+        assert_eq!(VIRTIO_F_VERSION_1, 32);
+        assert_eq!(VIRTIO_VSOCK_F_DGRAM, 3);
+        assert_eq!(VIRTIO_ID_VSOCK, 19);
+
+        assert_eq!(VSOCK_OP_REQUEST, 1);
+        assert_eq!(VSOCK_OP_RESPONSE, 2);
+        assert_eq!(VSOCK_OP_RST, 3);
+        assert_eq!(VSOCK_OP_SHUTDOWN, 4);
+        assert_eq!(VSOCK_OP_RW, 5);
+        assert_eq!(VSOCK_OP_CREDIT_UPDATE, 6);
+        assert_eq!(VSOCK_OP_CREDIT_REQUEST, 7);
+
+        assert_eq!(VSOCK_FLAGS_SHUTDOWN_RCV, 1);
+        assert_eq!(VSOCK_FLAGS_SHUTDOWN_SEND, 2);
+
+        assert_eq!(VSOCK_TYPE_STREAM, 1);
+        assert_eq!(VSOCK_TYPE_DGRAM, 3);
+
+        assert_eq!(VSOCK_HOST_CID, 2);
+    }
+}
