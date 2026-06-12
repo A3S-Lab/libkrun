@@ -16,6 +16,8 @@ extern crate log;
 /// Handles setup and initialization a `Vmm` object.
 pub mod builder;
 pub(crate) mod device_manager;
+/// Snapshot support (file-backed guest RAM, save/restore).
+pub mod snapshot;
 /// Resource store for configured microVM resources.
 pub mod resources;
 /// Signal handling utilities.

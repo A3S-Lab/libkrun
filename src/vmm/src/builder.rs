@@ -1491,6 +1491,8 @@ pub enum StartMicrovmError {
     FirmwareRead(io::Error),
     /// Memory regions are overlapping or mmap fails.
     GuestMemoryMmap(vm_memory::Error),
+    /// Cannot create/size the snapshot guest-RAM backing file.
+    SnapshotMemFile(io::Error),
     /// The BZIP2 decoder couldn't decompress the kernel.
     ImageBz2Decoder(io::Error),
     /// Cannot find compressed kernel in file.
@@ -1628,6 +1630,9 @@ impl Display for StartMicrovmError {
             }
             FirmwareRead(ref err) => {
                 write!(f, "Cannot read firmware contents from file: {err}")
+            }
+            SnapshotMemFile(ref err) => {
+                write!(f, "Cannot create snapshot guest-RAM backing file: {err}")
             }
             GuestMemoryMmap(ref err) => {
                 // Remove imbricated quotes from error message.
@@ -2774,6 +2779,56 @@ fn load_external_kernel(
     Ok((entry_addr, initrd_config, external_kernel.cmdline.clone()))
 }
 
+/// Create guest memory for the given regions (snapshot-aware). By default the regions are
+/// anonymous mmaps; when `KRUN_SNAPSHOT_MEM_FILE` is set (snapshot-fork mode,
+/// unix only) they are backed by that file with `MAP_SHARED` so the file holds
+/// the live RAM contents — a memory snapshot is then a pause + msync of the
+/// file, and a restore maps the same file `MAP_PRIVATE` (CoW).
+fn create_guest_memory_regions(
+    arch_mem_regions: &[(vm_memory::GuestAddress, usize)],
+) -> std::result::Result<GuestMemoryMmap, StartMicrovmError> {
+    #[cfg(all(unix, not(feature = "tee")))]
+    if let Some(path) = crate::snapshot::mem_file_path() {
+        let total: u64 = arch_mem_regions.iter().map(|(_, s)| *s as u64).sum();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .map_err(|e| {
+                StartMicrovmError::SnapshotMemFile(e)
+            })?;
+        file.set_len(total).map_err(|e| {
+            StartMicrovmError::SnapshotMemFile(e)
+        })?;
+
+        let mut offset: u64 = 0;
+        let mut ranges = Vec::with_capacity(arch_mem_regions.len());
+        let mut layout = Vec::with_capacity(arch_mem_regions.len());
+        for (addr, size) in arch_mem_regions {
+            let region_file = file.try_clone().map_err(|e| {
+                StartMicrovmError::SnapshotMemFile(e)
+            })?;
+            ranges.push((
+                *addr,
+                *size,
+                Some(vm_memory::FileOffset::new(region_file, offset)),
+            ));
+            layout.push((*addr, *size, offset));
+            offset += *size as u64;
+        }
+
+        let guest_mem = GuestMemoryMmap::from_ranges_with_files(ranges)
+            .map_err(StartMicrovmError::GuestMemoryMmap)?;
+        *crate::snapshot::MEM_BACKING.lock().unwrap() =
+            Some(crate::snapshot::MemBacking { file, layout });
+        return Ok(guest_mem);
+    }
+
+    GuestMemoryMmap::from_ranges(arch_mem_regions).map_err(StartMicrovmError::GuestMemoryMmap)
+}
+
 fn load_payload(
     _vm_resources: &VmResources,
     guest_mem: GuestMemoryMmap,
@@ -3054,8 +3109,7 @@ pub fn create_guest_memory(
 
     arch_mem_regions.extend(shm_manager.regions());
 
-    let guest_mem = GuestMemoryMmap::from_ranges(&arch_mem_regions)
-        .map_err(StartMicrovmError::GuestMemoryMmap)?;
+    let guest_mem = create_guest_memory_regions(&arch_mem_regions)?;
 
     let (guest_mem, entry_addr, initrd_config, cmdline) =
         load_payload(vm_resources, guest_mem, &arch_mem_info, payload)?;
