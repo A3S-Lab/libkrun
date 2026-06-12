@@ -2267,7 +2267,17 @@ pub fn build_microvm(
             Some(intc.clone()),
         )?;
 
-        let kernel_boot = vm_resources.firmware_config.is_none() && !cfg!(feature = "tee");
+        // In restore mode the vCPU regs/sregs/MSRs/page-tables are all reloaded
+        // from the snapshot state, and the boot-time `setup_sregs` would otherwise
+        // write boot page tables into the (already-populated) snapshot RAM and
+        // corrupt it. Skip boot vCPU configuration entirely when restoring.
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
+        let restoring = crate::snapshot::restore_state_path().is_some();
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee"))))]
+        let restoring = false;
+
+        let kernel_boot =
+            vm_resources.firmware_config.is_none() && !cfg!(feature = "tee") && !restoring;
 
         vcpus = create_vcpus_x86_64(
             &vm,
