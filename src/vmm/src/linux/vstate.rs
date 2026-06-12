@@ -1618,6 +1618,8 @@ impl Vcpu {
                 // Move to 'exited' state.
                 state = self.exit(FC_EXIT_CODE_GENERIC_ERROR);
             }
+            // SaveState only applies while paused; ignore in running state.
+            Ok(VcpuEvent::SaveState(_)) => (),
             // All other events or lack thereof have no effect on current 'running' state.
             Err(TryRecvError::Empty) => (),
         }
@@ -1708,11 +1710,46 @@ impl Drop for Vcpu {
     }
 }
 
+/// serde for FamStructWrapper<kvm_cpuid2>: serialize its entries (each entry
+/// derives Serialize via the kvm-bindings serde feature), rebuild on restore.
+#[cfg(target_arch = "x86_64")]
+mod cpuid_serde {
+    use super::CpuId;
+    use kvm_bindings::kvm_cpuid_entry2;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &CpuId, s: S) -> Result<S::Ok, S::Error> {
+        v.as_slice().to_vec().serialize(s)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<CpuId, D::Error> {
+        let entries = Vec::<kvm_cpuid_entry2>::deserialize(d)?;
+        CpuId::from_entries(&entries).map_err(serde::de::Error::custom)
+    }
+}
+
+/// serde for FamStructWrapper<kvm_msrs>.
+#[cfg(target_arch = "x86_64")]
+mod msrs_serde {
+    use super::Msrs;
+    use kvm_bindings::kvm_msr_entry;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &Msrs, s: S) -> Result<S::Ok, S::Error> {
+        v.as_slice().to_vec().serialize(s)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Msrs, D::Error> {
+        let entries = Vec::<kvm_msr_entry>::deserialize(d)?;
+        Msrs::from_entries(&entries).map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 #[derive(serde::Serialize, serde::Deserialize)]
 /// Structure holding VCPU kvm state.
 pub struct VcpuState {
+    #[serde(with = "cpuid_serde")]
     cpuid: CpuId,
+    #[serde(with = "msrs_serde")]
     msrs: Msrs,
     debug_regs: kvm_debugregs,
     lapic: kvm_lapic_state,
