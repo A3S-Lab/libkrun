@@ -1578,6 +1578,8 @@ pub enum StartMicrovmError {
     RegisterSndDevice(device_manager::mmio::Error),
     /// Cannot initialize a MMIO Vsock Device or add a device to the MMIO Bus.
     RegisterVsockDevice(device_manager::mmio::Error),
+    /// Cannot restore VM or vCPU KVM state from a snapshot.
+    RestoreState(VstateError),
     /// Cannot attest the VM in the Secure Virtualization context.
     SecureVirtAttest(VstateError),
     /// Cannot initialize the Secure Virtualization backend.
@@ -1839,6 +1841,11 @@ impl Display for StartMicrovmError {
                     f,
                     "Cannot initialize a MMIO Vsock Device or add a device to the MMIO Bus. {err_msg}"
                 )
+            }
+            RestoreState(ref err) => {
+                let mut err_msg = format!("{err}");
+                err_msg = err_msg.replace('\"', "");
+                write!(f, "Cannot restore VM/vCPU state from snapshot. {err_msg}")
             }
             SecureVirtAttest(ref err) => {
                 let mut err_msg = format!("{err}");
@@ -2587,7 +2594,7 @@ pub fn build_microvm(
             .map_err(StartMicrovmError::SnapshotMemFile)?;
         vmm.kvm_vm()
             .restore_state(&state.vm_state)
-            .map_err(StartMicrovmError::Internal)?;
+            .map_err(StartMicrovmError::RestoreState)?;
         if state.vcpu_states.len() != vcpus.len() {
             return Err(StartMicrovmError::SnapshotMemFile(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -2596,7 +2603,7 @@ pub fn build_microvm(
         }
         for (vcpu, vcpu_state) in vcpus.iter_mut().zip(state.vcpu_states.into_iter()) {
             vcpu.restore_state(vcpu_state)
-                .map_err(StartMicrovmError::Internal)?;
+                .map_err(StartMicrovmError::RestoreState)?;
         }
     }
 
@@ -2841,7 +2848,7 @@ fn create_guest_memory_regions(
                 .map_err(StartMicrovmError::SnapshotMemFile)?;
             // MAP_PRIVATE of the snapshot file = kernel page-level CoW. Reads see
             // the template's RAM; writes fault a private copy. PROT_READ|WRITE.
-            let mmap_region = vm_memory::MmapRegionBuilder::new(*size)
+            let mmap_region = vm_memory::mmap::MmapRegionBuilder::new(*size)
                 .with_mmap_prot(libc::PROT_READ | libc::PROT_WRITE)
                 .with_mmap_flags(libc::MAP_NORESERVE | libc::MAP_PRIVATE)
                 .with_file_offset(vm_memory::FileOffset::new(region_file, *offset))
