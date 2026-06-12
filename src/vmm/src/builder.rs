@@ -2572,18 +2572,50 @@ pub fn build_microvm(
     #[cfg(not(target_os = "windows"))]
     log::info!("Final kernel cmdline: {}", vmm.kernel_cmdline.as_str());
 
+    // Restore mode: the cmdline and boot system config are already in the
+    // snapshotted RAM; skip them and instead restore the saved KVM VM + vCPU
+    // state so the vCPUs resume exactly where the template was paused.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
+    let restoring = crate::snapshot::restore_state_path().is_some();
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee"))))]
+    let restoring = false;
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
+    if restoring {
+        let state_path = crate::snapshot::restore_state_path().unwrap();
+        let state = crate::snapshot::read_state_file(&state_path)
+            .map_err(StartMicrovmError::SnapshotMemFile)?;
+        vmm.kvm_vm()
+            .restore_state(&state.vm_state)
+            .map_err(StartMicrovmError::Internal)?;
+        if state.vcpu_states.len() != vcpus.len() {
+            return Err(StartMicrovmError::SnapshotMemFile(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "snapshot vcpu count mismatch",
+            )));
+        }
+        for (vcpu, vcpu_state) in vcpus.iter_mut().zip(state.vcpu_states.into_iter()) {
+            vcpu.restore_state(vcpu_state)
+                .map_err(StartMicrovmError::Internal)?;
+        }
+    }
+
     // Write the kernel command line to guest memory. This is x86_64 specific, since on
     // aarch64 the command line will be specified through the FDT.
     #[cfg(all(target_arch = "x86_64", not(feature = "tee")))]
-    load_cmdline(&vmm)?;
+    if !restoring {
+        load_cmdline(&vmm)?;
+    }
 
-    vmm.configure_system(
-        vcpus.as_slice(),
-        &intc,
-        &payload_config.initrd_config,
-        &vm_resources.smbios_oem_strings,
-    )
-    .map_err(StartMicrovmError::Internal)?;
+    if !restoring {
+        vmm.configure_system(
+            vcpus.as_slice(),
+            &intc,
+            &payload_config.initrd_config,
+            &vm_resources.smbios_oem_strings,
+        )
+        .map_err(StartMicrovmError::Internal)?;
+    }
 
     #[cfg(feature = "tee")]
     {
@@ -2787,6 +2819,45 @@ fn load_external_kernel(
 fn create_guest_memory_regions(
     arch_mem_regions: &[(vm_memory::GuestAddress, usize)],
 ) -> std::result::Result<GuestMemoryMmap, StartMicrovmError> {
+    // Restore mode: map the snapshot RAM file MAP_PRIVATE (kernel page-level CoW)
+    // using the layout saved in the state file — guest RAM starts as the template's
+    // RAM, divergent writes stay private to this child. This IS the fork.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
+    if let (Some(state_path), Some(mem_path)) = (
+        crate::snapshot::restore_state_path(),
+        crate::snapshot::mem_file_path(),
+    ) {
+        let state =
+            crate::snapshot::read_state_file(&state_path).map_err(StartMicrovmError::SnapshotMemFile)?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&mem_path)
+            .map_err(StartMicrovmError::SnapshotMemFile)?;
+        let mut regions = Vec::with_capacity(state.mem_layout.len());
+        for (addr, size, offset) in &state.mem_layout {
+            let region_file = file
+                .try_clone()
+                .map_err(StartMicrovmError::SnapshotMemFile)?;
+            // MAP_PRIVATE of the snapshot file = kernel page-level CoW. Reads see
+            // the template's RAM; writes fault a private copy. PROT_READ|WRITE.
+            let mmap_region = vm_memory::MmapRegionBuilder::new(*size)
+                .with_mmap_prot(libc::PROT_READ | libc::PROT_WRITE)
+                .with_mmap_flags(libc::MAP_NORESERVE | libc::MAP_PRIVATE)
+                .with_file_offset(vm_memory::FileOffset::new(region_file, *offset))
+                .build()
+                .map_err(|e| {
+                    StartMicrovmError::GuestMemoryMmap(vm_memory::Error::MmapRegion(e))
+                })?;
+            let region = vm_memory::GuestRegionMmap::new(mmap_region, vm_memory::GuestAddress(*addr))
+                .map_err(StartMicrovmError::GuestMemoryMmap)?;
+            regions.push(region);
+        }
+        let guest_mem = GuestMemoryMmap::from_regions(regions)
+            .map_err(StartMicrovmError::GuestMemoryMmap)?;
+        return Ok(guest_mem);
+    }
+
     #[cfg(all(unix, not(feature = "tee")))]
     if let Some(path) = crate::snapshot::mem_file_path() {
         let total: u64 = arch_mem_regions.iter().map(|(_, s)| *s as u64).sum();
@@ -3111,12 +3182,24 @@ pub fn create_guest_memory(
 
     let guest_mem = create_guest_memory_regions(&arch_mem_regions)?;
 
-    let (guest_mem, entry_addr, initrd_config, cmdline) =
-        load_payload(vm_resources, guest_mem, &arch_mem_info, payload)?;
+    // Restore mode: the kernel, cmdline, initrd and firmware are already present
+    // in the snapshotted RAM (mapped CoW above), so skip loading the payload and
+    // writing firmware. The entry address is irrelevant — vCPU registers are
+    // restored from the state file before resume.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
+    let restoring = crate::snapshot::restore_state_path().is_some();
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee"))))]
+    let restoring = false;
+
+    let (guest_mem, entry_addr, initrd_config, cmdline) = if restoring {
+        (guest_mem, GuestAddress(0), None, None)
+    } else {
+        load_payload(vm_resources, guest_mem, &arch_mem_info, payload)?
+    };
 
     // Only write firmware if data exists AND this isn't an ExternalKernel payload
     // (ExternalKernel does direct kernel boot and doesn't use EFI firmware)
-    if !matches!(payload, Payload::ExternalKernel(_)) {
+    if !restoring && !matches!(payload, Payload::ExternalKernel(_)) {
         if let Some(firmware_data) = firmware_data.as_ref() {
             guest_mem
                 .write(firmware_data, GuestAddress(arch_mem_info.firmware_addr))

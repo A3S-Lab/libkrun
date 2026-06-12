@@ -1364,7 +1364,7 @@ impl Vcpu {
 
     #[allow(unused)]
     #[cfg(target_arch = "x86_64")]
-    fn restore_state(&self, state: VcpuState) -> Result<()> {
+    pub fn restore_state(&self, state: VcpuState) -> Result<()> {
         /*
          * Ordering requirements:
          *

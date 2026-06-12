@@ -32,6 +32,22 @@ pub fn trigger_sock_path() -> Option<String> {
     std::env::var("KRUN_SNAPSHOT_SOCK").ok().filter(|p| !p.is_empty())
 }
 
+/// When set, boot is a RESTORE from this state file (paired with the RAM file in
+/// `KRUN_SNAPSHOT_MEM_FILE`): guest RAM is mapped `MAP_PRIVATE` (CoW) from the
+/// RAM file, the kernel load + boot setup are skipped, and VM/vCPU KVM state is
+/// restored from this file before the vCPUs resume.
+pub fn restore_state_path() -> Option<String> {
+    std::env::var("KRUN_RESTORE_FROM").ok().filter(|p| !p.is_empty())
+}
+
+/// Read a snapshot state file written by [`write_state_file`].
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn read_state_file(path: &str) -> std::io::Result<SnapshotState> {
+    let bytes = std::fs::read(path)?;
+    bincode::deserialize(&bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
 /// Flush the file-backed guest RAM to disk (fsync of the MAP_SHARED file).
 pub fn sync_mem_backing() -> std::io::Result<()> {
     let guard = MEM_BACKING.lock().unwrap();
