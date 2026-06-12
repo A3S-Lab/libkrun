@@ -2990,6 +2990,46 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
     #[cfg(any(feature = "amd-sev", feature = "tdx"))]
     vmm::worker::start_worker_thread(_vmm.clone(), _receiver.clone()).unwrap();
 
+    // Snapshot trigger (snapshot-fork): when KRUN_SNAPSHOT_SOCK is set, serve
+    // "snapshot <state_path>" requests on that unix socket — pause vCPUs, save
+    // KVM state + msync the file-backed RAM, reply "ok"/"err: ...". The VM stays
+    // paused afterwards (a snapshotted template is then torn down by the host).
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
+    if let Some(sock_path) = vmm::snapshot::trigger_sock_path() {
+        let vmm_for_snap = _vmm.clone();
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Write};
+            let _ = std::fs::remove_file(&sock_path);
+            let listener = match std::os::unix::net::UnixListener::bind(&sock_path) {
+                Ok(l) => l,
+                Err(e) => {
+                    error!("snapshot trigger: bind {sock_path} failed: {e}");
+                    return;
+                }
+            };
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    continue;
+                }
+                let mut out = &stream;
+                if let Some(state_path) = line.trim().strip_prefix("snapshot ") {
+                    let result = {
+                        let mut vmm = vmm_for_snap.lock().unwrap();
+                        vmm.pause_vcpus().and_then(|()| vmm.snapshot_to(state_path))
+                    };
+                    let _ = match result {
+                        Ok(()) => out.write_all(b"ok\n"),
+                        Err(e) => out.write_all(format!("err: {e}\n").as_bytes()),
+                    };
+                } else {
+                    let _ = out.write_all(b"err: expected 'snapshot <state_path>'\n");
+                }
+            }
+        });
+    }
+
     loop {
         match event_manager.run() {
             Ok(_) => {}

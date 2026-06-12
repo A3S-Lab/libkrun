@@ -894,6 +894,7 @@ impl Vm {
 
 #[allow(unused)]
 #[cfg(target_arch = "x86_64")]
+#[derive(serde::Serialize, serde::Deserialize)]
 /// Structure holding VM kvm state.
 pub struct VmState {
     pitstate: kvm_pit_state2,
@@ -1636,6 +1637,19 @@ impl Vcpu {
                 // Move to 'running' state.
                 StateMachine::next(Self::running)
             }
+            // Paused ---- SaveState ----> Paused (state shipped through the channel)
+            #[cfg(target_arch = "x86_64")]
+            Ok(VcpuEvent::SaveState(state_tx)) => {
+                match self.save_state() {
+                    Ok(state) => {
+                        if state_tx.send(Box::new(state)).is_err() {
+                            error!("failed to send saved vcpu state");
+                        }
+                    }
+                    Err(e) => error!("failed to save vcpu state: {e:?}"),
+                }
+                StateMachine::next(Self::paused)
+            }
             // All other events have no effect on current 'paused' state.
             Ok(_) => StateMachine::next(Self::paused),
             // Unhandled exit of the other end.
@@ -1695,6 +1709,7 @@ impl Drop for Vcpu {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[derive(serde::Serialize, serde::Deserialize)]
 /// Structure holding VCPU kvm state.
 pub struct VcpuState {
     cpuid: CpuId,
@@ -1718,6 +1733,8 @@ pub enum VcpuEvent {
     Pause,
     /// Event that should resume the Vcpu.
     Resume,
+    /// Save the Vcpu KVM state through the given channel (only valid while paused).
+    SaveState(crossbeam_channel::Sender<Box<VcpuState>>),
     // Serialize and Deserialize to follow after we get the support from kvm-ioctls.
 }
 

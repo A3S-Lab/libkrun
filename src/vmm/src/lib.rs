@@ -184,6 +184,9 @@ pub enum Error {
     VcpuHandle(vstate::Error),
     /// vCPU resume failed.
     VcpuResume,
+    VcpuPause,
+    VcpuSaveState,
+    Snapshot(std::io::Error),
     /// Cannot spawn a new Vcpu thread.
     VcpuSpawn(std::io::Error),
     /// Vm error.
@@ -219,6 +222,9 @@ impl Display for Error {
             VcpuEvent(e) => write!(f, "Cannot send event to vCPU. {e:?}"),
             VcpuHandle(e) => write!(f, "Cannot create a vCPU handle. {e}"),
             VcpuResume => write!(f, "vCPUs resume failed."),
+            VcpuPause => write!(f, "vCPUs pause failed."),
+            VcpuSaveState => write!(f, "vCPU state save failed."),
+            Snapshot(e) => write!(f, "Snapshot failed: {e}"),
             VcpuSpawn(e) => write!(f, "Cannot spawn Vcpu thread: {e}"),
             Vm(e) => write!(f, "Vm error: {e}"),
             VmmObserverInit(e) => write!(
@@ -320,6 +326,56 @@ impl Vmm {
 
     #[cfg(target_os = "macos")]
     pub fn resume_vcpus(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Sends a pause command to the vcpus and waits until all are paused.
+    #[cfg(target_os = "linux")]
+    pub fn pause_vcpus(&mut self) -> Result<()> {
+        for handle in self.vcpus_handles.iter() {
+            handle
+                .send_event(VcpuEvent::Pause)
+                .map_err(Error::VcpuEvent)?;
+        }
+        for handle in self.vcpus_handles.iter() {
+            match handle
+                .response_receiver()
+                .recv_timeout(Duration::from_millis(1000))
+            {
+                Ok(VcpuResponse::Paused) => (),
+                _ => return Err(Error::VcpuPause),
+            }
+        }
+        Ok(())
+    }
+
+    /// Snapshot the paused VM to `state_path`: KVM VM state + per-vCPU state
+    /// (serialized with bincode) and an msync of the file-backed guest RAM
+    /// (`KRUN_SNAPSHOT_MEM_FILE`). Call [`Self::pause_vcpus`] first.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pub fn snapshot_to(&mut self, state_path: &str) -> Result<()> {
+        // Collect per-vCPU KVM state via the SaveState event (only the vcpu
+        // thread may touch its own VcpuFd; valid only while paused).
+        let mut vcpu_states = Vec::with_capacity(self.vcpus_handles.len());
+        for handle in self.vcpus_handles.iter() {
+            let (state_tx, state_rx) = crossbeam_channel::bounded(1);
+            handle
+                .send_event(VcpuEvent::SaveState(state_tx))
+                .map_err(Error::VcpuEvent)?;
+            match state_rx.recv_timeout(Duration::from_millis(2000)) {
+                Ok(state) => vcpu_states.push(*state),
+                Err(_) => return Err(Error::VcpuSaveState),
+            }
+        }
+
+        let vm_state = self.vm.save_state().map_err(Error::Vm)?;
+
+        // Flush guest RAM to its backing file (live via MAP_SHARED) so the
+        // file pair (RAM + state) is a complete, restorable snapshot.
+        crate::snapshot::sync_mem_backing().map_err(Error::Snapshot)?;
+
+        crate::snapshot::write_state_file(state_path, &vm_state, &vcpu_states)
+            .map_err(Error::Snapshot)?;
         Ok(())
     }
 
