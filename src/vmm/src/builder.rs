@@ -2993,6 +2993,67 @@ fn load_payload(
                     return Err(StartMicrovmError::MissingKernelConfig);
                 };
 
+            // Snapshot mode: the libkrunfw kernel region [kernel_guest_addr,
+            // +kernel_size) holds the guest's live kernel image AND its runtime
+            // structures (early page tables, IDT/GDT, kernel .data/.bss). It sits in
+            // the hole arch_memory_regions punches out of the file-backed RAM, so
+            // unless we ALSO file-back it the snapshot loses the kernel and the
+            // restored guest faults reading its own IDT. Copy the kernel into the
+            // snapshot RAM file, map it MAP_SHARED (so guest writes are captured),
+            // and record it in MEM_BACKING.layout — restore then re-maps it
+            // MAP_PRIVATE via the same layout loop as every other region.
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
+            {
+                use std::os::unix::fs::FileExt;
+                let mut backing = crate::snapshot::MEM_BACKING.lock().unwrap();
+                if let Some(b) = backing.as_mut() {
+                    let offset = b
+                        .layout
+                        .iter()
+                        .map(|(_, size, off)| off + *size as u64)
+                        .max()
+                        .unwrap_or(0);
+                    b.file
+                        .set_len(offset + kernel_size as u64)
+                        .map_err(StartMicrovmError::SnapshotMemFile)?;
+                    // Seed the file region with the pristine kernel image so the
+                    // template boots correctly; subsequent guest writes land here too.
+                    let kernel_bytes = unsafe {
+                        std::slice::from_raw_parts(kernel_host_addr as *const u8, kernel_size)
+                    };
+                    b.file
+                        .write_all_at(kernel_bytes, offset)
+                        .map_err(StartMicrovmError::SnapshotMemFile)?;
+                    let region_file =
+                        b.file.try_clone().map_err(StartMicrovmError::SnapshotMemFile)?;
+                    let mmap_region = vm_memory::mmap::MmapRegionBuilder::new(kernel_size)
+                        .with_mmap_prot(libc::PROT_READ | libc::PROT_WRITE)
+                        .with_mmap_flags(libc::MAP_NORESERVE | libc::MAP_SHARED)
+                        .with_file_offset(vm_memory::FileOffset::new(region_file, offset))
+                        .build()
+                        .map_err(|e| {
+                            StartMicrovmError::GuestMemoryMmap(vm_memory::Error::MmapRegion(e))
+                        })?;
+                    b.layout
+                        .push((GuestAddress(kernel_guest_addr), kernel_size, offset));
+                    drop(backing);
+                    return Ok((
+                        guest_mem
+                            .insert_region(Arc::new(
+                                GuestRegionMmap::new(
+                                    mmap_region,
+                                    GuestAddress(kernel_guest_addr),
+                                )
+                                .map_err(StartMicrovmError::GuestMemoryMmap)?,
+                            ))
+                            .map_err(StartMicrovmError::GuestMemoryMmap)?,
+                        GuestAddress(kernel_entry_addr),
+                        None,
+                        None,
+                    ));
+                }
+            }
+
             let kernel_region = unsafe {
                 MmapRegion::build_raw(kernel_host_addr as *mut u8, kernel_size, 0, 0)
                     .map_err(StartMicrovmError::InvalidKernelBundle)?
