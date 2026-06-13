@@ -1635,6 +1635,7 @@ impl Vcpu {
                 state = self.exit(FC_EXIT_CODE_GENERIC_ERROR);
             }
             // SaveState only applies while paused; ignore in running state.
+            #[cfg(target_arch = "x86_64")]
             Ok(VcpuEvent::SaveState(_)) => (),
             // All other events or lack thereof have no effect on current 'running' state.
             Err(TryRecvError::Empty) => (),
@@ -1787,6 +1788,8 @@ pub enum VcpuEvent {
     /// Event that should resume the Vcpu.
     Resume,
     /// Save the Vcpu KVM state through the given channel (only valid while paused).
+    /// vCPU KVM-state save/restore is x86_64-only (see [`VcpuState`]).
+    #[cfg(target_arch = "x86_64")]
     SaveState(crossbeam_channel::Sender<Box<VcpuState>>),
     // Serialize and Deserialize to follow after we get the support from kvm-ioctls.
 }
