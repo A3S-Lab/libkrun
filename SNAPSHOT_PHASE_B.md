@@ -1,4 +1,30 @@
-# Snapshot-fork Phase B — virtio device-state save/restore
+# Snapshot-fork — Phase A/B status
+
+## RESOLVED (2026-06-13): restored guest now runs correctly
+
+The deterministic `0x24470e0` restore fault was **NOT** virtio device-ring state
+(that was a red herring — the fault was byte-identical with/without device-state
+restore, with 1/2 vCPUs, with `nosmp`, and with `clocksource=tsc no-kvmclock`).
+
+**Real root cause:** the libkrunfw **kernel-image region `[0x1000000, 0x2450000)`
+(~21 MB)** was dropped from the snapshot. `arch_memory_regions` punches a hole there;
+`Payload::KernelMmap` (builder.rs ~2983) inserts that region via
+`guest_mem.insert_region(build_raw(...))` over libkrunfw host pages **after**
+`create_guest_memory_regions`, so it was never in `arch_mem_regions`, never file-backed,
+never in `mem_layout`. The guest's IDT / early page tables / kernel `.data` live in that
+region, so on restore the hole had no KVM slot → the first interrupt reads the IDT at
+GPA `0x2447000` (the `#PF` gate at `0x2447000 + 0xe0 = 0x24470e0`) → `DELIVERY_EV`.
+
+**Fix** (commits `cfec086` + `b823f27`): in snapshot mode `Payload::KernelMmap` copies
+the kernel into the snapshot RAM file, maps it `MAP_SHARED` (capturing the guest's
+runtime writes), and appends it to `MEM_BACKING.layout`; the restore branch sorts
+`mem_layout` by guest address (`from_regions` requires sorted) and maps all 4 regions
+`MAP_PRIVATE`. **Verified on KVM:** restored guest survives 10 s+ (was <1 s), zero
+`INTERNAL_ERROR`, zero ERROR lines; `ram.img` grew by exactly `0x1450000`.
+
+Phase B virtio device-state save/restore (below) is **implemented and kept** — it is
+needed once the restored guest exercises virtio I/O (virtio-fs / vsock backends), but it
+was not the cause of the boot-time fault.
 
 ## Status after Phase A (branch `feat/snapshot-restore`)
 
