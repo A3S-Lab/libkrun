@@ -224,6 +224,21 @@ impl VirtioDevice for Vsock {
         &mut self.queues
     }
 
+    fn save_queue_states(&self) -> Vec<crate::virtio::QueueState> {
+        // rx/tx are cloned into the muxer thread at activate(); self.queues for
+        // those indices is frozen at activate time and would snapshot a stale
+        // (0,0) ring position. Read the muxer's LIVE queues instead so restore
+        // resumes the rings where the guest actually left them. The event queue
+        // (index 2) is not handed to a worker, so self.queues is authoritative.
+        let mut states: Vec<crate::virtio::QueueState> =
+            self.queues.iter().map(VirtQueue::save_state).collect();
+        if self.device_state.is_activated() {
+            states[RXQ_INDEX] = self.queue_rx.lock().unwrap().save_state();
+            states[TXQ_INDEX] = self.queue_tx.lock().unwrap().save_state();
+        }
+        states
+    }
+
     fn queue_events(&self) -> &[EventFd] {
         &self.queue_events
     }

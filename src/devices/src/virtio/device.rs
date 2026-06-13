@@ -70,6 +70,17 @@ pub trait VirtioDevice: AsAny + Send {
     /// Returns a mutable reference to the device queues.
     fn queues_mut(&mut self) -> &mut [Queue];
 
+    /// Snapshot the device's LIVE queue state for snapshot-fork.
+    ///
+    /// Defaults to the transport-visible `queues()`. Devices that hand *cloned*
+    /// queues to a worker thread (e.g. vsock clones rx/tx into the muxer thread at
+    /// `activate()`) must override this to report the worker's live ring indices —
+    /// otherwise the snapshot captures the stale `self.queues` indices frozen at
+    /// activate time, and on restore the guest sees the used ring jump backwards.
+    fn save_queue_states(&self) -> Vec<super::QueueState> {
+        self.queues().iter().map(Queue::save_state).collect()
+    }
+
     /// Returns the device queues event fds.
     fn queue_events(&self) -> &[EventFd];
 

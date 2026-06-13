@@ -280,7 +280,7 @@ impl MmioTransport {
             device_status: self.device_status,
             config_generation: self.config_generation,
             acked_features: dev.acked_features(),
-            queues: dev.queues().iter().map(Queue::save_state).collect(),
+            queues: dev.save_queue_states(),
         }
     }
 
