@@ -319,8 +319,6 @@ impl<'a> DescriptorChain<'a> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-/// A virtio queue's parameters.
 /// Plain-data snapshot of a [`Queue`]'s driver-programmed state, used by the
 /// snapshot-fork restore path. Primitive fields only so the `vmm` crate can mirror
 /// it for (de)serialization without pulling serde into the `devices` crate.
@@ -337,6 +335,8 @@ pub struct QueueState {
     pub num_added: u16,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+/// A virtio queue's parameters.
 pub struct Queue {
     /// The maximal size in elements offered by the device
     pub(crate) max_size: u16,
