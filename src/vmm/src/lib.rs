@@ -283,6 +283,16 @@ impl Vmm {
         self.mmio_device_manager.get_device(device_type, device_id)
     }
 
+    /// Re-apply snapshotted virtio device state onto the freshly-built devices
+    /// (snapshot-fork restore). Must run before `start_vcpus`.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "tee")))]
+    pub fn restore_virtio_states(
+        &self,
+        states: &[(u64, devices::virtio::MmioDeviceState)],
+    ) -> std::result::Result<(), device_manager::mmio::Error> {
+        self.mmio_device_manager.restore_virtio_states(states)
+    }
+
     /// Starts the microVM vcpus.
     pub fn start_vcpus(&mut self, mut vcpus: Vec<Vcpu>) -> Result<()> {
         let vcpu_count = vcpus.len();
@@ -370,11 +380,15 @@ impl Vmm {
 
         let vm_state = self.vm.save_state().map_err(Error::Vm)?;
 
+        // Snapshot virtio device transport + queue state (vCPUs are paused, so the
+        // rings are quiescent and the saved indices are self-consistent).
+        let device_states = self.mmio_device_manager.save_virtio_states();
+
         // Flush guest RAM to its backing file (live via MAP_SHARED) so the
         // file pair (RAM + state) is a complete, restorable snapshot.
         crate::snapshot::sync_mem_backing().map_err(Error::Snapshot)?;
 
-        crate::snapshot::write_state_file(state_path, &vm_state, &vcpu_states)
+        crate::snapshot::write_state_file(state_path, &vm_state, &vcpu_states, &device_states)
             .map_err(Error::Snapshot)?;
         Ok(())
     }

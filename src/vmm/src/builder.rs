@@ -1580,6 +1580,8 @@ pub enum StartMicrovmError {
     RegisterVsockDevice(device_manager::mmio::Error),
     /// Cannot restore VM or vCPU KVM state from a snapshot.
     RestoreState(VstateError),
+    /// Cannot restore virtio device state from a snapshot.
+    RestoreDeviceState(device_manager::mmio::Error),
     /// Cannot attest the VM in the Secure Virtualization context.
     SecureVirtAttest(VstateError),
     /// Cannot initialize the Secure Virtualization backend.
@@ -1846,6 +1848,9 @@ impl Display for StartMicrovmError {
                 let mut err_msg = format!("{err}");
                 err_msg = err_msg.replace('\"', "");
                 write!(f, "Cannot restore VM/vCPU state from snapshot. {err_msg}")
+            }
+            RestoreDeviceState(ref err) => {
+                write!(f, "Cannot restore virtio device state from snapshot. {err}")
             }
             SecureVirtAttest(ref err) => {
                 let mut err_msg = format!("{err}");
@@ -2615,6 +2620,17 @@ pub fn build_microvm(
             vcpu.restore_state(vcpu_state)
                 .map_err(StartMicrovmError::RestoreState)?;
         }
+
+        // Re-apply virtio device state (transport regs + queue indices) onto the
+        // freshly-built devices and re-activate them, so the guest's restored
+        // drivers find their rings where they left off instead of reset to 0.
+        let device_states: Vec<(u64, devices::virtio::MmioDeviceState)> = state
+            .device_states
+            .iter()
+            .map(|(addr, d)| (*addr, devices::virtio::MmioDeviceState::from(d)))
+            .collect();
+        vmm.restore_virtio_states(&device_states)
+            .map_err(StartMicrovmError::RestoreDeviceState)?;
     }
 
     // Write the kernel command line to guest memory. This is x86_64 specific, since on

@@ -60,7 +60,102 @@ pub fn sync_mem_backing() -> std::io::Result<()> {
     }
 }
 
-/// Serialized snapshot: KVM VM state + per-vCPU state + the RAM region layout.
+/// Serde mirror of `devices::virtio::QueueState` (the `devices` crate is serde-free).
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct QueueStateSer {
+    pub size: u16,
+    pub ready: bool,
+    pub desc_table: u64,
+    pub avail_ring: u64,
+    pub used_ring: u64,
+    pub next_avail: u16,
+    pub next_used: u16,
+    pub event_idx_enabled: bool,
+    pub num_added: u16,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+impl From<&devices::virtio::QueueState> for QueueStateSer {
+    fn from(q: &devices::virtio::QueueState) -> Self {
+        Self {
+            size: q.size,
+            ready: q.ready,
+            desc_table: q.desc_table,
+            avail_ring: q.avail_ring,
+            used_ring: q.used_ring,
+            next_avail: q.next_avail,
+            next_used: q.next_used,
+            event_idx_enabled: q.event_idx_enabled,
+            num_added: q.num_added,
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+impl From<&QueueStateSer> for devices::virtio::QueueState {
+    fn from(q: &QueueStateSer) -> Self {
+        Self {
+            size: q.size,
+            ready: q.ready,
+            desc_table: q.desc_table,
+            avail_ring: q.avail_ring,
+            used_ring: q.used_ring,
+            next_avail: q.next_avail,
+            next_used: q.next_used,
+            event_idx_enabled: q.event_idx_enabled,
+            num_added: q.num_added,
+        }
+    }
+}
+
+/// Serde mirror of `devices::virtio::MmioDeviceState`.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct MmioDeviceStateSer {
+    pub device_type: u32,
+    pub features_select: u32,
+    pub acked_features_select: u32,
+    pub queue_select: u32,
+    pub device_status: u32,
+    pub config_generation: u32,
+    pub acked_features: u64,
+    pub queues: Vec<QueueStateSer>,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+impl From<&devices::virtio::MmioDeviceState> for MmioDeviceStateSer {
+    fn from(d: &devices::virtio::MmioDeviceState) -> Self {
+        Self {
+            device_type: d.device_type,
+            features_select: d.features_select,
+            acked_features_select: d.acked_features_select,
+            queue_select: d.queue_select,
+            device_status: d.device_status,
+            config_generation: d.config_generation,
+            acked_features: d.acked_features,
+            queues: d.queues.iter().map(QueueStateSer::from).collect(),
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+impl From<&MmioDeviceStateSer> for devices::virtio::MmioDeviceState {
+    fn from(d: &MmioDeviceStateSer) -> Self {
+        Self {
+            device_type: d.device_type,
+            features_select: d.features_select,
+            acked_features_select: d.acked_features_select,
+            queue_select: d.queue_select,
+            device_status: d.device_status,
+            config_generation: d.config_generation,
+            acked_features: d.acked_features,
+            queues: d.queues.iter().map(devices::virtio::QueueState::from).collect(),
+        }
+    }
+}
+
+/// Serialized snapshot: KVM VM state + per-vCPU state + RAM layout + device state.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct SnapshotState {
@@ -68,6 +163,9 @@ pub struct SnapshotState {
     pub vcpu_states: Vec<crate::linux::vstate::VcpuState>,
     /// RAM file layout: (guest_addr_raw, size, file_offset) per region.
     pub mem_layout: Vec<(u64, usize, u64)>,
+    /// virtio device state keyed by MMIO base address.
+    #[serde(default)]
+    pub device_states: Vec<(u64, MmioDeviceStateSer)>,
 }
 
 /// Write the snapshot state file (bincode).
@@ -76,6 +174,7 @@ pub fn write_state_file(
     path: &str,
     vm_state: &crate::linux::vstate::VmState,
     vcpu_states: &[crate::linux::vstate::VcpuState],
+    device_states: &[(u64, devices::virtio::MmioDeviceState)],
 ) -> std::io::Result<()> {
     let mem_layout = MEM_BACKING
         .lock()
@@ -89,6 +188,11 @@ pub fn write_state_file(
         })
         .unwrap_or_default();
 
+    let device_states: Vec<(u64, MmioDeviceStateSer)> = device_states
+        .iter()
+        .map(|(addr, d)| (*addr, MmioDeviceStateSer::from(d)))
+        .collect();
+
     // SnapshotState borrows nothing: serialize via a reference-shaped tuple to
     // avoid cloning large vCPU states.
     #[derive(serde::Serialize)]
@@ -96,12 +200,14 @@ pub fn write_state_file(
         vm_state: &'a crate::linux::vstate::VmState,
         vcpu_states: &'a [crate::linux::vstate::VcpuState],
         mem_layout: Vec<(u64, usize, u64)>,
+        device_states: Vec<(u64, MmioDeviceStateSer)>,
     }
 
     let bytes = bincode::serialize(&SnapshotStateRef {
         vm_state,
         vcpu_states,
         mem_layout,
+        device_states,
     })
     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(path, bytes)

@@ -41,6 +41,10 @@ pub enum Error {
     DeviceNotFound,
     /// Failed to update the mmio device.
     UpdateFailed,
+    /// No device found at the snapshot's MMIO address during restore.
+    RestoreDeviceNotFound(u64),
+    /// Failed to restore a virtio device's state during snapshot-fork restore.
+    RestoreDevice(u64, devices::Error),
 }
 
 impl fmt::Display for Error {
@@ -59,6 +63,12 @@ impl fmt::Display for Error {
             Error::RegisterIrqFd(ref e) => write!(f, "failed to register irqfd: {e}"),
             Error::DeviceNotFound => write!(f, "the device couldn't be found"),
             Error::UpdateFailed => write!(f, "failed to update the mmio device"),
+            Error::RestoreDeviceNotFound(addr) => {
+                write!(f, "snapshot restore: no device at mmio addr 0x{addr:x}")
+            }
+            Error::RestoreDevice(addr, ref e) => {
+                write!(f, "snapshot restore: device 0x{addr:x} state restore failed: {e}")
+            }
         }
     }
 }
@@ -290,6 +300,50 @@ impl MMIODeviceManager {
             }
         }
         None
+    }
+
+    /// Snapshot every virtio MMIO device's transport + queue state (snapshot-fork).
+    /// Returns `(mmio_base_addr, state)` pairs; the address is the stable key used to
+    /// match the freshly-built device on restore.
+    pub fn save_virtio_states(&self) -> Vec<(u64, devices::virtio::MmioDeviceState)> {
+        let mut out = Vec::new();
+        for dev_info in self.id_to_dev_info.values() {
+            if let Some((_, dev)) = self.bus.get_device(dev_info.addr) {
+                let locked = dev.lock().expect("Poisoned bus device lock");
+                if let Some(transport) = locked
+                    .as_any()
+                    .downcast_ref::<devices::virtio::MmioTransport>()
+                {
+                    out.push((dev_info.addr, transport.save_state()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Re-apply snapshotted virtio device states onto the freshly-built devices,
+    /// re-activating those the guest had driven to DRIVER_OK, so they resume at the
+    /// guest's ring indices. Called on restore before the vCPUs run.
+    pub fn restore_virtio_states(
+        &self,
+        states: &[(u64, devices::virtio::MmioDeviceState)],
+    ) -> Result<()> {
+        for (addr, state) in states {
+            let Some((_, dev)) = self.bus.get_device(*addr) else {
+                return Err(Error::RestoreDeviceNotFound(*addr));
+            };
+            let mut locked = dev.lock().expect("Poisoned bus device lock");
+            let Some(transport) = locked
+                .as_mut_any()
+                .downcast_mut::<devices::virtio::MmioTransport>()
+            else {
+                continue;
+            };
+            transport
+                .restore_state(state)
+                .map_err(|e| Error::RestoreDevice(*addr, e))?;
+        }
+        Ok(())
     }
 }
 
