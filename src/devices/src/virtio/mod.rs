@@ -79,7 +79,7 @@ pub use self::mmio::*;
 pub use self::net::Net;
 #[cfg(target_os = "windows")]
 pub use self::net_windows::Net as NetWindows;
-pub use self::queue::{Descriptor, DescriptorChain, Queue};
+pub use self::queue::{Descriptor, DescriptorChain, Queue, QueueState};
 #[cfg(all(not(feature = "tee"), not(target_os = "windows")))]
 pub use self::rng::*;
 #[cfg(target_os = "windows")]

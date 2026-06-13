@@ -1348,6 +1348,12 @@ impl Vcpu {
             .fd
             .get_vcpu_events()
             .map_err(Error::VcpuGetVcpuEvents)?;
+        eprintln!(
+            "[snap-save] vcpu{} saved: rip=0x{:x} rsp=0x{:x} cr0=0x{:x} cr3=0x{:x} cr4=0x{:x} efer=0x{:x} cs.base=0x{:x} cs.sel=0x{:x}",
+            self.id, regs.rip, regs.rsp,
+            sregs.cr0, sregs.cr3, sregs.cr4, sregs.efer,
+            sregs.cs.base, sregs.cs.selector
+        );
         Ok(VcpuState {
             cpuid: self.cpuid.clone(),
             msrs,
@@ -1520,7 +1526,17 @@ impl Vcpu {
                     Err(Error::VcpuUnhandledKvmExit)
                 }
                 VcpuExit::InternalError => {
-                    error!("Received KVM_EXIT_INTERNAL_ERROR signal");
+                    let run = self.fd.get_kvm_run();
+                    // SAFETY: reading the internal-error union after an
+                    // INTERNAL_ERROR exit; the kernel populated it.
+                    let (suberror, ndata, data) = unsafe {
+                        let i = run.__bindgen_anon_1.internal;
+                        (i.suberror, i.ndata, i.data)
+                    };
+                    error!(
+                        "Received KVM_EXIT_INTERNAL_ERROR signal: suberror={suberror} ndata={ndata} data={:x?}",
+                        &data[..(ndata as usize).min(data.len())]
+                    );
                     Err(Error::VcpuUnhandledKvmExit)
                 }
                 VcpuExit::SystemEvent(event, _reason) => {

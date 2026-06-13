@@ -321,6 +321,22 @@ impl<'a> DescriptorChain<'a> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// A virtio queue's parameters.
+/// Plain-data snapshot of a [`Queue`]'s driver-programmed state, used by the
+/// snapshot-fork restore path. Primitive fields only so the `vmm` crate can mirror
+/// it for (de)serialization without pulling serde into the `devices` crate.
+#[derive(Clone, Debug, Default)]
+pub struct QueueState {
+    pub size: u16,
+    pub ready: bool,
+    pub desc_table: u64,
+    pub avail_ring: u64,
+    pub used_ring: u64,
+    pub next_avail: u16,
+    pub next_used: u16,
+    pub event_idx_enabled: bool,
+    pub num_added: u16,
+}
+
 pub struct Queue {
     /// The maximal size in elements offered by the device
     pub(crate) max_size: u16,
@@ -370,6 +386,36 @@ impl Queue {
 
     pub fn get_max_size(&self) -> u16 {
         self.max_size
+    }
+
+    /// Snapshot the driver-programmed state of this queue (for snapshot-fork).
+    /// `max_size` is intrinsic to the device and not included.
+    pub fn save_state(&self) -> QueueState {
+        QueueState {
+            size: self.size,
+            ready: self.ready,
+            desc_table: self.desc_table.0,
+            avail_ring: self.avail_ring.0,
+            used_ring: self.used_ring.0,
+            next_avail: self.next_avail.0,
+            next_used: self.next_used.0,
+            event_idx_enabled: self.event_idx_enabled,
+            num_added: self.num_added.0,
+        }
+    }
+
+    /// Re-apply a snapshotted queue state onto a freshly-constructed queue so the
+    /// device resumes at the guest's ring indices instead of resetting to 0.
+    pub fn restore_state(&mut self, s: &QueueState) {
+        self.size = s.size;
+        self.ready = s.ready;
+        self.desc_table = GuestAddress(s.desc_table);
+        self.avail_ring = GuestAddress(s.avail_ring);
+        self.used_ring = GuestAddress(s.used_ring);
+        self.next_avail = Wrapping(s.next_avail);
+        self.next_used = Wrapping(s.next_used);
+        self.event_idx_enabled = s.event_idx_enabled;
+        self.num_added = Wrapping(s.num_added);
     }
 
     /// Return the actual size of the queue, as the driver may not set up a
