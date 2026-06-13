@@ -428,6 +428,15 @@ impl PassthroughFs {
     pub fn save_fs_state(&self) -> Vec<u8> {
         use std::os::unix::ffi::OsStrExt;
         let inodes = self.inodes.read().unwrap();
+
+        // Paths are stored RELATIVE to the fs root: the template and each fork mount
+        // their rootfs at DIFFERENT host paths (per-box overlay dir), and the
+        // template's dir is gone by restore time. The canonical root is the root
+        // inode's own readlink (handles symlinks/trailing slashes in cfg.root_dir).
+        let root_path = inodes.get(&fuse::ROOT_ID).and_then(|d| {
+            std::fs::read_link(format!("/proc/self/fd/{}", d.file.as_raw_fd())).ok()
+        });
+
         let mut out = Vec::new();
         out.extend_from_slice(&self.next_inode.load(Ordering::Relaxed).to_le_bytes());
         out.extend_from_slice(&self.next_handle.load(Ordering::Relaxed).to_le_bytes());
@@ -435,21 +444,40 @@ impl PassthroughFs {
         out.extend_from_slice(&0u64.to_le_bytes());
         let mut count: u64 = 0;
         for (nodeid, data) in inodes.iter() {
-            let link = format!("/proc/self/fd/{}", data.file.as_raw_fd());
-            let path = match std::fs::read_link(&link) {
+            let path = match std::fs::read_link(format!(
+                "/proc/self/fd/{}",
+                data.file.as_raw_fd()
+            )) {
                 Ok(p) => p,
                 Err(_) => continue,
             };
-            let path_bytes = path.as_os_str().as_bytes();
+            let full = path.as_os_str().as_bytes();
             // Unlinked-but-open files read back as "<path> (deleted)" and cannot be
             // reopened by path; skip them — the guest will re-LOOKUP if needed.
-            if path_bytes.ends_with(b" (deleted)") || path_bytes.contains(&0) {
+            if full.ends_with(b" (deleted)") || full.contains(&0) {
                 continue;
             }
+            // Relativize against the root path. The root inode itself stores "".
+            let rel: &[u8] = match &root_path {
+                Some(root) => {
+                    let root_b = root.as_os_str().as_bytes();
+                    if full == root_b {
+                        b""
+                    } else if full.len() > root_b.len()
+                        && full.starts_with(root_b)
+                        && full[root_b.len()] == b'/'
+                    {
+                        &full[root_b.len() + 1..]
+                    } else {
+                        continue; // outside the fs root — not reconstructible
+                    }
+                }
+                None => continue,
+            };
             out.extend_from_slice(&(*nodeid).to_le_bytes());
             out.extend_from_slice(&data.refcount.load(Ordering::Relaxed).to_le_bytes());
-            out.extend_from_slice(&(path_bytes.len() as u32).to_le_bytes());
-            out.extend_from_slice(path_bytes);
+            out.extend_from_slice(&(rel.len() as u32).to_le_bytes());
+            out.extend_from_slice(rel);
             count += 1;
         }
         out[count_pos..count_pos + 8].copy_from_slice(&count.to_le_bytes());
@@ -482,9 +510,16 @@ impl PassthroughFs {
             if off + plen > blob.len() {
                 break;
             }
-            let path = &blob[off..off + plen];
+            let rel = &blob[off..off + plen];
             off += plen;
-            let cpath = match CString::new(path) {
+            // Rejoin the relative path against THIS fork's rootfs mount (a different
+            // host dir than the template's). Empty rel == the root inode itself.
+            let mut full = self.cfg.root_dir.clone().into_bytes();
+            if !rel.is_empty() {
+                full.push(b'/');
+                full.extend_from_slice(rel);
+            }
+            let cpath = match CString::new(full) {
                 Ok(c) => c,
                 Err(_) => continue,
             };
