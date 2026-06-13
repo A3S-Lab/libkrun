@@ -93,6 +93,21 @@ impl Display for CreateMmioTransportError {
 ///
 /// Typically one page (4096 bytes) of MMIO address space is sufficient to handle this transport
 /// and inner virtio device.
+/// Plain-data snapshot of an [`MmioTransport`] + its device's driver-programmed
+/// state, used by the snapshot-fork restore path. Mirrored for (de)serialization in
+/// the `vmm` crate. Keyed at restore time by MMIO base address + `device_type`.
+#[derive(Clone, Debug, Default)]
+pub struct MmioDeviceState {
+    pub device_type: u32,
+    pub features_select: u32,
+    pub acked_features_select: u32,
+    pub queue_select: u32,
+    pub device_status: u32,
+    pub config_generation: u32,
+    pub acked_features: u64,
+    pub queues: Vec<QueueState>,
+}
+
 pub struct MmioTransport {
     device: Arc<Mutex<dyn VirtioDevice>>,
     // The register where feature bits are stored.
@@ -252,6 +267,57 @@ impl MmioTransport {
     // Gets the encapsulated VirtioDevice.
     pub fn device(&self) -> Arc<Mutex<dyn VirtioDevice>> {
         self.device.clone()
+    }
+
+    /// Snapshot the full driver-programmed transport + device state (snapshot-fork).
+    pub fn save_state(&self) -> MmioDeviceState {
+        let dev = self.locked_device();
+        MmioDeviceState {
+            device_type: dev.device_type(),
+            features_select: self.features_select,
+            acked_features_select: self.acked_features_select,
+            queue_select: self.queue_select,
+            device_status: self.device_status,
+            config_generation: self.config_generation,
+            acked_features: dev.acked_features(),
+            queues: dev.queues().iter().map(Queue::save_state).collect(),
+        }
+    }
+
+    /// Re-apply a snapshotted transport + device state onto this freshly-built
+    /// transport, then re-activate the device if the driver had reached DRIVER_OK,
+    /// so the device resumes at the guest's ring indices without the guest replaying
+    /// the setup MMIO writes. Returns whether the device was (re-)activated.
+    pub fn restore_state(&mut self, state: &MmioDeviceState) -> Result<bool, crate::Error> {
+        self.features_select = state.features_select;
+        self.acked_features_select = state.acked_features_select;
+        self.queue_select = state.queue_select;
+        self.config_generation = state.config_generation;
+
+        {
+            let mut dev = self.locked_device();
+            dev.set_acked_features(state.acked_features);
+            let queues = dev.queues_mut();
+            for (q, qs) in queues.iter_mut().zip(state.queues.iter()) {
+                q.restore_state(qs);
+            }
+        }
+
+        // Re-activate if the guest driver had completed setup (DRIVER_OK), mirroring
+        // the activation path in `set_device_status`.
+        let driver_ok = state.device_status & device_status::DRIVER_OK != 0;
+        let mut activated = false;
+        if driver_ok && !self.locked_device().is_activated() {
+            self.locked_device()
+                .activate(self.mem.clone(), self.interrupt.clone())
+                .map_err(|e| {
+                    error!("snapshot-restore: device activation failed: {e:?}");
+                    crate::Error::IoError(std::io::Error::other("device activation failed"))
+                })?;
+            activated = true;
+        }
+        self.device_status = state.device_status;
+        Ok(activated)
     }
 
     pub fn register_queue_evt(&mut self, queue_evt: EventFd, id: u32) {
