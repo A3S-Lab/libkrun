@@ -2867,8 +2867,13 @@ fn create_guest_memory_regions(
             .write(true)
             .open(&mem_path)
             .map_err(StartMicrovmError::SnapshotMemFile)?;
-        let mut regions = Vec::with_capacity(state.mem_layout.len());
-        for (addr, size, offset) in &state.mem_layout {
+        // GuestMemoryMmap::from_regions requires regions sorted by guest address.
+        // The kernel region is appended to mem_layout last (out of address order),
+        // so sort before building.
+        let mut sorted_layout = state.mem_layout.clone();
+        sorted_layout.sort_by_key(|(addr, _, _)| *addr);
+        let mut regions = Vec::with_capacity(sorted_layout.len());
+        for (addr, size, offset) in &sorted_layout {
             let region_file = file
                 .try_clone()
                 .map_err(StartMicrovmError::SnapshotMemFile)?;
