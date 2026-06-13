@@ -289,10 +289,10 @@ impl MmioTransport {
                     if let Ok(ram_used) =
                         self.mem.read_obj::<u16>(vm_memory::GuestAddress(q.used_ring + 2))
                     {
-                        if q.next_used.wrapping_sub(ram_used) as i16 < 0 {
+                        if (q.next_used.wrapping_sub(ram_used) as i16) < 0 {
                             q.next_used = ram_used;
                         }
-                        if q.next_avail.wrapping_sub(ram_used) as i16 < 0 {
+                        if (q.next_avail.wrapping_sub(ram_used) as i16) < 0 {
                             q.next_avail = ram_used;
                         }
                     }
