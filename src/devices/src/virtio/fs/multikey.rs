@@ -47,6 +47,12 @@ where
         self.main.get(key).map(|(_, v)| v)
     }
 
+    /// Iterate over `(main_key, value)` pairs. Used to walk the inode map when
+    /// snapshotting virtio-fs state.
+    pub fn iter(&self) -> impl Iterator<Item = (&K1, &V)> {
+        self.main.iter().map(|(k, (_, v))| (k, v))
+    }
+
     /// Returns a reference to the value corresponding to the alternate key.
     ///
     /// The key may be any borrowed form of the `K2``, but the ordering on the borrowed form must

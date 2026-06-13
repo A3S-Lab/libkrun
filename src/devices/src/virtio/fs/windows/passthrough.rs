@@ -157,6 +157,14 @@ pub struct PassthroughFs {
 }
 
 impl PassthroughFs {
+    /// Snapshot-fork inode-map persistence is Linux-only; a no-op on Windows.
+    pub fn save_fs_state(&self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    /// Snapshot-fork inode-map persistence is Linux-only; a no-op on Windows.
+    pub fn restore_fs_state(&self, _blob: &[u8]) {}
+
     pub fn new(cfg: Config) -> io::Result<PassthroughFs> {
         let root_dir = PathBuf::from(&cfg.root_dir);
         virtiofs_debug_log(format!("PassthroughFs::new root_dir={}", root_dir.display()));

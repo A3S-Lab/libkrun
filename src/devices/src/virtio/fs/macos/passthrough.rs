@@ -444,6 +444,15 @@ pub struct PassthroughFs {
 }
 
 impl PassthroughFs {
+    /// Snapshot-fork inode-map persistence is Linux-only (depends on
+    /// `/proc/self/fd`); a no-op on macOS.
+    pub fn save_fs_state(&self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    /// Snapshot-fork inode-map persistence is Linux-only; a no-op on macOS.
+    pub fn restore_fs_state(&self, _blob: &[u8]) {}
+
     pub fn new(cfg: Config) -> io::Result<PassthroughFs> {
         let mut cfg = cfg;
 

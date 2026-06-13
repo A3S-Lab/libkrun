@@ -121,6 +121,8 @@ pub struct MmioDeviceStateSer {
     pub config_generation: u32,
     pub acked_features: u64,
     pub queues: Vec<QueueStateSer>,
+    #[serde(default)]
+    pub device_blob: Vec<u8>,
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -135,6 +137,7 @@ impl From<&devices::virtio::MmioDeviceState> for MmioDeviceStateSer {
             config_generation: d.config_generation,
             acked_features: d.acked_features,
             queues: d.queues.iter().map(QueueStateSer::from).collect(),
+            device_blob: d.device_blob.clone(),
         }
     }
 }
@@ -151,6 +154,7 @@ impl From<&MmioDeviceStateSer> for devices::virtio::MmioDeviceState {
             config_generation: d.config_generation,
             acked_features: d.acked_features,
             queues: d.queues.iter().map(devices::virtio::QueueState::from).collect(),
+            device_blob: d.device_blob.clone(),
         }
     }
 }

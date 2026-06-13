@@ -106,6 +106,8 @@ pub struct MmioDeviceState {
     pub config_generation: u32,
     pub acked_features: u64,
     pub queues: Vec<QueueState>,
+    /// Opaque device-internal state (e.g. virtio-fs inode map). Empty if none.
+    pub device_blob: Vec<u8>,
 }
 
 pub struct MmioTransport {
@@ -309,6 +311,7 @@ impl MmioTransport {
             config_generation: self.config_generation,
             acked_features: dev.acked_features(),
             queues,
+            device_blob: dev.save_device_state().unwrap_or_default(),
         }
     }
 
@@ -344,6 +347,15 @@ impl MmioTransport {
                 })?;
             activated = true;
         }
+
+        // Rehydrate device-internal state (e.g. the virtio-fs inode map) AFTER
+        // activate() has rebuilt the device's shared backend, and before the vCPUs
+        // run so the guest's first FUSE op finds a populated map.
+        if !state.device_blob.is_empty() {
+            self.locked_device()
+                .restore_device_state(&state.device_blob);
+        }
+
         self.device_status = state.device_status;
         Ok(activated)
     }

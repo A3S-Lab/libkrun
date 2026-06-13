@@ -92,12 +92,15 @@ impl io::Write for ZCWriter<'_> {
 }
 
 pub struct Server<F: FileSystem + Sync> {
-    fs: F,
+    // Shared with the owning device so it can snapshot/restore the filesystem's
+    // inode map (the worker thread that holds this Server is otherwise the only
+    // owner of the live FUSE namespace).
+    fs: std::sync::Arc<F>,
     options: AtomicU64,
 }
 
 impl<F: FileSystem + Sync> Server<F> {
-    pub fn new(fs: F) -> Server<F> {
+    pub fn new(fs: std::sync::Arc<F>) -> Server<F> {
         Server {
             fs,
             options: AtomicU64::new(FsOptions::empty().bits()),

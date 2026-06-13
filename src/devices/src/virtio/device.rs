@@ -81,6 +81,18 @@ pub trait VirtioDevice: AsAny + Send {
         self.queues().iter().map(Queue::save_state).collect()
     }
 
+    /// Snapshot device-internal state that is NOT in the virtqueues, as an opaque
+    /// blob (snapshot-fork). Defaults to `None`. virtio-fs overrides this to persist
+    /// its FUSE inode map (nodeid → path), without which a restored guest's cached
+    /// nodeids all resolve to EBADF against the freshly-built, empty host inode map.
+    fn save_device_state(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Re-apply device-internal state captured by [`save_device_state`]. Called on
+    /// restore after `activate()` and before the vCPUs run. Default no-op.
+    fn restore_device_state(&mut self, _blob: &[u8]) {}
+
     /// Returns the device queues event fds.
     fn queue_events(&self) -> &[EventFd];
 

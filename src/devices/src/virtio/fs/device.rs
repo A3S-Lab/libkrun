@@ -15,7 +15,8 @@ use virtio_bindings::{virtio_config::VIRTIO_F_VERSION_1, virtio_ring::VIRTIO_RIN
 use vm_memory::{ByteValued, GuestMemoryMmap};
 
 use super::super::{
-    ActivateResult, DeviceState, FsError, Queue as VirtQueue, VirtioDevice, VirtioShmRegion,
+    ActivateError, ActivateResult, DeviceState, FsError, Queue as VirtQueue, VirtioDevice,
+    VirtioShmRegion,
 };
 use super::passthrough;
 use super::worker::FsWorker;
@@ -72,6 +73,10 @@ pub struct Fs {
     config: VirtioFsConfig,
     shm_region: Option<VirtioShmRegion>,
     passthrough_cfg: passthrough::Config,
+    // The live FUSE filesystem, shared with the worker thread (via the Server) so
+    // this device can snapshot/restore its inode map for snapshot-fork. `Some` once
+    // activated.
+    passthrough_fs: Option<Arc<passthrough::PassthroughFs>>,
     worker_thread: Option<JoinHandle<()>>,
     worker_stopfd: EventFd,
     exit_code: Arc<AtomicI32>,
@@ -115,6 +120,7 @@ impl Fs {
             config,
             shm_region: None,
             passthrough_cfg: fs_cfg,
+            passthrough_fs: None,
             worker_thread: None,
             worker_stopfd: EventFd::new(EFD_NONBLOCK).map_err(FsError::EventFd)?,
             exit_code,
@@ -192,6 +198,16 @@ impl VirtioDevice for Fs {
         &self.queue_events
     }
 
+    fn save_device_state(&self) -> Option<Vec<u8>> {
+        self.passthrough_fs.as_ref().map(|fs| fs.save_fs_state())
+    }
+
+    fn restore_device_state(&mut self, blob: &[u8]) {
+        if let Some(fs) = self.passthrough_fs.as_ref() {
+            fs.restore_fs_state(blob);
+        }
+    }
+
     fn read_config(&self, offset: u64, mut data: &mut [u8]) {
         let config_slice = self.config.as_slice();
         let config_len = config_slice.len() as u64;
@@ -230,13 +246,21 @@ impl VirtioDevice for Fs {
             .iter()
             .map(|e| e.try_clone().unwrap())
             .collect();
+        // Build the FUSE filesystem and keep a shared handle so this device can
+        // snapshot/restore its inode map (the worker thread otherwise owns it).
+        let passthrough_fs = Arc::new(
+            passthrough::PassthroughFs::new(self.passthrough_cfg.clone())
+                .map_err(|_| ActivateError::BadActivate)?,
+        );
+        self.passthrough_fs = Some(passthrough_fs.clone());
+
         let worker = FsWorker::new(
             self.queues.clone(),
             queue_evts,
             interrupt.clone(),
             mem.clone(),
             self.shm_region.clone(),
-            self.passthrough_cfg.clone(),
+            passthrough_fs,
             self.worker_stopfd.try_clone().unwrap(),
             self.exit_code.clone(),
             #[cfg(target_os = "macos")]
