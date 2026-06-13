@@ -272,6 +272,34 @@ impl MmioTransport {
     /// Snapshot the full driver-programmed transport + device state (snapshot-fork).
     pub fn save_state(&self) -> MmioDeviceState {
         let dev = self.locked_device();
+        let mut queues = dev.save_queue_states();
+
+        // Reconcile each queue's ring position against the guest-RAM used index,
+        // which is authoritative: the device writes `used_ring.idx` to guest memory
+        // on every completion, so it can never lag the device. A worker-thread device
+        // (vsock muxer, virtio-fs worker) advances a CLONED queue, leaving the
+        // transport-visible `self.queues` indices frozen at activate time (0); without
+        // this, the snapshot would record fewer completed/consumed entries than the
+        // guest has already observed, and on restore the guest sees the used ring jump
+        // backwards and ignores all device traffic. Never decrease an index.
+        {
+            use vm_memory::Bytes as _;
+            for q in queues.iter_mut() {
+                if q.ready && q.used_ring != 0 {
+                    if let Ok(ram_used) =
+                        self.mem.read_obj::<u16>(vm_memory::GuestAddress(q.used_ring + 2))
+                    {
+                        if q.next_used.wrapping_sub(ram_used) as i16 < 0 {
+                            q.next_used = ram_used;
+                        }
+                        if q.next_avail.wrapping_sub(ram_used) as i16 < 0 {
+                            q.next_avail = ram_used;
+                        }
+                    }
+                }
+            }
+        }
+
         MmioDeviceState {
             device_type: dev.device_type(),
             features_select: self.features_select,
@@ -280,7 +308,7 @@ impl MmioTransport {
             device_status: self.device_status,
             config_generation: self.config_generation,
             acked_features: dev.acked_features(),
-            queues: dev.save_queue_states(),
+            queues,
         }
     }
 
