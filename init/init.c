@@ -154,6 +154,7 @@ static void import_cmdline_env_if_needed(void)
         "KRUN_INIT",
         "KRUN_WORKDIR",
         "KRUN_INIT_PID1",
+        "BOX_EXEC_B64",
         "BOX_EXEC_EXEC",
     };
     bool need_import = false;
