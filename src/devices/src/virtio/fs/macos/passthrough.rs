@@ -2063,10 +2063,10 @@ impl FileSystem for PassthroughFs {
             return Err(linux_error(io::Error::last_os_error()));
         }
 
-        let ret = unsafe { libc::close(fd) };
-        if ret == -1 {
-            return Err(linux_error(io::Error::last_os_error()));
-        }
+        // `file` owns `fd` and closes it on drop. Closing the raw descriptor
+        // here as well races with descriptor reuse and can close an unrelated
+        // virtio-fs handle, surfacing in the guest as sporadic EBADF on tar's
+        // close(). This mirrors the Linux fix in 27910fe.
 
         // We've checked that map_sender is something above.
         let sender = map_sender.as_ref().unwrap();
