@@ -10,6 +10,7 @@ use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, Gues
 use windows::Win32::System::Hypervisor::*;
 
 use super::interrupts::PendingInterruptQueue;
+use super::registers::{get_virtual_processor_registers, set_virtual_processor_registers};
 use super::whpx_vcpu::{VcpuEmulation, VcpuExit, WhpxVcpu};
 use crate::{FC_EXIT_CODE_GENERIC_ERROR, FC_EXIT_CODE_OK};
 
@@ -134,7 +135,12 @@ fn windows_vcpu_debug_log(message: impl AsRef<str>) {
     if !*ENABLED.get_or_init(|| {
         std::env::var("LIBKRUN_WINDOWS_VERBOSE_DEBUG")
             .or_else(|_| std::env::var("LIBKRUN_WINDOWS_VCPU_DEBUG"))
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(false)
     }) {
         return;
@@ -358,7 +364,9 @@ impl Vm {
 
                     if effective_mask != 0 {
                         let mut synthetic_features: WHV_PARTITION_PROPERTY = std::mem::zeroed();
-                        synthetic_features.SyntheticProcessorFeaturesBanks.BanksCount = 1;
+                        synthetic_features
+                            .SyntheticProcessorFeaturesBanks
+                            .BanksCount = 1;
                         synthetic_features
                             .SyntheticProcessorFeaturesBanks
                             .Anonymous
@@ -603,8 +611,8 @@ impl Vcpu {
         let (event_sender, event_receiver) = crossbeam_channel::unbounded();
         let (response_sender, response_receiver) = crossbeam_channel::unbounded();
 
-        let whpx_vcpu =
-            WhpxVcpu::new(partition, id as u32, pending_interrupt.clone()).map_err(Error::VcpuSpawn)?;
+        let whpx_vcpu = WhpxVcpu::new(partition, id as u32, pending_interrupt.clone())
+            .map_err(Error::VcpuSpawn)?;
 
         Ok(Vcpu {
             id,
@@ -734,7 +742,7 @@ impl Vcpu {
         };
 
         unsafe {
-            WHvSetVirtualProcessorRegisters(
+            set_virtual_processor_registers(
                 self.partition,
                 self.id as u32,
                 reg_names.as_ptr(),
@@ -768,16 +776,16 @@ impl Vcpu {
 
     fn configure_lint(&self) -> Result<()> {
         use windows::Win32::System::Hypervisor::{
-            WHvGetVirtualProcessorInterruptControllerState, WHvGetVirtualProcessorRegisters,
-            WHvSetVirtualProcessorInterruptControllerState, WHvSetVirtualProcessorRegisters,
-            WHvX64RegisterApicLvtLint0, WHvX64RegisterApicLvtLint1, WHV_REGISTER_VALUE,
+            WHvGetVirtualProcessorInterruptControllerState,
+            WHvSetVirtualProcessorInterruptControllerState, WHvX64RegisterApicLvtLint0,
+            WHvX64RegisterApicLvtLint1, WHV_REGISTER_VALUE,
         };
 
         let reg_names = [WHvX64RegisterApicLvtLint0, WHvX64RegisterApicLvtLint1];
         let mut reg_values = [WHV_REGISTER_VALUE::default(); 2];
 
         unsafe {
-            if let Err(e) = WHvGetVirtualProcessorRegisters(
+            if let Err(e) = get_virtual_processor_registers(
                 self.partition,
                 self.id as u32,
                 reg_names.as_ptr(),
@@ -923,7 +931,7 @@ impl Vcpu {
         reg_values[1].Reg64 = u64::from(set_apic_delivery_mode(lint1_before as u32, APIC_MODE_NMI));
 
         unsafe {
-            if let Err(e) = WHvSetVirtualProcessorRegisters(
+            if let Err(e) = set_virtual_processor_registers(
                 self.partition,
                 self.id as u32,
                 reg_names.as_ptr(),
@@ -1019,7 +1027,6 @@ impl Vcpu {
                         log::debug!("Monitor thread started for vCPU {}", vcpu_id);
 
                         use windows::Win32::System::Hypervisor::{
-                            WHvGetVirtualProcessorRegisters, WHvSetVirtualProcessorRegisters,
                             WHvX64RegisterApicCurrentCount, WHvX64RegisterApicDivide,
                             WHvX64RegisterApicLvtTimer,
                             WHvX64RegisterRip, WHvX64RegisterRsp, WHvX64RegisterRflags,
@@ -1029,8 +1036,7 @@ impl Vcpu {
                             WHvX64RegisterRsi, WHvX64RegisterRdi, WHvX64RegisterRbp,
                             WHvX64RegisterR8, WHvX64RegisterR9, WHvX64RegisterR10,
                             WHvX64RegisterR11, WHvX64RegisterR12, WHvX64RegisterR13,
-                            WHvX64RegisterR14, WHvX64RegisterR15,
-                            WHV_REGISTER_NAME, WHV_REGISTER_VALUE,
+                            WHvX64RegisterR14, WHvX64RegisterR15, WHV_REGISTER_VALUE,
                         };
 
                         let mut last_rip: Option<u64> = None;
@@ -1056,7 +1062,7 @@ impl Vcpu {
                                     unsafe { std::mem::zeroed() };
 
                                 unsafe {
-                                    if WHvGetVirtualProcessorRegisters(
+                                    if get_virtual_processor_registers(
                                         partition_handle,
                                         vcpu_id as u32,
                                         reg_names.as_ptr(),
@@ -1076,7 +1082,7 @@ impl Vcpu {
                                         ];
                                         let mut apic_values: [WHV_REGISTER_VALUE; 3] =
                                             std::mem::zeroed();
-                                        let _ = WHvGetVirtualProcessorRegisters(
+                                        let _ = get_virtual_processor_registers(
                                             partition_handle,
                                             vcpu_id as u32,
                                             apic_names.as_ptr(),
@@ -1213,7 +1219,7 @@ impl Vcpu {
                                                     let mut rip_value: [WHV_REGISTER_VALUE; 1] = std::mem::zeroed();
                                                     rip_value[0].Reg64 = AFTER_LOOP_RIP;
 
-                                                    let set_result = WHvSetVirtualProcessorRegisters(
+                                                    let set_result = set_virtual_processor_registers(
                                                         partition_handle,
                                                         vcpu_id as u32,
                                                         rip_name.as_ptr(),
@@ -1262,7 +1268,7 @@ impl Vcpu {
                                 let mut reg_values: [WHV_REGISTER_VALUE; 23] = unsafe { std::mem::zeroed() };
 
                                 unsafe {
-                                    if WHvGetVirtualProcessorRegisters(
+                                    if get_virtual_processor_registers(
                                         partition_handle,
                                         vcpu_id as u32,
                                         reg_names.as_ptr(),
@@ -1542,7 +1548,7 @@ impl Vcpu {
                     }
                 }
                 VcpuExit::Halted => {
-                    log::warn!("vCPU {} halted - kernel may have failed to boot or executed HLT instruction", self.id);
+                    log::debug!("vCPU {} halted - waiting for the next interrupt", self.id);
                     windows_vcpu_exit_state_log(self.id, "vcpu_exit=Halted");
                     self.whpx_vcpu.clear_pending_mmio();
                     self.whpx_vcpu.clear_pending_io();
@@ -1570,16 +1576,13 @@ impl Vcpu {
 
     /// Reads just RIP to check if CPU is still executing
     fn read_rip(&self) -> Option<u64> {
-        use windows::Win32::System::Hypervisor::{
-            WHvGetVirtualProcessorRegisters, WHvX64RegisterRip, WHV_REGISTER_NAME,
-            WHV_REGISTER_VALUE,
-        };
+        use windows::Win32::System::Hypervisor::{WHvX64RegisterRip, WHV_REGISTER_VALUE};
 
         let reg_names = [WHvX64RegisterRip];
         let mut reg_values: [WHV_REGISTER_VALUE; 1] = unsafe { std::mem::zeroed() };
 
         unsafe {
-            match WHvGetVirtualProcessorRegisters(
+            match get_virtual_processor_registers(
                 self.partition,
                 self.id as u32,
                 reg_names.as_ptr(),
@@ -1598,13 +1601,12 @@ impl Vcpu {
     /// Reads and logs current CPU register state for debugging
     fn dump_cpu_state(&self) {
         use windows::Win32::System::Hypervisor::{
-            WHvGetVirtualProcessorRegisters, WHvX64RegisterCr0, WHvX64RegisterCr3,
-            WHvX64RegisterCr4, WHvX64RegisterGdtr, WHvX64RegisterIdtr, WHvX64RegisterRflags,
-            WHvX64RegisterRip, WHvX64RegisterRsp, WHvX64RegisterRax, WHvX64RegisterRbx,
-            WHvX64RegisterRcx, WHvX64RegisterRdx, WHvX64RegisterRsi, WHvX64RegisterRdi,
-            WHvX64RegisterRbp, WHvX64RegisterR8, WHvX64RegisterR9, WHvX64RegisterR10,
-            WHvX64RegisterR11, WHvX64RegisterR12, WHvX64RegisterR13, WHvX64RegisterR14,
-            WHvX64RegisterR15, WHV_REGISTER_NAME, WHV_REGISTER_VALUE,
+            WHvX64RegisterCr0, WHvX64RegisterCr3, WHvX64RegisterCr4, WHvX64RegisterGdtr,
+            WHvX64RegisterIdtr, WHvX64RegisterR10, WHvX64RegisterR11, WHvX64RegisterR12,
+            WHvX64RegisterR13, WHvX64RegisterR14, WHvX64RegisterR15, WHvX64RegisterR8,
+            WHvX64RegisterR9, WHvX64RegisterRax, WHvX64RegisterRbp, WHvX64RegisterRbx,
+            WHvX64RegisterRcx, WHvX64RegisterRdi, WHvX64RegisterRdx, WHvX64RegisterRflags,
+            WHvX64RegisterRip, WHvX64RegisterRsi, WHvX64RegisterRsp, WHV_REGISTER_VALUE,
         };
 
         let reg_names = [
@@ -1636,7 +1638,7 @@ impl Vcpu {
         let mut reg_values: [WHV_REGISTER_VALUE; 23] = unsafe { std::mem::zeroed() };
 
         unsafe {
-            if let Err(e) = WHvGetVirtualProcessorRegisters(
+            if let Err(e) = get_virtual_processor_registers(
                 self.partition,
                 self.id as u32,
                 reg_names.as_ptr(),
@@ -1885,6 +1887,7 @@ mod tests {
             io_bus,
             exit_evt,
             None,
+            None,
         )
         .unwrap();
     }
@@ -1905,6 +1908,7 @@ mod tests {
             GuestAddress(0x10000),
             io_bus,
             exit_evt,
+            None,
             None,
         )
         .unwrap();
@@ -1938,6 +1942,7 @@ mod tests {
             GuestAddress(ENTRY_ADDR),
             io_bus,
             exit_evt,
+            None,
             None,
         )
         .unwrap();
@@ -1980,6 +1985,7 @@ mod tests {
             GuestAddress(ENTRY_ADDR),
             io_bus,
             exit_evt,
+            None,
             None,
         )
         .unwrap();
@@ -2114,6 +2120,7 @@ mod tests {
             io_bus,
             exit_evt,
             None,
+            None,
         )
         .unwrap();
         vcpu.configure_x86_64(&guest_mem, GuestAddress(ENTRY_ADDR))
@@ -2247,6 +2254,7 @@ mod tests {
             io_bus,
             exit_evt,
             None,
+            None,
         )
         .unwrap();
 
@@ -2336,6 +2344,7 @@ mod tests {
             GuestAddress(ENTRY_ADDR),
             io_bus,
             exit_evt,
+            None,
             None,
         )
         .unwrap();
@@ -3059,6 +3068,7 @@ mod tests {
             io_bus,
             exit_evt,
             None,
+            None,
         )
         .unwrap();
         eprintln!("[load] Vcpu::new OK");
@@ -3381,6 +3391,7 @@ mod tests {
             io_bus,
             exit_evt,
             Some(irq_evt),
+            None,
         )
         .unwrap();
         eprintln!("[e2e] Vcpu::new done");

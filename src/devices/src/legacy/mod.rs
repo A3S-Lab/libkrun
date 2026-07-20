@@ -30,9 +30,9 @@ mod vcpu;
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 pub mod windows_apic_stub;
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub mod windows_pic_stub;
-#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 pub mod windows_pci_cfg_stub;
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+pub mod windows_pic_stub;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 #[cfg(target_arch = "x86_64")]

@@ -173,7 +173,7 @@ mod tests {
         let result = manager.create_gpu_region(8192);
         assert!(result.is_ok());
 
-        let gpu_region = manager.gpu_region();
+        let gpu_region = manager.gpu_region.as_ref();
         assert!(gpu_region.is_some());
         assert_eq!(gpu_region.unwrap().size, 8192);
     }

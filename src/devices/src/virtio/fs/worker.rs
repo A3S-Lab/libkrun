@@ -5,11 +5,11 @@ use utils::worker_message::WorkerMessage;
 
 #[cfg(not(target_os = "windows"))]
 use std::os::fd::AsRawFd;
-#[cfg(target_os = "windows")]
-use std::{fs::OpenOptions, io::Write};
 use std::sync::atomic::AtomicI32;
 use std::sync::Arc;
 use std::thread;
+#[cfg(target_os = "windows")]
+use std::{fs::OpenOptions, io::Write};
 
 use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
 use utils::eventfd::EventFd;
@@ -27,7 +27,12 @@ fn fs_worker_debug_log(message: impl AsRef<str>) {
     static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*VALUE.get_or_init(|| {
         std::env::var("LIBKRUN_WINDOWS_VERBOSE_DEBUG")
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(false)
     }) {
         return;

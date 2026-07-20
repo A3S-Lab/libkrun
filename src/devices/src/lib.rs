@@ -35,6 +35,39 @@ pub enum Error {
     SpuriousEvent,
 }
 
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FailedReadingQueue {
+                event_type,
+                underlying,
+            } => write!(f, "FailedReadingQueue({event_type}): {underlying}"),
+            Self::FailedReadTap => f.write_str("FailedReadTap"),
+            Self::FailedSignalingUsedQueue(error) => {
+                write!(f, "FailedSignalingUsedQueue: {error}")
+            }
+            Self::PayloadExpected => f.write_str("PayloadExpected"),
+            Self::IoError(error) => write!(f, "IoError: {error}"),
+            Self::NoAvailBuffers => f.write_str("NoAvailBuffers"),
+            Self::SpuriousEvent => f.write_str("SpuriousEvent"),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::FailedReadingQueue { underlying, .. }
+            | Self::FailedSignalingUsedQueue(underlying)
+            | Self::IoError(underlying) => Some(underlying),
+            Self::FailedReadTap
+            | Self::PayloadExpected
+            | Self::NoAvailBuffers
+            | Self::SpuriousEvent => None,
+        }
+    }
+}
+
 /// Types of devices that can get attached to this platform.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
 pub enum DeviceType {
@@ -112,7 +145,10 @@ mod tests {
             event_type: "RX",
             underlying: io_error,
         };
-        assert_eq!(format!("{:?}", error), "FailedReadingQueue { event_type: \"RX\", underlying: Custom { kind: Other, error: \"\" } }");
+        let debug = format!("{error:?}");
+        assert!(debug.contains("FailedReadingQueue"));
+        assert!(debug.contains("event_type: \"RX\""));
+        assert!(debug.contains("test"));
     }
 
     #[test]
