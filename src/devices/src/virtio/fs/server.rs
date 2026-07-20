@@ -38,7 +38,12 @@ fn fs_server_debug_log(message: impl AsRef<str>) {
     static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*VALUE.get_or_init(|| {
         std::env::var("LIBKRUN_WINDOWS_VERBOSE_DEBUG")
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(false)
     }) {
         return;

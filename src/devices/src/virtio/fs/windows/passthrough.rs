@@ -32,7 +32,12 @@ fn virtiofs_debug_enabled() -> bool {
     static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *VALUE.get_or_init(|| {
         std::env::var("LIBKRUN_WINDOWS_VERBOSE_DEBUG")
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(false)
     })
 }
@@ -167,7 +172,10 @@ impl PassthroughFs {
 
     pub fn new(cfg: Config) -> io::Result<PassthroughFs> {
         let root_dir = PathBuf::from(&cfg.root_dir);
-        virtiofs_debug_log(format!("PassthroughFs::new root_dir={}", root_dir.display()));
+        virtiofs_debug_log(format!(
+            "PassthroughFs::new root_dir={}",
+            root_dir.display()
+        ));
 
         // Verify root directory exists
         if !root_dir.exists() {
@@ -368,7 +376,10 @@ impl PassthroughFs {
                 if usr_lib64_loader.is_file() {
                     usr_lib64
                 } else {
-                    self.root_dir.join("usr").join("lib").join("x86_64-linux-gnu")
+                    self.root_dir
+                        .join("usr")
+                        .join("lib")
+                        .join("x86_64-linux-gnu")
                 }
             }
             _ => return None,
@@ -433,11 +444,7 @@ impl PassthroughFs {
         if parent_path == self.root_dir {
             if let Some(name) = name_path.to_str() {
                 if let Some(target) = self.root_alias_target(name) {
-                    virtiofs_debug_log(format!(
-                        "lookup alias /{} -> {}",
-                        name,
-                        target.display()
-                    ));
+                    virtiofs_debug_log(format!("lookup alias /{} -> {}", name, target.display()));
                     return target;
                 }
             }
@@ -1462,7 +1469,10 @@ impl FileSystem for PassthroughFs {
         // harmless close() into EIO for read-only executable loads.
         if let Some(handle_data) = self.handles.read().unwrap().get(&handle) {
             if should_trace_path(&handle_data.path) {
-                virtiofs_debug_log(format!("flush-ok {} handle={handle}", handle_data.path.display()));
+                virtiofs_debug_log(format!(
+                    "flush-ok {} handle={handle}",
+                    handle_data.path.display()
+                ));
             }
         }
         Ok(())
@@ -1826,7 +1836,11 @@ mod tests {
             )
             .expect("lookup x86_64-linux-gnu");
         let soname_entry = fs
-            .lookup(ctx(), x86_entry.inode, &CString::new("libcrypt.so.1").unwrap())
+            .lookup(
+                ctx(),
+                x86_entry.inode,
+                &CString::new("libcrypt.so.1").unwrap(),
+            )
             .expect("lookup libcrypt.so.1 alias");
 
         assert_eq!(soname_entry.attr.st_size, 8);
@@ -1850,7 +1864,11 @@ mod tests {
             .lookup(ctx(), usr_entry.inode, &CString::new("lib").unwrap())
             .expect("lookup /usr/lib");
         let soname_entry = fs
-            .lookup(ctx(), lib_entry.inode, &CString::new("libcrypt.so.1").unwrap())
+            .lookup(
+                ctx(),
+                lib_entry.inode,
+                &CString::new("libcrypt.so.1").unwrap(),
+            )
             .expect("lookup /usr/lib/libcrypt.so.1 alias");
 
         assert_eq!(soname_entry.attr.st_size, 8);

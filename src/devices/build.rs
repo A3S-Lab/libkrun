@@ -12,7 +12,8 @@ fn main() {
         return;
     }
 
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("missing CARGO_MANIFEST_DIR"));
+    let manifest_dir =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("missing CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("missing OUT_DIR"));
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
     let wrapper_src = manifest_dir.join("build").join("windows_init_wrapper.rs");

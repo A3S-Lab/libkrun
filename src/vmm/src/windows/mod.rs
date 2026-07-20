@@ -3,6 +3,7 @@
 
 pub(crate) mod acpi;
 pub(crate) mod interrupts;
+pub(crate) mod registers;
 pub mod stdin_reader;
 pub mod vstate;
 mod whpx_vcpu;

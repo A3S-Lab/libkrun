@@ -67,7 +67,10 @@ impl fmt::Display for Error {
                 write!(f, "snapshot restore: no device at mmio addr 0x{addr:x}")
             }
             Error::RestoreDevice(addr, ref e) => {
-                write!(f, "snapshot restore: device 0x{addr:x} state restore failed: {e:?}")
+                write!(
+                    f,
+                    "snapshot restore: device 0x{addr:x} state restore failed: {e:?}"
+                )
             }
         }
     }

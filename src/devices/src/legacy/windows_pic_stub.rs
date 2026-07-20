@@ -7,14 +7,22 @@ fn windows_pic_debug_log(message: impl AsRef<str>) {
     if !*VALUE.get_or_init(|| {
         std::env::var("LIBKRUN_WINDOWS_VERBOSE_DEBUG")
             .or_else(|_| std::env::var("LIBKRUN_WINDOWS_IO_DEBUG"))
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(false)
     }) {
         return;
     }
     use std::io::Write;
 
-    for path in [r"C:\Users\18770\.a3s\libkrun-whpx-io-current.log", "tmp_whpx_io.log"] {
+    for path in [
+        r"C:\Users\18770\.a3s\libkrun-whpx-io-current.log",
+        "tmp_whpx_io.log",
+    ] {
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -117,7 +125,12 @@ impl PicState {
                     // edge becomes deliverable again.
                     self.clear_pending_irq_without_in_service(irq);
                 }
-                log::debug!("PIC {}: specific EOI command 0x{:02x} irq={}", name, value, irq);
+                log::debug!(
+                    "PIC {}: specific EOI command 0x{:02x} irq={}",
+                    name,
+                    value,
+                    irq
+                );
                 windows_pic_debug_log(format!(
                     "[PIC] {} eoi cmd=0x{:02x} specific=true irq={} irr=0x{:02x} in_service=0x{:02x}",
                     name, value, irq, self.irr, self.in_service
@@ -139,8 +152,7 @@ impl PicState {
                 );
                 windows_pic_debug_log(format!(
                     "[PIC] {} icw2 vector_base=0x{:02x}",
-                    name,
-                    self.vector_offset
+                    name, self.vector_offset
                 ));
             }
             InitState::ExpectIcw3 => {
@@ -160,9 +172,7 @@ impl PicState {
                 );
                 windows_pic_debug_log(format!(
                     "[PIC] {} icw4=0x{:02x} initialized auto_eoi={}",
-                    name,
-                    value,
-                    self.auto_eoi
+                    name, value, self.auto_eoi
                 ));
             }
             InitState::Ready => {
@@ -173,11 +183,7 @@ impl PicState {
                     self.mask,
                     (self.mask & 0x01) != 0
                 );
-                windows_pic_debug_log(format!(
-                    "[PIC] {} ocw1 mask=0x{:02x}",
-                    name,
-                    self.mask
-                ));
+                windows_pic_debug_log(format!("[PIC] {} ocw1 mask=0x{:02x}", name, self.mask));
             }
         }
     }

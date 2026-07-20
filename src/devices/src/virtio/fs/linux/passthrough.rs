@@ -433,9 +433,9 @@ impl PassthroughFs {
         // their rootfs at DIFFERENT host paths (per-box overlay dir), and the
         // template's dir is gone by restore time. The canonical root is the root
         // inode's own readlink (handles symlinks/trailing slashes in cfg.root_dir).
-        let root_path = inodes.get(&fuse::ROOT_ID).and_then(|d| {
-            std::fs::read_link(format!("/proc/self/fd/{}", d.file.as_raw_fd())).ok()
-        });
+        let root_path = inodes
+            .get(&fuse::ROOT_ID)
+            .and_then(|d| std::fs::read_link(format!("/proc/self/fd/{}", d.file.as_raw_fd())).ok());
 
         let mut out = Vec::new();
         out.extend_from_slice(&self.next_inode.load(Ordering::Relaxed).to_le_bytes());
@@ -444,10 +444,8 @@ impl PassthroughFs {
         out.extend_from_slice(&0u64.to_le_bytes());
         let mut count: u64 = 0;
         for (nodeid, data) in inodes.iter() {
-            let path = match std::fs::read_link(format!(
-                "/proc/self/fd/{}",
-                data.file.as_raw_fd()
-            )) {
+            let path = match std::fs::read_link(format!("/proc/self/fd/{}", data.file.as_raw_fd()))
+            {
                 Ok(p) => p,
                 Err(_) => continue,
             };

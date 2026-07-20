@@ -16,13 +16,13 @@ extern crate log;
 /// Handles setup and initialization a `Vmm` object.
 pub mod builder;
 pub(crate) mod device_manager;
-/// Snapshot support (file-backed guest RAM, save/restore).
-pub mod snapshot;
 /// Resource store for configured microVM resources.
 pub mod resources;
 /// Signal handling utilities.
 #[cfg(target_os = "linux")]
 pub mod signal_handler;
+/// Snapshot support (file-backed guest RAM, save/restore).
+pub mod snapshot;
 /// Wrappers over structures used to configure the VMM.
 pub mod vmm_config;
 
@@ -88,7 +88,8 @@ fn windows_vmm_debug_log(message: impl AsRef<str>) {
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 fn windows_format_hex(bytes: &[u8]) -> String {
-    bytes.iter()
+    bytes
+        .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<Vec<_>>()
         .join(" ")
@@ -104,7 +105,10 @@ fn windows_dump_guest_boot_layout(guest_memory: &GuestMemoryMmap) {
 
     let mut mp_window = [0u8; 32];
     let mp_bytes = if guest_memory
-        .read_slice(&mut mp_window, GuestAddress(arch::x86_64::layout::EBDA_START))
+        .read_slice(
+            &mut mp_window,
+            GuestAddress(arch::x86_64::layout::EBDA_START),
+        )
         .is_ok()
     {
         windows_format_hex(&mp_window)
@@ -266,6 +270,8 @@ pub struct Vmm {
     vm: Vm,
     exit_observers: Vec<Arc<Mutex<dyn VmmExitObserver>>>,
     exit_code: Arc<AtomicI32>,
+    #[cfg(target_os = "windows")]
+    host_return_exit_code: Option<i32>,
 
     // Guest VM devices.
     mmio_device_manager: MMIODeviceManager,
@@ -521,11 +527,26 @@ impl Vmm {
                 .on_vmm_exit();
         }
 
+        // A3S runs libkrun inside a dedicated shim. Its Windows guest streams
+        // live in the shared rootfs, so the shim needs a bounded opportunity to
+        // drain them before exiting. Keep libkrun's process-takeover contract
+        // unless that host explicitly opts into returning.
+        #[cfg(target_os = "windows")]
+        if std::env::var_os("LIBKRUN_WINDOWS_RETURN_ON_EXIT").is_some_and(|value| value == "1") {
+            self.host_return_exit_code = Some(exit_code);
+            return;
+        }
+
         // Exit from Firecracker using the provided exit code. Safe because we're terminating
         // the process anyway.
         unsafe {
             libc::_exit(exit_code);
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn take_host_return_exit_code(&mut self) -> Option<i32> {
+        self.host_return_exit_code.take()
     }
 
     /// Returns a reference to the inner KVM Vm object.

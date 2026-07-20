@@ -24,12 +24,16 @@ pub static MEM_BACKING: Mutex<Option<MemBacking>> = Mutex::new(None);
 
 /// The snapshot-memory file path, if file-backed RAM was requested.
 pub fn mem_file_path() -> Option<String> {
-    std::env::var("KRUN_SNAPSHOT_MEM_FILE").ok().filter(|p| !p.is_empty())
+    std::env::var("KRUN_SNAPSHOT_MEM_FILE")
+        .ok()
+        .filter(|p| !p.is_empty())
 }
 
 /// The unix socket on which to serve snapshot requests, if enabled.
 pub fn trigger_sock_path() -> Option<String> {
-    std::env::var("KRUN_SNAPSHOT_SOCK").ok().filter(|p| !p.is_empty())
+    std::env::var("KRUN_SNAPSHOT_SOCK")
+        .ok()
+        .filter(|p| !p.is_empty())
 }
 
 /// When set, boot is a RESTORE from this state file (paired with the RAM file in
@@ -37,7 +41,9 @@ pub fn trigger_sock_path() -> Option<String> {
 /// RAM file, the kernel load + boot setup are skipped, and VM/vCPU KVM state is
 /// restored from this file before the vCPUs resume.
 pub fn restore_state_path() -> Option<String> {
-    std::env::var("KRUN_RESTORE_FROM").ok().filter(|p| !p.is_empty())
+    std::env::var("KRUN_RESTORE_FROM")
+        .ok()
+        .filter(|p| !p.is_empty())
 }
 
 /// Read a snapshot state file written by [`write_state_file`].
@@ -153,7 +159,11 @@ impl From<&MmioDeviceStateSer> for devices::virtio::MmioDeviceState {
             device_status: d.device_status,
             config_generation: d.config_generation,
             acked_features: d.acked_features,
-            queues: d.queues.iter().map(devices::virtio::QueueState::from).collect(),
+            queues: d
+                .queues
+                .iter()
+                .map(devices::virtio::QueueState::from)
+                .collect(),
             device_blob: d.device_blob.clone(),
         }
     }

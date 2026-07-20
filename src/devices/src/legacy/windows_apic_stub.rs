@@ -7,14 +7,22 @@ fn windows_apic_debug_log(message: impl AsRef<str>) {
     if !*VALUE.get_or_init(|| {
         std::env::var("LIBKRUN_WINDOWS_VERBOSE_DEBUG")
             .or_else(|_| std::env::var("LIBKRUN_WINDOWS_IO_DEBUG"))
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(false)
     }) {
         return;
     }
     use std::io::Write;
 
-    for path in [r"C:\Users\18770\.a3s\libkrun-whpx-io-current.log", "tmp_whpx_io.log"] {
+    for path in [
+        r"C:\Users\18770\.a3s\libkrun-whpx-io-current.log",
+        "tmp_whpx_io.log",
+    ] {
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
