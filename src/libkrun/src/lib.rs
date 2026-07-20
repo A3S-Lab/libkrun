@@ -238,7 +238,10 @@ impl ContextConfig {
         #[cfg(feature = "blk")]
         match &self.block_root {
             Some(block_root) => {
-                let mut res = format!("KRUN_BLOCK_ROOT_DEVICE={}", sanitize_to_ascii(&block_root.device));
+                let mut res = format!(
+                    "KRUN_BLOCK_ROOT_DEVICE={}",
+                    sanitize_to_ascii(&block_root.device)
+                );
                 if let Some(fstype) = &block_root.fstype {
                     res += &format!(" KRUN_BLOCK_ROOT_FSTYPE={}", sanitize_to_ascii(fstype));
                 }
@@ -482,7 +485,12 @@ fn windows_verbose_debug_enabled() -> bool {
     std::env::var("LIBKRUN_WINDOWS_VERBOSE_DEBUG")
         .or_else(|_| std::env::var("LIBKRUN_WINDOWS_IO_DEBUG"))
         .or_else(|_| std::env::var("LIBKRUN_WINDOWS_VCPU_DEBUG"))
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -576,7 +584,9 @@ pub unsafe extern "C" fn krun_init_log(target: RawFd, level: u32, style: u32, op
         )
     } else {
         let mut builder = env_logger::Builder::new();
-        builder.parse_filters(&filter).parse_write_style(write_style);
+        builder
+            .parse_filters(&filter)
+            .parse_write_style(write_style);
         builder
     };
     builder.target(target).init();
@@ -3036,6 +3046,23 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
             Err(e) => {
                 error!("Error in EventManager loop: {e:?}");
                 return -libc::EINVAL;
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let host_return_exit_code = {
+                let mut vmm = _vmm.lock().unwrap();
+                vmm.take_host_return_exit_code()
+            };
+            if let Some(exit_code) = host_return_exit_code {
+                // The opt-in caller exits immediately after draining its
+                // host-side logs. Avoid running incomplete VMM teardown in this
+                // narrow return path; the process releases all resources
+                // moments later.
+                std::mem::forget(_vmm);
+                std::mem::forget(event_manager);
+                return exit_code;
             }
         }
     }

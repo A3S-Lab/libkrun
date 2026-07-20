@@ -50,37 +50,37 @@ use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 use windows::core::HRESULT;
 use windows::Win32::System::Hypervisor::{
     WHvCreateVirtualProcessor, WHvDeleteVirtualProcessor, WHvEmulatorCreateEmulator,
-    WHvEmulatorDestroyEmulator, WHvEmulatorTryIoEmulation, WHvGetVirtualProcessorRegisters,
-    WHvGetVirtualProcessorInterruptControllerState,
-    WHvMemoryAccessExecute, WHvMemoryAccessRead, WHvMemoryAccessWrite, WHvRequestInterrupt,
-    WHvRunVirtualProcessor, WHvRunVpExitReasonCanceled, WHvRunVpExitReasonException,
-    WHvRunVpExitReasonHypercall, WHvRunVpExitReasonInvalidVpRegisterValue,
-    WHvRunVpExitReasonMemoryAccess, WHvRunVpExitReasonSynicSintDeliverable,
-    WHvRunVpExitReasonUnrecoverableException, WHvRunVpExitReasonUnsupportedFeature,
-    WHvRunVpExitReasonX64ApicEoi, WHvRunVpExitReasonX64ApicInitSipiTrap,
-    WHvRunVpExitReasonX64ApicSmiTrap, WHvRunVpExitReasonX64ApicWriteTrap,
-    WHvRunVpExitReasonX64Cpuid, WHvRunVpExitReasonX64Halt, WHvRunVpExitReasonX64InterruptWindow,
-    WHvRunVpExitReasonX64IoPortAccess, WHvRunVpExitReasonX64MsrAccess, WHvRunVpExitReasonX64Rdtsc,
-    WHvSetVirtualProcessorRegisters, WHvTranslateGva, WHvX64ExceptionTypeBreakpointTrap,
+    WHvEmulatorDestroyEmulator, WHvEmulatorTryIoEmulation,
+    WHvGetVirtualProcessorInterruptControllerState, WHvMemoryAccessExecute, WHvMemoryAccessRead,
+    WHvMemoryAccessWrite, WHvRequestInterrupt, WHvRunVirtualProcessor, WHvRunVpExitReasonCanceled,
+    WHvRunVpExitReasonException, WHvRunVpExitReasonHypercall,
+    WHvRunVpExitReasonInvalidVpRegisterValue, WHvRunVpExitReasonMemoryAccess,
+    WHvRunVpExitReasonSynicSintDeliverable, WHvRunVpExitReasonUnrecoverableException,
+    WHvRunVpExitReasonUnsupportedFeature, WHvRunVpExitReasonX64ApicEoi,
+    WHvRunVpExitReasonX64ApicInitSipiTrap, WHvRunVpExitReasonX64ApicSmiTrap,
+    WHvRunVpExitReasonX64ApicWriteTrap, WHvRunVpExitReasonX64Cpuid, WHvRunVpExitReasonX64Halt,
+    WHvRunVpExitReasonX64InterruptWindow, WHvRunVpExitReasonX64IoPortAccess,
+    WHvRunVpExitReasonX64MsrAccess, WHvRunVpExitReasonX64Rdtsc, WHvTranslateGva,
+    WHvX64ApicWriteTypeDfr, WHvX64ApicWriteTypeLdr, WHvX64ApicWriteTypeLint0,
+    WHvX64ApicWriteTypeLint1, WHvX64ApicWriteTypeSvr, WHvX64ExceptionTypeBreakpointTrap,
     WHvX64ExceptionTypeOverflowTrap, WHvX64InterruptDestinationModeLogical,
     WHvX64InterruptDestinationModePhysical, WHvX64InterruptTriggerModeEdge,
-    WHvX64ApicWriteTypeDfr, WHvX64ApicWriteTypeLdr, WHvX64ApicWriteTypeLint0,
-    WHvX64ApicWriteTypeLint1, WHvX64ApicWriteTypeSvr,
     WHvX64InterruptTypeFixed, WHvX64InterruptTypeInit, WHvX64InterruptTypeLocalInt1,
     WHvX64InterruptTypeLowestPriority, WHvX64InterruptTypeNmi, WHvX64InterruptTypeSipi,
-    WHvX64PendingEventExtInt,
-    WHvX64RegisterRax, WHvX64RegisterRbx, WHvX64RegisterRcx, WHvX64RegisterRdx,
-    WHvX64RegisterRip, WHV_EMULATOR_CALLBACKS, WHV_EMULATOR_IO_ACCESS_INFO,
+    WHvX64PendingEventExtInt, WHvX64RegisterRax, WHvX64RegisterRbx, WHvX64RegisterRcx,
+    WHvX64RegisterRdx, WHvX64RegisterRip, WHV_EMULATOR_CALLBACKS, WHV_EMULATOR_IO_ACCESS_INFO,
     WHV_EMULATOR_MEMORY_ACCESS_INFO, WHV_INTERRUPT_CONTROL, WHV_PARTITION_HANDLE,
     WHV_REGISTER_NAME, WHV_REGISTER_VALUE, WHV_RUN_VP_EXIT_CONTEXT, WHV_TRANSLATE_GVA_FLAGS,
     WHV_TRANSLATE_GVA_RESULT, WHV_TRANSLATE_GVA_RESULT_CODE,
     WHV_X64_DELIVERABILITY_NOTIFICATIONS_REGISTER, WHV_X64_PENDING_EXT_INT_EVENT,
 };
-use windows::Win32::System::Performance::{
-    QueryPerformanceCounter, QueryPerformanceFrequency,
-};
+use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
 use super::interrupts::{PendingInterrupt, PendingInterruptQueue};
+use super::registers::{
+    get_virtual_processor_registers as WHvGetVirtualProcessorRegisters,
+    set_virtual_processor_registers as WHvSetVirtualProcessorRegisters,
+};
 
 fn windows_hyperv_enlightenments_enabled() -> bool {
     static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -99,7 +99,12 @@ fn windows_io_debug_enabled() -> bool {
     *VALUE.get_or_init(|| {
         std::env::var("LIBKRUN_WINDOWS_VERBOSE_DEBUG")
             .or_else(|_| std::env::var("LIBKRUN_WINDOWS_IO_DEBUG"))
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(false)
     })
 }
@@ -279,9 +284,7 @@ fn windows_pic_fixed_request_interrupt_type() -> PicFixedRequestInterruptType {
         std::env::var("LIBKRUN_WHPX_PIC_FIXED_REQUEST_TYPE")
             .ok()
             .map(|value| match value.trim().to_ascii_lowercase().as_str() {
-                "lowest-priority" | "lowest" | "lp" => {
-                    PicFixedRequestInterruptType::LowestPriority
-                }
+                "lowest-priority" | "lowest" | "lp" => PicFixedRequestInterruptType::LowestPriority,
                 "nmi" => PicFixedRequestInterruptType::Nmi,
                 "local-int1" | "lint1" | "localint1" => PicFixedRequestInterruptType::LocalInt1,
                 _ => PicFixedRequestInterruptType::Fixed,
@@ -315,9 +318,7 @@ fn make_whpx_interrupt_control_bitfield(
     destination_mode: windows::Win32::System::Hypervisor::WHV_INTERRUPT_DESTINATION_MODE,
     trigger_mode: windows::Win32::System::Hypervisor::WHV_INTERRUPT_TRIGGER_MODE,
 ) -> u64 {
-    (interrupt_type.0 as u64)
-        | ((destination_mode.0 as u64) << 8)
-        | ((trigger_mode.0 as u64) << 12)
+    (interrupt_type.0 as u64) | ((destination_mode.0 as u64) << 8) | ((trigger_mode.0 as u64) << 12)
 }
 
 fn read_u32_le(buf: &[u8], offset: usize) -> Option<u32> {
@@ -389,7 +390,12 @@ fn guest_hyperv_cpuid(function: u32) -> (u64, u64, u64, u64) {
 
     match function {
         0x4000_0000 => (0x4000_0006, rbx, rcx, rdx),
-        0x4000_0003 => ((rax as u32 & HV_CPUID_FEATURES_MINIMAL_GUEST_MASK) as u64, 0, 0, 0),
+        0x4000_0003 => (
+            (rax as u32 & HV_CPUID_FEATURES_MINIMAL_GUEST_MASK) as u64,
+            0,
+            0,
+            0,
+        ),
         0x4000_0004 => (0x20, 0xff, 0, 0),
         0x4000_0005 | 0x4000_0006 => (0, 0, 0, 0),
         _ => (rax, rbx, rcx, rdx),
@@ -720,7 +726,6 @@ impl WhpxVcpu {
         pending: PendingInterrupt,
     ) -> io::Result<()> {
         use windows::Win32::System::Hypervisor::{
-            WHvGetVirtualProcessorRegisters, WHvSetVirtualProcessorRegisters,
             WHvX64RegisterDeliverabilityNotifications, WHV_REGISTER_VALUE,
         };
 
@@ -1117,11 +1122,10 @@ impl WhpxVcpu {
             let rex_r = (rex >> 2) & 1;
             let reg_index = reg_base + (rex_r << 3);
             let end_idx = Self::skip_modrm_address(instruction_bytes, idx, modrm)?;
-            let next_rip = rip.wrapping_add(
-                end_idx
-                    .try_into()
-                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Bad instruction len"))?,
-            );
+            let next_rip =
+                rip.wrapping_add(end_idx.try_into().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "Bad instruction len")
+                })?);
 
             let (kind, size) = match opcode2 {
                 // Prefetch variants: memory-touching hints with no architectural side effects.
@@ -1214,7 +1218,9 @@ impl WhpxVcpu {
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
-                    format!("Unsupported MMIO instruction opcode 0x{opcode:02x} (is_write={is_write})"),
+                    format!(
+                        "Unsupported MMIO instruction opcode 0x{opcode:02x} (is_write={is_write})"
+                    ),
                 ));
             }
         };
@@ -1328,11 +1334,10 @@ impl WhpxVcpu {
 
     fn log_invalid_vp_register_state(&self, exit_context: &WHV_RUN_VP_EXIT_CONTEXT) {
         use windows::Win32::System::Hypervisor::{
-            WHvGetVirtualProcessorRegisters, WHvX64RegisterDeliverabilityNotifications,
             WHvRegisterInterruptState, WHvRegisterPendingEvent, WHvRegisterPendingInterruption,
             WHvX64RegisterApicBase, WHvX64RegisterApicLvtLint0, WHvX64RegisterApicLvtLint1,
             WHvX64RegisterApicSpurious, WHvX64RegisterApicTpr, WHvX64RegisterCr8,
-            WHvX64RegisterRflags, WHvX64RegisterRip,
+            WHvX64RegisterDeliverabilityNotifications, WHvX64RegisterRflags, WHvX64RegisterRip,
         };
 
         let core_reg_names = [
@@ -1421,10 +1426,8 @@ impl WhpxVcpu {
         source: &str,
     ) -> io::Result<bool> {
         use windows::Win32::System::Hypervisor::{
-            WHvGetVirtualProcessorRegisters, WHvRegisterInterruptState, WHvRegisterPendingEvent,
-            WHvRegisterInternalActivityState, WHvRegisterPendingInterruption,
-            WHvSetVirtualProcessorRegisters,
-            WHvX64RegisterDeliverabilityNotifications,
+            WHvRegisterInternalActivityState, WHvRegisterInterruptState, WHvRegisterPendingEvent,
+            WHvRegisterPendingInterruption, WHvX64RegisterDeliverabilityNotifications,
             WHV_REGISTER_VALUE,
         };
 
@@ -1626,9 +1629,8 @@ impl WhpxVcpu {
                 self.trace_interrupt_controller_state("pic-extint-before", rip);
                 let mut ext_int_event = WHV_X64_PENDING_EXT_INT_EVENT::default();
                 unsafe {
-                    ext_int_event.Anonymous._bitfield = 1
-                        | ((WHvX64PendingEventExtInt.0 as u64) << 1)
-                        | (u64::from(vector) << 8);
+                    ext_int_event.Anonymous._bitfield =
+                        1 | ((WHvX64PendingEventExtInt.0 as u64) << 1) | (u64::from(vector) << 8);
                     ext_int_event.Anonymous.Reserved2 = 0;
                 }
                 let reg_name = [WHvRegisterPendingEvent];
@@ -1856,7 +1858,8 @@ impl WhpxVcpu {
                         PicFixedInjectionMode::PendingInterruption => {
                             let reg_name = [WHvRegisterPendingInterruption];
                             let mut reg_value = [WHV_REGISTER_VALUE::default(); 1];
-                            reg_value[0].PendingInterruption.AsUINT64 = 1 | (u64::from(vector) << 16);
+                            reg_value[0].PendingInterruption.AsUINT64 =
+                                1 | (u64::from(vector) << 16);
                             WHvSetVirtualProcessorRegisters(
                                 self.partition,
                                 self.index,
@@ -1944,8 +1947,8 @@ impl WhpxVcpu {
 
     fn pending_event_busy_and_halted(&self) -> io::Result<bool> {
         use windows::Win32::System::Hypervisor::{
-            WHvGetVirtualProcessorRegisters, WHvRegisterInternalActivityState,
-            WHvRegisterPendingEvent, WHV_REGISTER_NAME, WHV_REGISTER_VALUE,
+            WHvRegisterInternalActivityState, WHvRegisterPendingEvent, WHV_REGISTER_NAME,
+            WHV_REGISTER_VALUE,
         };
 
         let reg_names: [WHV_REGISTER_NAME; 2] =
@@ -1988,8 +1991,7 @@ impl WhpxVcpu {
 
     fn service_pending_interrupt_after_completion(&self, source: &str) -> io::Result<()> {
         use windows::Win32::System::Hypervisor::{
-            WHvGetVirtualProcessorRegisters, WHvX64RegisterRflags, WHvX64RegisterRip,
-            WHV_REGISTER_VALUE,
+            WHvX64RegisterRflags, WHvX64RegisterRip, WHV_REGISTER_VALUE,
         };
 
         let Some(queue) = self.pending_interrupt.as_ref() else {
@@ -2004,7 +2006,8 @@ impl WhpxVcpu {
             (guard.len(), guard.front().copied())
         };
 
-        let log_post_completion = !source.starts_with("post-io") && !source.starts_with("post-mmio");
+        let log_post_completion =
+            !source.starts_with("post-io") && !source.starts_with("post-mmio");
 
         if queue_snapshot.0 == 0 {
             return Ok(());
@@ -2037,11 +2040,7 @@ impl WhpxVcpu {
                 rip,
                 format!(
                     "source={} can_inject={} rflags=0x{:016x} depth={} front={:?}",
-                    source,
-                    can_inject_now,
-                    rflags,
-                    queue_snapshot.0,
-                    queue_snapshot.1
+                    source, can_inject_now, rflags, queue_snapshot.0, queue_snapshot.1
                 ),
             );
         }
@@ -2166,14 +2165,9 @@ impl WhpxVcpu {
             if msr.MsrNumber >= 0x40000000 {
                 windows_io_debug_log(format!(
                     "[MSR-WR] 0x{:08x}=0x{:016x}",
-                    msr.MsrNumber,
-                    write_value
+                    msr.MsrNumber, write_value
                 ));
-                log::debug!(
-                    "MSR WRMSR 0x{:08x} = 0x{:016x}",
-                    msr.MsrNumber,
-                    write_value
-                );
+                log::debug!("MSR WRMSR 0x{:08x} = 0x{:016x}", msr.MsrNumber, write_value);
             }
 
             match msr.MsrNumber {
@@ -2427,10 +2421,7 @@ impl WhpxVcpu {
         if should_log_mmio_gpa(pending.gpa) {
             windows_io_debug_log(format!(
                 "[MMIOREAD-WRITEBACK] gpa=0x{:08x} reg={} merged=0x{:x} next_rip=0x{:x}",
-                pending.gpa,
-                pending.reg_index,
-                merged,
-                pending.next_rip
+                pending.gpa, pending.reg_index, merged, pending.next_rip
             ));
         }
 
@@ -2456,8 +2447,7 @@ impl WhpxVcpu {
         if should_log_mmio_gpa(pending.gpa) {
             windows_io_debug_log(format!(
                 "[MMIOWRITE-COMPLETE] gpa=0x{:08x} next_rip=0x{:x}",
-                pending.gpa,
-                pending.next_rip
+                pending.gpa, pending.next_rip
             ));
         }
 
@@ -2771,10 +2761,7 @@ impl WhpxVcpu {
                                     rip, gpa, access_type_str, access_size
                                 );
                             } else if SAME_RIP_COUNT % 1000 == 0 {
-                                debug!(
-                                    "STUCK: RIP={:#x} repeated {} times",
-                                    rip, SAME_RIP_COUNT
-                                );
+                                debug!("STUCK: RIP={:#x} repeated {} times", rip, SAME_RIP_COUNT);
                             }
                         } else {
                             // RIP changed, log if previous was stuck
@@ -3255,7 +3242,11 @@ impl WhpxVcpu {
                         can_inject_now,
                         "post-cpuid",
                     )?;
-                    windows_exit_debug_log("post_cpuid_after_service", exit_context.VpContext.Rip, "");
+                    windows_exit_debug_log(
+                        "post_cpuid_after_service",
+                        exit_context.VpContext.Rip,
+                        "",
+                    );
                 }
                 reason if reason == WHvRunVpExitReasonX64MsrAccess => {
                     self.emulate_msr(&exit_context)?;
@@ -3285,7 +3276,10 @@ impl WhpxVcpu {
                     )? {
                         continue;
                     }
-                    log::debug!("Interrupt window opened at RIP={:#x}", exit_context.VpContext.Rip);
+                    log::debug!(
+                        "Interrupt window opened at RIP={:#x}",
+                        exit_context.VpContext.Rip
+                    );
                 }
                 reason if reason == WHvRunVpExitReasonX64ApicEoi => {
                     // APIC EOI - interrupt was acknowledged by guest
@@ -3299,7 +3293,11 @@ impl WhpxVcpu {
                     // No state changes; re-enter VP run loop.
                 }
                 reason if reason == WHvRunVpExitReasonSynicSintDeliverable => {
-                    windows_exit_debug_log("synic_sint_deliverable", exit_context.VpContext.Rip, "");
+                    windows_exit_debug_log(
+                        "synic_sint_deliverable",
+                        exit_context.VpContext.Rip,
+                        "",
+                    );
                     log::debug!(
                         "WHPX SynIC SINT deliverable exit at RIP={:#x}; resuming vCPU",
                         exit_context.VpContext.Rip
@@ -3385,8 +3383,8 @@ impl WhpxVcpu {
                     )? {
                         continue;
                     }
-                    let halted_reenter =
-                        windows_pending_event_halted_reenter() && self.pending_event_busy_and_halted()?;
+                    let halted_reenter = windows_pending_event_halted_reenter()
+                        && self.pending_event_busy_and_halted()?;
                     windows_exit_debug_log(
                         "canceled_post_probe",
                         exit_context.VpContext.Rip,
@@ -3620,8 +3618,7 @@ mod tests {
         ));
 
         // With REX prefix the same reg field maps to extended register, not high-8.
-        let decoded_rex =
-            WhpxVcpu::decode_mmio_access(0x3200, &[0x44, 0x8a, 0x20], false).unwrap();
+        let decoded_rex = WhpxVcpu::decode_mmio_access(0x3200, &[0x44, 0x8a, 0x20], false).unwrap();
         assert_eq!(decoded_rex.next_rip, 0x3203);
         assert!(matches!(
             decoded_rex.kind,
@@ -3722,8 +3719,7 @@ mod tests {
 
         for (case, expected_rip, expected_reg, expected_high8) in read_reg_cases {
             let decoded =
-                WhpxVcpu::decode_mmio_access(case.rip, case.bytes, case.is_write)
-                    .unwrap();
+                WhpxVcpu::decode_mmio_access(case.rip, case.bytes, case.is_write).unwrap();
             assert_eq!(decoded.next_rip, expected_rip);
             match decoded.kind {
                 MmioAccessKind::ReadReg { reg_index, high8 }
@@ -3760,8 +3756,7 @@ mod tests {
 
         for (case, expect_zero_extend, expected_reg) in zero_sign_cases {
             let decoded =
-                WhpxVcpu::decode_mmio_access(case.rip, case.bytes, case.is_write)
-                    .unwrap();
+                WhpxVcpu::decode_mmio_access(case.rip, case.bytes, case.is_write).unwrap();
             if expect_zero_extend {
                 assert!(matches!(
                     decoded.kind,
@@ -3813,8 +3808,7 @@ mod tests {
         ];
 
         for case in invalid_data_cases {
-            let res =
-                WhpxVcpu::decode_mmio_access(0x7000, case.bytes, case.is_write);
+            let res = WhpxVcpu::decode_mmio_access(0x7000, case.bytes, case.is_write);
             assert!(matches!(res, Err(err) if err.kind() == case.kind));
         }
 
@@ -3846,8 +3840,7 @@ mod tests {
         ];
 
         for case in unsupported_cases {
-            let res =
-                WhpxVcpu::decode_mmio_access(0x7100, case.bytes, case.is_write);
+            let res = WhpxVcpu::decode_mmio_access(0x7100, case.bytes, case.is_write);
             assert!(matches!(res, Err(err) if err.kind() == case.kind));
         }
     }

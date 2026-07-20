@@ -182,7 +182,7 @@ impl BusDevice for PciConfigIoStub {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONFIG_ENABLE_BIT, PCI_CLASS_HOST_BRIDGE, PCI_SUBCLASS_HOST_BRIDGE, PciConfigIoStub,
+        PciConfigIoStub, CONFIG_ENABLE_BIT, PCI_CLASS_HOST_BRIDGE, PCI_SUBCLASS_HOST_BRIDGE,
     };
     use crate::BusDevice;
 

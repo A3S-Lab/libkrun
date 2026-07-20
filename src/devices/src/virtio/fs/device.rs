@@ -29,7 +29,12 @@ fn fs_device_debug_log(message: impl AsRef<str>) {
     static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*VALUE.get_or_init(|| {
         std::env::var("LIBKRUN_WINDOWS_VERBOSE_DEBUG")
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(false)
     }) {
         return;
@@ -92,7 +97,10 @@ impl Fs {
         queues: Vec<VirtQueue>,
     ) -> super::Result<Fs> {
         #[cfg(target_os = "windows")]
-        fs_device_debug_log(format!("Fs::with_queues fs_id={} shared_dir={}", fs_id, shared_dir));
+        fs_device_debug_log(format!(
+            "Fs::with_queues fs_id={} shared_dir={}",
+            fs_id, shared_dir
+        ));
         let mut queue_events = Vec::new();
         for _ in 0..queues.len() {
             queue_events
@@ -232,7 +240,10 @@ impl VirtioDevice for Fs {
 
     fn activate(&mut self, mem: GuestMemoryMmap, interrupt: InterruptTransport) -> ActivateResult {
         #[cfg(target_os = "windows")]
-        fs_device_debug_log(format!("Fs::activate tag={}", String::from_utf8_lossy(&self.config.tag)));
+        fs_device_debug_log(format!(
+            "Fs::activate tag={}",
+            String::from_utf8_lossy(&self.config.tag)
+        ));
         if self.worker_thread.is_some() {
             panic!("virtio_fs: worker thread already exists");
         }

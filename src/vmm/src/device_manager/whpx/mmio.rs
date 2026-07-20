@@ -129,8 +129,7 @@ impl MMIODeviceManager {
             && !matches!(
                 std::env::var("LIBKRUN_WHPX_SHARE_VSOCK_IRQ_WITH_PREV").as_deref(),
                 Ok("0")
-            )
-        {
+            ) {
             // WHPX virtio-vsock still needs the old shared-IRQ behavior in the
             // current Windows bring-up path. Keep it as the default, but allow
             // opt-out experiments with LIBKRUN_WHPX_SHARE_VSOCK_IRQ_WITH_PREV=0.

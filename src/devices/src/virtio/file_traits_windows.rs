@@ -74,11 +74,7 @@ pub trait FileReadWriteAtVolatile {
         Ok(total)
     }
 
-    fn write_vectored_at_volatile(
-        &self,
-        bufs: &[VolatileSlice],
-        mut offset: u64,
-    ) -> Result<usize> {
+    fn write_vectored_at_volatile(&self, bufs: &[VolatileSlice], mut offset: u64) -> Result<usize> {
         let mut total = 0usize;
         for &slice in bufs {
             if slice.is_empty() {

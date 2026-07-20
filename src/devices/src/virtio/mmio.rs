@@ -34,7 +34,12 @@ fn mmio_debug_enabled() -> bool {
     static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *VALUE.get_or_init(|| {
         std::env::var("LIBKRUN_WINDOWS_VERBOSE_DEBUG")
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(false)
     })
 }
@@ -58,7 +63,11 @@ fn mmio_debug_log(message: impl AsRef<str>) {
         r"C:\Users\18770\.a3s\libkrun-virtio-mmio.log",
         r"D:\code\libkrun\tmp_virtio_mmio.log",
     ] {
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             let _ = writeln!(file, "{message}");
         }
     }
@@ -288,8 +297,9 @@ impl MmioTransport {
             use vm_memory::Bytes as _;
             for q in queues.iter_mut() {
                 if q.ready && q.used_ring != 0 {
-                    if let Ok(ram_used) =
-                        self.mem.read_obj::<u16>(vm_memory::GuestAddress(q.used_ring + 2))
+                    if let Ok(ram_used) = self
+                        .mem
+                        .read_obj::<u16>(vm_memory::GuestAddress(q.used_ring + 2))
                     {
                         if (q.next_used.wrapping_sub(ram_used) as i16) < 0 {
                             q.next_used = ram_used;
