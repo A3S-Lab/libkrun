@@ -159,7 +159,10 @@ impl Cmdline {
     /// (e.g., from macOS system info) that would otherwise cause InvalidAscii errors.
     pub fn insert_str_safe<T: AsRef<str>>(&mut self, slug: T) -> Result<()> {
         let s = slug.as_ref();
-        let sanitized: String = s.chars().map(|c| if valid_char(c) { c } else { '?' }).collect();
+        let sanitized: String = s
+            .chars()
+            .map(|c| if valid_char(c) { c } else { '?' })
+            .collect();
         let trimmed = sanitized.trim();
         if trimmed.is_empty() {
             return Ok(());

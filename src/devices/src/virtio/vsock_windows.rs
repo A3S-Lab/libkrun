@@ -22,6 +22,7 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Pipes::{PeekNamedPipe, WaitNamedPipeA};
 
+use super::linux_errno::linux_errno_raw;
 use super::{
     ActivateError, ActivateResult, DescriptorChain, DeviceState, InterruptTransport, Queue,
     VirtioDevice,
@@ -52,6 +53,8 @@ const VSOCK_FLAGS_SHUTDOWN_RCV: u32 = 1;
 const VSOCK_FLAGS_SHUTDOWN_SEND: u32 = 2;
 const VSOCK_TYPE_STREAM: u16 = 1;
 const VSOCK_TYPE_DGRAM: u16 = 3;
+const TSI_LISTEN_PORT: u32 = 1029;
+const TSI_LISTEN_REQUEST_LEN: usize = 4 * 4 + 128;
 
 const DEFAULT_BUF_ALLOC: u32 = 256 * 1024;
 // Keep stream credit advertisement aligned with the existing muxer/TSI paths.
@@ -116,6 +119,7 @@ pub struct Vsock {
     pending_by_guest_port: HashMap<u32, usize>,
     connect_timeout_ms: u64, // Configurable connection timeout
     defer_control_rx: bool,
+    tsi_flags: TsiFlags,
 }
 
 // Trait to abstract TCP streams and Named Pipes
@@ -347,7 +351,7 @@ impl Vsock {
         cid: u64,
         host_port_map: Option<HashMap<u16, u16>>,
         unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
-        _tsi_flags: TsiFlags,
+        tsi_flags: TsiFlags,
     ) -> Result<Self, VsockError> {
         let queues = vec![Queue::new(QUEUE_SIZE); NUM_QUEUES];
         let mut queue_events = Vec::with_capacity(NUM_QUEUES);
@@ -402,6 +406,7 @@ impl Vsock {
             pending_by_guest_port: HashMap::new(),
             connect_timeout_ms: CONNECT_TIMEOUT_MS, // Use default timeout
             defer_control_rx: false,
+            tsi_flags,
         })
     }
 
@@ -780,6 +785,34 @@ impl Vsock {
         self.queue_response(incoming_hdr, VSOCK_OP_CREDIT_UPDATE, Vec::new());
     }
 
+    fn reject_unsupported_tsi_listen(&mut self, incoming_hdr: &[u8; 44]) -> bool {
+        if !self.tsi_flags.tsi_enabled()
+            || Self::hdr_u64(incoming_hdr, 8) != VSOCK_HOST_CID
+            || Self::hdr_u32(incoming_hdr, 20) != TSI_LISTEN_PORT
+            || Self::hdr_u16(incoming_hdr, 28) != VSOCK_TYPE_DGRAM
+            || Self::hdr_u16(incoming_hdr, 30) != VSOCK_OP_RW
+        {
+            return false;
+        }
+
+        let request_len = Self::hdr_u32(incoming_hdr, 24) as usize;
+        if request_len != TSI_LISTEN_REQUEST_LEN {
+            warn!(
+                "vsock(windows): rejecting TSI_LISTEN request with unexpected length \
+                 (actual={request_len}, expected={TSI_LISTEN_REQUEST_LEN})"
+            );
+        }
+
+        // Published ports on Windows are implemented by guest-init's named-pipe
+        // bridge, not by a host-side TSI listener. The guest kernel only falls
+        // back to its already-bound native INET socket for selected Linux errors.
+        // Returning -EPERM lets that socket enter listen() so the bridge can
+        // connect to it over guest loopback.
+        let result = -linux_errno_raw(libc::EPERM);
+        self.queue_response(incoming_hdr, VSOCK_OP_RW, result.to_le_bytes().to_vec());
+        true
+    }
+
     fn read_tx_payload(
         mem: &GuestMemoryMmap,
         hdr_desc: &DescriptorChain<'_>,
@@ -1042,8 +1075,7 @@ impl Vsock {
                         vsock_control_trace_log(|| {
                             format!(
                                 "defer_control_pipe_read src_port={} wait_ms={}",
-                                port,
-                                wait_ms
+                                port, wait_ms
                             )
                         });
                         // Timer jitter can wake us before the control stream's
@@ -1463,6 +1495,10 @@ impl Vsock {
 
                             // Handle DGRAM type
                             if pkt_type == VSOCK_TYPE_DGRAM {
+                                if self.reject_unsupported_tsi_listen(&hdr) {
+                                    continue;
+                                }
+
                                 // For DGRAM, create socket on first use
                                 if !self.dgram_sockets.contains_key(&src_port) {
                                     // Create UDP socket bound to any port
@@ -2176,3 +2212,6 @@ impl Subscriber for Vsock {
         )]
     }
 }
+
+#[cfg(test)]
+mod tests;

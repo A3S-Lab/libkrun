@@ -295,8 +295,14 @@ mod tests {
         assert_eq!(linux_errno_raw(libc::EMSGSIZE), LINUX_EMSGSIZE);
         assert_eq!(linux_errno_raw(libc::EPROTOTYPE), LINUX_EPROTOTYPE);
         assert_eq!(linux_errno_raw(libc::ENOPROTOOPT), LINUX_ENOPROTOOPT);
-        assert_eq!(linux_errno_raw(libc::EPROTONOSUPPORT), LINUX_EPROTONOSUPPORT);
-        assert_eq!(linux_errno_raw(libc::ESOCKTNOSUPPORT), LINUX_ESOCKTNOSUPPORT);
+        assert_eq!(
+            linux_errno_raw(libc::EPROTONOSUPPORT),
+            LINUX_EPROTONOSUPPORT
+        );
+        assert_eq!(
+            linux_errno_raw(libc::ESOCKTNOSUPPORT),
+            LINUX_ESOCKTNOSUPPORT
+        );
         assert_eq!(linux_errno_raw(libc::EPFNOSUPPORT), LINUX_EPFNOSUPPORT);
         assert_eq!(linux_errno_raw(libc::EAFNOSUPPORT), LINUX_EAFNOSUPPORT);
         assert_eq!(linux_errno_raw(libc::EADDRINUSE), LINUX_EADDRINUSE);
@@ -338,7 +344,10 @@ mod tests {
         assert_eq!(linux_errno_raw(libc::EPROTO), LINUX_EPROTO);
         assert_eq!(linux_errno_raw(libc::ETIME), LINUX_ETIME);
         assert_eq!(linux_errno_raw(libc::EOPNOTSUPP), LINUX_EOPNOTSUPP);
-        assert_eq!(linux_errno_raw(libc::ENOTRECOVERABLE), LINUX_ENOTRECOVERABLE);
+        assert_eq!(
+            linux_errno_raw(libc::ENOTRECOVERABLE),
+            LINUX_ENOTRECOVERABLE
+        );
         assert_eq!(linux_errno_raw(libc::EOWNERDEAD), LINUX_EOWNERDEAD);
     }
 

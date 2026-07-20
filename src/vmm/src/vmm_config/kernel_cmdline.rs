@@ -17,7 +17,7 @@ pub const DEFAULT_KERNEL_CMDLINE: &str =
 
 /// Strongly typed data structure used to configure the boot source of the
 /// microvm.
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct KernelCmdlineConfig {
     pub prolog: Option<String>,
     pub krun_env: Option<String>,

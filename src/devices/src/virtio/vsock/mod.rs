@@ -229,7 +229,10 @@ mod tests {
         assert_eq!(format!("{:?}", err), "HdrDescTooSmall(42)");
 
         let err = VsockError::EventFd(std::io::Error::from_raw_os_error(0));
-        assert_eq!(format!("{:?}", err), "EventFd(Custom { kind: Other, error: \"\" })");
+        assert_eq!(
+            format!("{:?}", err),
+            "EventFd(Custom { kind: Other, error: \"\" })"
+        );
     }
 
     #[test]

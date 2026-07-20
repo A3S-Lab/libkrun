@@ -4,7 +4,7 @@
 use std::fmt::{Display, Formatter, Result};
 
 /// Data structure holding the attributes read from the `libkrunfw` kernel config.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct KernelBundle {
     pub host_addr: u64,
     pub guest_addr: u64,
@@ -58,7 +58,7 @@ impl Display for QbootBundleError {
 }
 
 /// Data structure holding the attributes read from the `libkrunfw` initrd config.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct InitrdBundle {
     pub host_addr: u64,
     pub size: usize,
