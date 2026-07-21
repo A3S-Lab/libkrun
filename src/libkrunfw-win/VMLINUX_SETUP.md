@@ -1,15 +1,45 @@
 # Windows `vmlinux` Setup
 
-This document explains how to prepare the Windows guest kernel file used by
-`libkrunfw-windows`.
+> **Provenance warning:** this WSL-based procedure is an optional development
+> recipe, not the source recipe for the current A3S Box prebuilt
+> `libkrunfw.dll`. The current DLL (SHA-256
+> `44f25540f58155c01258fe123617636fdc6cff27873e38e71dbc75f139602077`)
+> contains the byte-identical libkrunfw v5.5.0 generic x86_64 kernel bundle:
+> Linux 6.12.91, `config-libkrunfw_x86_64`, and the upstream 30-patch series.
+> See `a3s-libkrun-sys/SOURCE-PROVENANCE.md`. A DLL produced with the recipe
+> below is a different artifact and must receive its own source mapping,
+> checksums, and WHPX validation before distribution.
 
-The build expects a Linux x86_64 ELF kernel at:
+This document explains how to prepare a Windows guest kernel input used by
+`libkrunfw-windows`. The build accepts either:
 
-`src/libkrunfw-win/kernel/vmlinux`
+- a Linux x86_64 ELF kernel at `src/libkrunfw-win/kernel/vmlinux`; or
+- the extractor-generated raw pair
+  `src/libkrunfw-win/kernel/kernel.bundle` and
+  `src/libkrunfw-win/kernel/kernel.bundle.metadata`.
 
-This file is intentionally not stored in Git because it is too large for normal
-repository storage. You need to build or provide it locally before building the
-Windows companion library.
+These generated binary inputs are intentionally not stored in normal Git
+history. Provide exactly one format before building the Windows companion
+library; the build rejects ambiguous or incomplete pairs.
+
+## Reproduce the current official raw bundle
+
+On a Linux x86_64 host, run from the repository root:
+
+```bash
+bash scripts/extract_kernel.sh
+```
+
+The script downloads the official libkrunfw v5.5.0
+`libkrunfw-x86_64.tgz`, verifies the pinned archive SHA-256, extracts its
+versioned `libkrunfw.so`, and calls `krunfw_get_kernel()`. That API returns a
+prepared raw guest-memory bundle, not ELF bytes. The extractor therefore writes
+`kernel.bundle` and records the API's guest load address, entry address, byte
+length, bundle SHA-256, and pinned source identity in `kernel.bundle.metadata`.
+The Rust build validates every field before embedding it; addresses are never
+guessed from raw bytes.
+
+The remainder of this guide describes the alternative custom ELF build path.
 
 ## What kernel is required
 
@@ -18,6 +48,10 @@ The Windows WHPX backend currently depends on an x86_64 Linux kernel that:
 - supports `virtio_mmio.device=` command-line discovery
 - supports the legacy x86 `_MP_` parsing path used by the current Windows boot flow
 - includes the required virtio drivers as built-in drivers, not loadable modules
+
+The file must be a little-endian x86_64 ET_EXEC ELF. Its bounded PT_LOAD ranges
+must not overlap, its entry point must translate through file-backed executable
+bytes, and its lowest guest physical load address must be 4096-byte aligned.
 
 The minimum config requirements enforced by `src/libkrunfw-win/build.rs` are:
 
@@ -38,8 +72,9 @@ Repository:
 
 `https://github.com/microsoft/WSL2-Linux-Kernel`
 
-The exact tag does not need to match a specific release, but using a known WSL2
-tag keeps the Hyper-V related baseline close to what the Windows backend expects.
+The exact tag does not need to match a specific release for local experiments,
+but using a known WSL2 tag keeps the Hyper-V related baseline close to what the
+Windows backend expects.
 
 ## Build in WSL
 
@@ -69,7 +104,8 @@ git clone https://github.com/microsoft/WSL2-Linux-Kernel.git
 cd WSL2-Linux-Kernel
 ```
 
-Optional: checkout a specific WSL2 tag.
+Optional: checkout this example WSL2 tag (it does not reproduce the current
+distributed DLL).
 
 ```bash
 git checkout linux-msft-wsl-6.6.87.2
@@ -132,7 +168,8 @@ CONFIG_X86_MPPARSE=y
 
 If `extract-ikconfig` is unavailable, keep `CONFIG_IKCONFIG=y` and
 `CONFIG_IKCONFIG_PROC=y` enabled in the kernel config so the Rust build can
-validate the embedded config automatically.
+validate the embedded config automatically. When IKCONFIG markers exist, the
+build rejects corrupt gzip/UTF-8 data and decompressed configs larger than 4 MiB.
 
 ## Copy the file into the libkrun repo
 
@@ -164,9 +201,20 @@ early with a descriptive error.
 
 ### `kernel/vmlinux not found`
 
-You did not place the file at:
+You did not provide either supported input. Place an ELF file at:
 
 `src/libkrunfw-win/kernel/vmlinux`
+
+or run `bash scripts/extract_kernel.sh` on Linux to create the validated raw
+bundle pair.
+
+### Raw bundle metadata is missing or rejected
+
+Do not create or edit `kernel.bundle.metadata` manually. Re-run
+`scripts/extract_kernel.sh`; it binds the official archive provenance and the
+exported guest load/entry addresses to the exact raw bytes. A stale size,
+digest, source identity, duplicate key, unknown key, or incomplete pair is
+rejected deliberately.
 
 ### Missing `CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y`
 
@@ -185,7 +233,8 @@ compressed boot image.
 
 ## Notes
 
-- Do not commit `src/libkrunfw-win/kernel/vmlinux` to the normal Git history.
+- Do not commit `kernel/vmlinux`, `kernel/kernel.bundle`, or
+  `kernel/kernel.bundle.metadata` to the normal Git history.
 - Keep only the config fragment and build instructions in Git.
 - If a prebuilt kernel needs to be shared later, use a release artifact,
   external download URL, or another binary distribution channel instead of a
