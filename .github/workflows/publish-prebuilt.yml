@@ -43,7 +43,7 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Build krun.dll
+      - name: Build reproducible krun.dll
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Packages libkrun
 

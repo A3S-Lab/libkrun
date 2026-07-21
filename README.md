@@ -346,8 +346,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps
 
 The first script cross-compiles the ignored `init/init` payload as a stripped,
 static x86_64 Linux ELF. The second script rebuilds it, applies host-path remaps
-to all Rust crates, and then creates the release DLLs. Generated `init/init` is
-never committed.
+to all Rust crates, enables rust-lld's `/Brepro` mode, verifies that no host
+paths remain, and then creates bit-for-bit reproducible release DLLs. Generated
+`init/init` is never committed.
 
 #### Windows diagnostic logs
 
