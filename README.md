@@ -346,9 +346,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps
 
 The first script cross-compiles the ignored `init/init` payload as a stripped,
 static x86_64 Linux ELF. The second script rebuilds it, applies host-path remaps
-to all Rust crates, enables rust-lld's `/Brepro` mode, verifies that no host
-paths remain, and then creates bit-for-bit reproducible release DLLs. Generated
-`init/init` is never committed.
+to all Rust crates, enables rust-lld's `/Brepro` mode, and disables the
+path-bearing release PDB/CodeView directory with `/DEBUG:NONE`. It then verifies
+that no host paths or CodeView/PDB reference remain and creates bit-for-bit
+reproducible release DLLs. Generated `init/init` is never committed, and PDBs
+are intentionally excluded from these distributable builds.
 
 #### Windows diagnostic logs
 
