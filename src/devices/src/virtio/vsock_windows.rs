@@ -3,7 +3,6 @@ use std::collections::VecDeque;
 use std::io;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
-use std::path::Path;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::thread;
@@ -1953,48 +1952,18 @@ impl Vsock {
 }
 
 fn vsock_debug_log(message: String) {
-    let path = vsock_debug_log_path();
-    if let Some(parent) = Path::new(path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        let _ = writeln!(
-            file,
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    utils::windows_debug_log(
+        "vsock.log",
+        format!(
             "[{:>10}.{:03}] {}",
             now.as_secs(),
             now.subsec_millis(),
             message
-        );
-    }
-}
-
-fn vsock_debug_log_path() -> &'static PathBuf {
-    static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
-    LOG_PATH.get_or_init(|| {
-        if let Some(path) = std::env::var_os("LIBKRUN_WINDOWS_VSOCK_LOG_PATH") {
-            return PathBuf::from(path);
-        }
-
-        std::env::var_os("USERPROFILE")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-            .or_else(|| {
-                let drive = std::env::var_os("HOMEDRIVE")?;
-                let path = std::env::var_os("HOMEPATH")?;
-                let mut base = PathBuf::from(drive);
-                base.push(path);
-                Some(base)
-            })
-            .map(|home| home.join(".a3s").join("libkrun-vsock-windows.log"))
-            .unwrap_or_else(|| std::env::temp_dir().join("libkrun-vsock-windows.log"))
-    })
+        ),
+    );
 }
 
 fn vsock_control_trace_enabled() -> bool {

@@ -73,15 +73,7 @@ use vm_memory::GuestMemoryMmap;
 
 #[cfg(target_os = "windows")]
 fn windows_vmm_debug_log(message: impl AsRef<str>) {
-    use std::io::Write;
-
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(r"C:\Users\18770\.a3s\libkrun-whpx-exit-current.log")
-    {
-        let _ = writeln!(file, "{}", message.as_ref());
-    }
+    utils::windows_debug_log("whpx-exit.log", message);
 }
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]

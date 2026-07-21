@@ -19,17 +19,7 @@ const AVAIL_FEATURES: u64 = (1 << 32) | (1 << 1) | (1 << 5) | (1 << 6);
 
 #[cfg(target_os = "windows")]
 fn balloon_debug_log(message: impl AsRef<str>) {
-    use std::fs::OpenOptions;
-    use std::io::Write;
-
-    let message = message.as_ref();
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(r"D:\code\libkrun\tmp_event_manager.log")
-    {
-        let _ = writeln!(file, "{message}");
-    }
+    utils::windows_debug_log("event-manager.log", message);
 }
 
 #[derive(Copy, Clone, Debug, Default)]

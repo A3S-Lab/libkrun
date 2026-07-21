@@ -145,20 +145,7 @@ fn windows_vcpu_debug_log(message: impl AsRef<str>) {
     }) {
         return;
     }
-    use std::io::Write;
-
-    for path in [
-        r"C:\Users\18770\.a3s\libkrun-whpx-vcpu-current.log",
-        "tmp_whpx_vcpu.log",
-    ] {
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(file, "{}", message.as_ref());
-        }
-    }
+    utils::windows_debug_log("whpx-vcpu.log", message);
 }
 
 fn windows_vcpu_exit_state_log(vcpu_id: u8, message: impl AsRef<str>) {
@@ -1011,8 +998,6 @@ impl Vcpu {
                 let mut exit_count = 0u64;
                 let mut last_log_time = std::time::Instant::now();
                 let last_exit_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
-                let mut stuck_warning_shown = false;
-
                 // Spawn a monitoring thread to detect stuck vCPU
                 let partition_handle = self.partition;
                 let vcpu_id = self.id;
