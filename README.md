@@ -320,6 +320,7 @@ sudo make [FEATURE_OPTIONS] install
 * **Windows Hypervisor Platform** enabled (Settings → Optional Features, or `DISM /Online /Enable-Feature /FeatureName:HypervisorPlatform`)
 * A working [Rust](https://www.rust-lang.org/) toolchain with the `x86_64-pc-windows-msvc` target (`rustup target add x86_64-pc-windows-msvc`)
 * MSVC build tools (Visual Studio Build Tools 2019 or later)
+* [Zig](https://ziglang.org/) 0.16.0 (`winget install --id zig.zig --exact --version 0.16.0`)
 * A Windows-capable x86_64 ELF guest kernel at `src/libkrunfw-win/kernel/vmlinux`
 
 #### Windows kernel setup
@@ -339,9 +340,27 @@ Setup guide:
 #### Compiling
 
 ```powershell
-cargo build -p libkrunfw-windows --target x86_64-pc-windows-msvc --release
-cargo build -p libkrun --target x86_64-pc-windows-msvc --release
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-init.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Packages libkrunfw-windows,libkrun
 ```
+
+The first script cross-compiles the ignored `init/init` payload as a stripped,
+static x86_64 Linux ELF. The second script rebuilds it, applies host-path remaps
+to all Rust crates, and then creates the release DLLs. Generated `init/init` is
+never committed.
+
+#### Windows diagnostic logs
+
+Host-side file logging is disabled by default. To opt in for one process, set an
+explicit directory before starting the caller:
+
+```powershell
+$env:LIBKRUN_WINDOWS_DEBUG_LOG_DIR = "C:\path\to\libkrun-logs"
+```
+
+All Windows diagnostic files are created below that directory. The setting is
+read once per process; unset it (or start a new process without it) to keep file
+logging disabled. It does not control guest files such as `/init-rust.log`.
 
 #### Running tests
 

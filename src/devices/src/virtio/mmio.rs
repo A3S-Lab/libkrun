@@ -8,8 +8,6 @@
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::io;
-#[cfg(target_os = "windows")]
-use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -59,18 +57,7 @@ fn mmio_debug_log(message: impl AsRef<str>) {
     {
         eprintln!("[MMIO-DBG] {message}");
     }
-    for path in [
-        r"C:\Users\18770\.a3s\libkrun-virtio-mmio.log",
-        r"D:\code\libkrun\tmp_virtio_mmio.log",
-    ] {
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(file, "{message}");
-        }
-    }
+    utils::windows_debug_log("virtio-mmio.log", message);
 }
 
 #[derive(Debug)]

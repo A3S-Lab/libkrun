@@ -330,20 +330,7 @@ fn windows_io_debug_log(message: impl AsRef<str>) {
     if !windows_io_debug_enabled() {
         return;
     }
-    use std::io::Write;
-
-    for path in [
-        r"C:\Users\18770\.a3s\libkrun-whpx-io-current.log",
-        "tmp_whpx_io.log",
-    ] {
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(file, "{}", message.as_ref());
-        }
-    }
+    utils::windows_debug_log("whpx-io.log", message);
 }
 
 fn measured_tsc_hz() -> u64 {

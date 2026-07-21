@@ -83,14 +83,14 @@ cp Microsoft/config-wsl .config
 
 ### 4. Merge the libkrun config fragment
 
-Replace `/mnt/d/code/libkrun` below with your actual repo path as mounted in
+Replace `/mnt/c/path/to/libkrun` below with your actual repo path as mounted in
 WSL.
 
 ```bash
 scripts/kconfig/merge_config.sh \
   -m \
   .config \
-  /mnt/d/code/libkrun/src/libkrunfw-win/kernel/config-wsl-libkrun-x86_64.fragment
+  /mnt/c/path/to/libkrun/src/libkrunfw-win/kernel/config-wsl-libkrun-x86_64.fragment
 make olddefconfig
 ```
 
@@ -139,21 +139,22 @@ validate the embedded config automatically.
 From WSL:
 
 ```bash
-cp vmlinux /mnt/d/code/libkrun/src/libkrunfw-win/kernel/vmlinux
+cp vmlinux /mnt/c/path/to/libkrun/src/libkrunfw-win/kernel/vmlinux
 ```
 
 Or from Windows Explorer / PowerShell, copy the built file to:
 
-`D:\code\libkrun\src\libkrunfw-win\kernel\vmlinux`
+`C:\path\to\libkrun\src\libkrunfw-win\kernel\vmlinux`
 
 ## Build and verify from Windows
 
 After the file is in place:
 
 ```powershell
-cd D:\code\libkrun
-cargo build --target x86_64-pc-windows-msvc -p libkrunfw-windows
-cargo build --target x86_64-pc-windows-msvc -p libkrun
+cd C:\path\to\libkrun
+winget install --id zig.zig --exact --version 0.16.0
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-init.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Packages libkrunfw-windows,libkrun
 ```
 
 If the required kernel config is missing, `src/libkrunfw-win/build.rs` fails

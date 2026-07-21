@@ -88,18 +88,7 @@ pub struct Epoll {
 
 #[cfg(target_os = "windows")]
 fn windows_epoll_debug_log(message: impl AsRef<str>) {
-    use std::fs::OpenOptions;
-    use std::io::Write;
-
-    let message = message.as_ref();
-    for path in [
-        r"C:\Users\18770\.a3s\libkrun-event-manager.log",
-        r"D:\code\libkrun\tmp_event_manager.log",
-    ] {
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(file, "{message}");
-        }
-    }
+    crate::windows_debug_log("event-manager.log", message);
 }
 
 impl Epoll {

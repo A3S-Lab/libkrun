@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 use std::ffi::CStr;
 use std::fs::{self, Metadata};
 use std::io;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -48,18 +47,7 @@ fn virtiofs_debug_log(message: impl AsRef<str>) {
     }
     let message = message.as_ref();
     eprintln!("[VIRTIOFS-FS] {message}");
-    for raw_path in [
-        r"C:\Users\18770\.a3s\libkrun-virtiofs-windows.log",
-        r"D:\code\libkrun\tmp_virtiofs_windows.log",
-    ] {
-        let path = PathBuf::from(raw_path);
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(file, "{message}");
-        }
-    }
+    utils::windows_debug_log("virtiofs-windows.log", message);
 }
 
 fn should_trace_path(path: &Path) -> bool {

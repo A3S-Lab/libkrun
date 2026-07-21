@@ -50,18 +50,7 @@ fn fs_server_debug_log(message: impl AsRef<str>) {
     }
     let message = message.as_ref();
     eprintln!("[VIRTIOFS-SERVER] {message}");
-    for path in [
-        r"C:\Users\18770\.a3s\libkrun-virtiofs-device.log",
-        r"D:\code\libkrun\tmp_virtiofs_device.log",
-    ] {
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(file, "{message}");
-        }
-    }
+    utils::windows_debug_log("virtiofs-device.log", message);
 }
 
 struct ZCReader<'a>(Reader<'a>);

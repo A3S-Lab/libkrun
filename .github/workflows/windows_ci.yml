@@ -67,10 +67,14 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Create a fake init
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build Linux guest init
         shell: pwsh
-        run: |
-          New-Item -ItemType File -Path "init/init" -Force | Out-Null
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-init.ps1
 
       - name: Build check (Windows target)
         run: cargo check -p utils -p polly -p devices -p vmm -p libkrun --target x86_64-pc-windows-msvc
@@ -99,12 +103,14 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Create a fake init
-        shell: pwsh
-        run: New-Item -ItemType File -Path "init/init" -Force | Out-Null
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
 
       - name: Build krun.dll
-        run: cargo build --release -p libkrun --target x86_64-pc-windows-msvc
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Packages libkrun
 
       - name: Prepare artifact
         shell: pwsh
@@ -132,10 +138,14 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Create a fake init
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build Linux guest init
         shell: pwsh
-        run: |
-          New-Item -ItemType File -Path "init/init" -Force | Out-Null
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-init.ps1
 
       - name: WHPX smoke suite
         shell: pwsh

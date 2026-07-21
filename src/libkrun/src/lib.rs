@@ -22,6 +22,7 @@ use rand::distr::{Alphanumeric, SampleString};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::convert::TryInto;
+#[cfg(not(target_os = "windows"))]
 use std::env;
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
@@ -115,15 +116,7 @@ static KRUNFW: LazyLock<Option<libloading::Library>> =
 
 #[cfg(target_os = "windows")]
 fn windows_boot_debug_log(message: impl AsRef<str>) {
-    use std::io::Write;
-
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(r"C:\Users\18770\.a3s\libkrun-boot-current.log")
-    {
-        let _ = writeln!(file, "{}", message.as_ref());
-    }
+    utils::windows_debug_log("boot.log", message);
 }
 
 pub struct KrunfwBindings {

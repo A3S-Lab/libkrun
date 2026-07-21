@@ -190,18 +190,18 @@ Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
 
 ```powershell
 rustup target add x86_64-pc-windows-msvc
+winget install --id zig.zig --exact --version 0.16.0
 ```
 
 ### Run individual tests locally
 
 ```powershell
-# Clone and switch to the branch
+# Clone the revision under test
 git clone https://github.com/A3S-Lab/libkrun.git
 cd libkrun
-git checkout chore/windows-ci-smoke-validation
 
-# Create the fake init required by the build
-New-Item -ItemType File -Path "init/init" -Force
+# Build the real, stripped Linux init payload required by the build
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-init.ps1
 
 # Run only the HLT boot test (synchronous path)
 cargo test -p vmm --target x86_64-pc-windows-msvc --lib test_whpx_vm_hlt_boot -- --ignored --test-threads=1
@@ -232,6 +232,11 @@ cargo test -p vmm --target x86_64-pc-windows-msvc --lib -- windows::
 > **Note:** `--test-threads=1` is required. WHPX has system-level limits on the
 > number of concurrent partitions and GPA mappings; running tests in parallel
 > causes `WHvMapGpaRange` failures and access violations.
+
+Host-side debug files are opt-in. Set
+`LIBKRUN_WINDOWS_DEBUG_LOG_DIR` to an explicit directory before launching the
+test process when diagnostics are needed; by default libkrun writes no host
+debug log files. The environment variable is read once per process.
 
 ### Run via the smoke script
 

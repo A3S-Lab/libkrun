@@ -1,8 +1,6 @@
 #[cfg(target_os = "macos")]
 use crossbeam_channel::Sender;
 use std::cmp;
-#[cfg(target_os = "windows")]
-use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -41,14 +39,7 @@ fn fs_device_debug_log(message: impl AsRef<str>) {
     }
     let message = message.as_ref();
     eprintln!("[VIRTIOFS-DEV] {message}");
-    for path in [
-        r"C:\Users\18770\.a3s\libkrun-virtiofs-device.log",
-        r"D:\code\libkrun\tmp_virtiofs_device.log",
-    ] {
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(file, "{message}");
-        }
-    }
+    utils::windows_debug_log("virtiofs-device.log", message);
 }
 
 #[derive(Copy, Clone)]
