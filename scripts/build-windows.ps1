@@ -32,6 +32,10 @@ $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserPro
 if ($userProfile) {
     $rustFlags += "--remap-path-prefix=$userProfile=."
 }
+# rust-lld otherwise writes the current time into the PE/COFF header and derives
+# other debug-directory bytes from it. /Brepro replaces those values with a
+# content hash so clean builds in different directories are bit-for-bit equal.
+$rustFlags += "-Clink-arg=/Brepro"
 
 $normalizedPackages = @(
     foreach ($packageList in $Packages) {
