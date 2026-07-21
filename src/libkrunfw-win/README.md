@@ -1,7 +1,28 @@
 # Windows kernel bundle
 
-`libkrunfw-windows` embeds a single x86_64 Linux `vmlinux` at
-`src/libkrunfw-win/kernel/vmlinux`.
+> **Current prebuilt provenance:** the A3S Box `libkrunfw.dll` with SHA-256
+> `44f25540f58155c01258fe123617636fdc6cff27873e38e71dbc75f139602077`
+> contains a kernel bundle byte-identical to the official libkrunfw v5.5.0
+> x86_64 bundle. Its corresponding source is Linux 6.12.91,
+> `config-libkrunfw_x86_64`, and the upstream 30-patch series. It is **not** a
+> build of the WSL 6.6 recipe below. See the outer `a3s-libkrun-sys`
+> `SOURCE-PROVENANCE.md` for immutable hashes and source locations. The WSL
+> instructions are an alternative development recipe; replacing the kernel
+> requires new runtime validation and provenance hashes.
+
+`libkrunfw-windows` accepts exactly one of two x86_64 kernel inputs:
+
+- `kernel/vmlinux`: an ELF image whose `PT_LOAD` segments are parsed and
+  flattened by the Windows wrapper.
+- `kernel/kernel.bundle` plus `kernel/kernel.bundle.metadata`: an already
+  flattened libkrunfw bundle. The build accepts this form only when the
+  extractor metadata, source provenance, size, SHA-256, guest load address, and
+  entry address all validate.
+
+The raw bundle is intentionally not named `vmlinux`. The official
+`krunfw_get_kernel()` API returns prepared guest-memory bytes, not the original
+ELF file. Run `bash scripts/extract_kernel.sh` on Linux to download the pinned
+official v5.5.0 x86_64 archive, verify its SHA-256, and generate the raw pair.
 
 Full setup guide:
 
@@ -14,11 +35,11 @@ kernel does not enable this, so a plain upstream `microsoft-standard-WSL2`
 
 ## Recommended source
 
-Use the official Microsoft WSL2 kernel source, matching the version already
-embedded here when possible. For example:
+As an alternative custom-kernel development recipe, use the official Microsoft
+WSL2 kernel source. For example:
 
 - Repository: `https://github.com/microsoft/WSL2-Linux-Kernel`
-- Matching tag for the current bundled kernel: `linux-msft-wsl-6.6.87.2`
+- Example baseline tag: `linux-msft-wsl-6.6.87.2`
 
 This keeps the Hyper-V/WSL-specific patch set and configuration baseline, while
 allowing a minimal libkrun-specific config delta.
@@ -68,7 +89,11 @@ common failure modes, see [VMLINUX_SETUP.md](./VMLINUX_SETUP.md).
 
 ## Validation
 
-Building `libkrunfw-windows` now validates the embedded kernel config during the
-Rust build. If the bundled `vmlinux` is missing required settings, the build
-fails early with a descriptive error instead of producing a DLL that stalls at
-guest boot.
+Building `libkrunfw-windows` validates the selected input during the Rust build.
+ELF inputs must be little-endian x86_64 ET_EXEC images with bounded,
+non-overlapping PT_LOAD segments, a file-backed executable entry point, and a
+4096-byte-aligned guest load address. Raw inputs fail closed unless their
+extractor metadata is complete and exactly matches the bytes and pinned official
+source archive. If an IKCONFIG marker is present, corrupt gzip/UTF-8 data or
+more than 4 MiB of decompressed config is rejected; missing required settings
+also fail early instead of producing a DLL that stalls at guest boot.
