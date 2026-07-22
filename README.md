@@ -392,6 +392,11 @@ cargo test -p vmm --target x86_64-pc-windows-msvc --lib -- test_whpx_ --ignored 
 
 TSI for AF_INET/AF_INET6 (TCP and UDP) is enabled automatically when no virtio-net device is added, identical to Linux/macOS behavior.
 
+Windows virtiofs reports guest-created and guest-updated POSIX mode, UID, and
+GID values from its in-memory inode table. These values last for the VM
+lifetime; callers that need them across VM generations must capture them in the
+guest before shutdown and replay them after the next boot.
+
 #### Known limitations
 
 * x86_64 only (no ARM64/WHPX support on Windows)

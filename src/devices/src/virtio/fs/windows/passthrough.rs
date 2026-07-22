@@ -9,7 +9,7 @@ use std::ffi::CStr;
 use std::fs::{self, Metadata};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -24,6 +24,7 @@ type Handle = u64;
 
 const ROOT_INODE: Inode = 1;
 const INIT_CSTR: &[u8] = b"init.krun\0";
+const POSIX_METADATA_UNSET: u32 = u32::MAX;
 
 static INIT_BINARY: &[u8] = include_bytes!(env!("LIBKRUN_WINDOWS_INIT_BINARY"));
 
@@ -129,6 +130,9 @@ struct InodeData {
     inode: Inode,
     path: PathBuf,
     refcount: AtomicU64,
+    mode: AtomicU32,
+    uid: AtomicU32,
+    gid: AtomicU32,
 }
 
 /// Handle data for open files/directories
@@ -188,6 +192,9 @@ impl PassthroughFs {
             inode: ROOT_INODE,
             path: root_dir.clone(),
             refcount: AtomicU64::new(1),
+            mode: AtomicU32::new(POSIX_METADATA_UNSET),
+            uid: AtomicU32::new(POSIX_METADATA_UNSET),
+            gid: AtomicU32::new(POSIX_METADATA_UNSET),
         });
         inodes.insert(ROOT_INODE, root_inode_data);
         path_to_inode.insert(root_dir.clone(), ROOT_INODE);
@@ -238,6 +245,9 @@ impl PassthroughFs {
             inode,
             path: path.to_path_buf(),
             refcount: AtomicU64::new(1),
+            mode: AtomicU32::new(POSIX_METADATA_UNSET),
+            uid: AtomicU32::new(POSIX_METADATA_UNSET),
+            gid: AtomicU32::new(POSIX_METADATA_UNSET),
         });
 
         let mut inodes = self.inodes.write().unwrap();
@@ -256,6 +266,16 @@ impl PassthroughFs {
             .get(&inode)
             .map(|data| data.path.clone())
             .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))
+    }
+
+    fn set_initial_posix_metadata(&self, inode: Inode, mode: u32, uid: u32, gid: u32) {
+        let inodes = self.inodes.read().unwrap();
+        let Some(inode_data) = inodes.get(&inode) else {
+            return;
+        };
+        inode_data.mode.store(mode & 0o7777, Ordering::SeqCst);
+        inode_data.uid.store(uid, Ordering::SeqCst);
+        inode_data.gid.store(gid, Ordering::SeqCst);
     }
 
     fn path_is_executable(&self, path: &Path, metadata: &Metadata) -> bool {
@@ -297,7 +317,7 @@ impl PassthroughFs {
         st.st_nlink = 1;
 
         let ft = metadata.file_type();
-        st.st_mode = if ft.is_dir() {
+        let synthesized_mode = if ft.is_dir() {
             (libc::S_IFDIR | 0o755) as u32
         } else if ft.is_symlink() {
             (S_IFLNK | 0o777) as u32
@@ -309,6 +329,7 @@ impl PassthroughFs {
             };
             (libc::S_IFREG | mode) as u32
         };
+        st.st_mode = synthesized_mode;
 
         st.st_size = metadata.len() as i64;
         // Approximate block count (512-byte blocks, same as Linux convention)
@@ -333,9 +354,26 @@ impl PassthroughFs {
             }
         }
 
-        // Windows doesn't have uid/gid; expose as root-owned, world-readable
+        // Windows does not persist POSIX ownership and modes. Keep values
+        // supplied by the guest, plus changes made during this VM lifetime,
+        // in the inode table. Callers that need cross-VM persistence can
+        // capture and replay these values from inside the guest.
         st.st_uid = 0;
         st.st_gid = 0;
+        if let Some(inode_data) = self.inodes.read().unwrap().get(&inode) {
+            let mode = inode_data.mode.load(Ordering::SeqCst);
+            if mode != POSIX_METADATA_UNSET {
+                st.st_mode = (synthesized_mode & libc::S_IFMT as u32) | (mode & 0o7777);
+            }
+            let uid = inode_data.uid.load(Ordering::SeqCst);
+            if uid != POSIX_METADATA_UNSET {
+                st.st_uid = uid;
+            }
+            let gid = inode_data.gid.load(Ordering::SeqCst);
+            if gid != POSIX_METADATA_UNSET {
+                st.st_gid = gid;
+            }
+        }
 
         st
     }
@@ -834,10 +872,10 @@ impl FileSystem for PassthroughFs {
 
     fn mkdir(
         &self,
-        _ctx: Context,
+        ctx: Context,
         parent: Self::Inode,
         name: &CStr,
-        _mode: u32,
+        mode: u32,
         _umask: u32,
         _extensions: Extensions,
     ) -> io::Result<Entry> {
@@ -852,6 +890,7 @@ impl FileSystem for PassthroughFs {
 
         // Get or create inode for the new directory
         let inode = self.get_or_create_inode(&new_path)?;
+        self.set_initial_posix_metadata(inode, mode, ctx.uid, ctx.gid);
 
         // Get metadata
         let metadata = fs::metadata(&new_path)?;
@@ -993,10 +1032,10 @@ impl FileSystem for PassthroughFs {
 
     fn create(
         &self,
-        _ctx: Context,
+        ctx: Context,
         parent: Self::Inode,
         name: &CStr,
-        _mode: u32,
+        mode: u32,
         flags: u32,
         _umask: u32,
         _extensions: Extensions,
@@ -1016,6 +1055,7 @@ impl FileSystem for PassthroughFs {
 
         // Get or create inode for the new file
         let inode = self.get_or_create_inode(&new_path)?;
+        self.set_initial_posix_metadata(inode, mode, ctx.uid, ctx.gid);
 
         // Create a handle for the new file
         let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
@@ -1291,9 +1331,19 @@ impl FileSystem for PassthroughFs {
             }
         }
 
-        // Note: Windows doesn't support POSIX permissions (mode) or ownership (uid/gid)
-        // These would require mapping to Windows ACLs, which is complex
-        // For now, we ignore MODE, UID, GID changes
+        if let Some(inode_data) = self.inodes.read().unwrap().get(&inode) {
+            if valid.contains(SetattrValid::MODE) {
+                inode_data
+                    .mode
+                    .store(attr.st_mode & 0o7777, Ordering::SeqCst);
+            }
+            if valid.contains(SetattrValid::UID) {
+                inode_data.uid.store(attr.st_uid, Ordering::SeqCst);
+            }
+            if valid.contains(SetattrValid::GID) {
+                inode_data.gid.store(attr.st_gid, Ordering::SeqCst);
+            }
+        }
 
         // Get updated metadata
         let metadata = fs::metadata(&path)?;
@@ -1328,20 +1378,27 @@ impl FileSystem for PassthroughFs {
         fs::rename(&old_path, &new_path)?;
 
         // Update inode tracking
-        let mut path_to_inode = self.path_to_inode.write().unwrap();
-        if let Some(inode) = path_to_inode.remove(&old_path) {
-            path_to_inode.insert(new_path.clone(), inode);
-
-            // Update the path in InodeData
-            if let Some(inode_data) = self.inodes.write().unwrap().get_mut(&inode) {
-                // We need to update the path, but InodeData.path is not mutable
-                // For now, we'll remove and re-insert with updated path
-                let new_inode_data = Arc::new(InodeData {
+        let inode = {
+            let mut path_to_inode = self.path_to_inode.write().unwrap();
+            let inode = path_to_inode.remove(&old_path);
+            if let Some(inode) = inode {
+                path_to_inode.insert(new_path.clone(), inode);
+            }
+            inode
+        };
+        if let Some(inode) = inode {
+            let replacement = self.inodes.read().unwrap().get(&inode).map(|inode_data| {
+                Arc::new(InodeData {
                     inode,
                     path: new_path,
                     refcount: AtomicU64::new(inode_data.refcount.load(Ordering::SeqCst)),
-                });
-                self.inodes.write().unwrap().insert(inode, new_inode_data);
+                    mode: AtomicU32::new(inode_data.mode.load(Ordering::SeqCst)),
+                    uid: AtomicU32::new(inode_data.uid.load(Ordering::SeqCst)),
+                    gid: AtomicU32::new(inode_data.gid.load(Ordering::SeqCst)),
+                })
+            });
+            if let Some(replacement) = replacement {
+                self.inodes.write().unwrap().insert(inode, replacement);
             }
         }
 
@@ -1375,7 +1432,7 @@ impl FileSystem for PassthroughFs {
 
     fn symlink(
         &self,
-        _ctx: Context,
+        ctx: Context,
         linkname: &CStr,
         parent: Self::Inode,
         name: &CStr,
@@ -1411,6 +1468,7 @@ impl FileSystem for PassthroughFs {
 
         // Get or create inode for the symlink
         let inode = self.get_or_create_inode(&link_path)?;
+        self.set_initial_posix_metadata(inode, 0o777, ctx.uid, ctx.gid);
 
         // Get metadata
         let metadata = fs::symlink_metadata(&link_path)?;
@@ -1719,11 +1777,84 @@ mod tests {
     }
 
     fn ctx() -> Context {
-        Context {
-            uid: 0,
-            gid: 0,
-            pid: 0,
-        }
+        ctx_with_ids(0, 0)
+    }
+
+    fn ctx_with_ids(uid: u32, gid: u32) -> Context {
+        Context { uid, gid, pid: 0 }
+    }
+
+    fn assert_posix_metadata(attr: bindings::stat64, mode: u32, uid: u32, gid: u32) {
+        assert_eq!(attr.st_mode & 0o7777, mode);
+        assert_eq!(attr.st_uid, uid);
+        assert_eq!(attr.st_gid, gid);
+    }
+
+    #[test]
+    fn test_virtiofs_windows_create_and_mkdir_track_posix_metadata() {
+        let dir = TempDir::new().unwrap();
+        let fs = make_fs(dir.path());
+        let owner = ctx_with_ids(123, 456);
+
+        let (file, _, _) = fs
+            .create(
+                owner,
+                ROOT_INODE,
+                &CString::new("private.txt").unwrap(),
+                0o640,
+                0,
+                0,
+                Extensions::default(),
+            )
+            .unwrap();
+        assert_posix_metadata(file.attr, 0o640, 123, 456);
+
+        let directory = fs
+            .mkdir(
+                owner,
+                ROOT_INODE,
+                &CString::new("private-dir").unwrap(),
+                0o710,
+                0,
+                Extensions::default(),
+            )
+            .unwrap();
+        assert_posix_metadata(directory.attr, 0o710, 123, 456);
+    }
+
+    #[test]
+    fn test_virtiofs_windows_setattr_tracks_metadata_across_rename() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("before.txt");
+        std::fs::write(&path, b"data").unwrap();
+        let fs = make_fs(dir.path());
+        let entry = fs
+            .lookup(ctx(), ROOT_INODE, &CString::new("before.txt").unwrap())
+            .unwrap();
+
+        let mut attr: bindings::stat64 = unsafe { std::mem::zeroed() };
+        attr.st_mode = 0o750;
+        attr.st_uid = 123;
+        attr.st_gid = 456;
+        let valid = SetattrValid::MODE | SetattrValid::UID | SetattrValid::GID;
+        let (updated, _) = fs.setattr(ctx(), entry.inode, attr, None, valid).unwrap();
+        assert_posix_metadata(updated, 0o750, 123, 456);
+
+        fs.rename(
+            ctx(),
+            ROOT_INODE,
+            &CString::new("before.txt").unwrap(),
+            ROOT_INODE,
+            &CString::new("after.txt").unwrap(),
+            0,
+        )
+        .unwrap();
+        let (renamed, _) = fs.getattr(ctx(), entry.inode, None).unwrap();
+        assert_posix_metadata(renamed, 0o750, 123, 456);
+        assert_eq!(
+            fs.get_path(entry.inode).unwrap(),
+            dir.path().join("after.txt")
+        );
     }
 
     #[test]
