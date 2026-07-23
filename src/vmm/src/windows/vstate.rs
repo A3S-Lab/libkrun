@@ -9,6 +9,7 @@ use std::sync::Arc;
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
 use windows::Win32::System::Hypervisor::*;
 
+use super::hyperv_enlightenments_enabled;
 use super::interrupts::PendingInterruptQueue;
 use super::registers::{get_virtual_processor_registers, set_virtual_processor_registers};
 use super::whpx_vcpu::{VcpuEmulation, VcpuExit, WhpxVcpu};
@@ -65,16 +66,13 @@ fn desired_windows_hyperv_synthetic_features() -> u64 {
         | HV_SYNTHETIC_FEATURE_FREQUENCY_REGS
 }
 
-fn windows_hyperv_enlightenments_enabled() -> bool {
-    static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var("LIBKRUN_WINDOWS_HYPERV_ENLIGHTENMENTS")
-            .map(|v| {
-                let v = v.trim();
-                v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
-            })
-            .unwrap_or(false)
-    })
+const fn terminal_exit_code(emulation: VcpuEmulation) -> u8 {
+    match emulation {
+        VcpuEmulation::Stopped => FC_EXIT_CODE_OK,
+        VcpuEmulation::Failed | VcpuEmulation::Handled | VcpuEmulation::Halted => {
+            FC_EXIT_CODE_GENERIC_ERROR
+        }
+    }
 }
 
 fn host_windows_hyperv_synthetic_features() -> Option<u64> {
@@ -310,7 +308,7 @@ impl Vm {
                     }
                 }
 
-                if windows_hyperv_enlightenments_enabled() {
+                if hyperv_enlightenments_enabled() {
                     // Set CPUID 0x1 ECX bit 31 (hypervisor present) so the kernel
                     // detects Hyper-V via CPUID 0x40000000. Our emulate_cpuid() exit
                     // handler serves the Hyper-V leaves with bit 8 of 0x40000003 CLEARED,
@@ -424,7 +422,7 @@ impl Vm {
                 })
                 .ok();
 
-                if windows_hyperv_enlightenments_enabled() {
+                if hyperv_enlightenments_enabled() {
                     use windows::Win32::System::Hypervisor::{
                         WHvMsrActionExit, WHvPartitionPropertyCodeMsrActionList,
                         WHV_MSR_ACTION_ENTRY,
@@ -1350,12 +1348,15 @@ impl Vcpu {
                                         break;
                                     }
                                 }
-                                VcpuEmulation::Stopped => {
+                                VcpuEmulation::Stopped | VcpuEmulation::Failed => {
+                                    let exit_code = terminal_exit_code(result);
                                     windows_vcpu_exit_state_log(
                                         self.id,
-                                        "emulation=Stopped terminal_exit_code=0",
+                                        format!(
+                                            "emulation={result:?} terminal_exit_code={exit_code}"
+                                        ),
                                     );
-                                    self.exit(FC_EXIT_CODE_OK);
+                                    self.exit(exit_code);
                                     break;
                                 }
                                 VcpuEmulation::Handled => continue,
@@ -1463,7 +1464,7 @@ impl Vcpu {
                     if let Err(e) = self.whpx_vcpu.complete_mmio_read(&completion[..len]) {
                         error!("Failed to complete WHPX MMIO read on vCPU {}: {e}", self.id);
                         self.whpx_vcpu.clear_pending_mmio();
-                        VcpuEmulation::Stopped
+                        VcpuEmulation::Failed
                     } else {
                         VcpuEmulation::Handled
                     }
@@ -1481,7 +1482,7 @@ impl Vcpu {
                             self.id
                         );
                         self.whpx_vcpu.clear_pending_mmio();
-                        VcpuEmulation::Stopped
+                        VcpuEmulation::Failed
                     } else {
                         VcpuEmulation::Handled
                     }
@@ -1500,7 +1501,7 @@ impl Vcpu {
                             self.id
                         );
                         self.whpx_vcpu.clear_pending_io();
-                        VcpuEmulation::Stopped
+                        VcpuEmulation::Failed
                     } else {
                         VcpuEmulation::Handled
                     }
@@ -1520,7 +1521,7 @@ impl Vcpu {
                             self.id
                         );
                         self.whpx_vcpu.clear_pending_io();
-                        VcpuEmulation::Stopped
+                        VcpuEmulation::Failed
                     } else if acpi_shutdown {
                         info!("Guest requested ACPI shutdown via port 0x604");
                         windows_vcpu_exit_state_log(
@@ -1544,13 +1545,15 @@ impl Vcpu {
                     windows_vcpu_exit_state_log(self.id, "vcpu_exit=Shutdown");
                     self.whpx_vcpu.clear_pending_mmio();
                     self.whpx_vcpu.clear_pending_io();
-                    VcpuEmulation::Stopped
+                    VcpuEmulation::Failed
                 }
             };
 
             match emulation {
                 VcpuEmulation::Handled => continue,
-                VcpuEmulation::Stopped | VcpuEmulation::Halted => return Ok(emulation),
+                VcpuEmulation::Stopped | VcpuEmulation::Failed | VcpuEmulation::Halted => {
+                    return Ok(emulation);
+                }
             }
         }
     }
@@ -1744,6 +1747,15 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use vm_memory::GuestAddress;
+
+    #[test]
+    fn fatal_emulation_has_a_nonzero_terminal_exit_code() {
+        assert_eq!(terminal_exit_code(VcpuEmulation::Stopped), FC_EXIT_CODE_OK);
+        assert_eq!(
+            terminal_exit_code(VcpuEmulation::Failed),
+            FC_EXIT_CODE_GENERIC_ERROR
+        );
+    }
 
     #[test]
     fn test_error_display_messages() {
@@ -3438,7 +3450,7 @@ mod tests {
         // ── 12. Cancel vCPU if it has not yet exited ──────────────────────
         // WHvCancelRunVirtualProcessor interrupts any in-flight
         // WHvRunVirtualProcessor, causing it to return WHvRunVpExitReasonCanceled
-        // → VcpuExit::Shutdown → VcpuEmulation::Stopped → thread exits.
+        // → VcpuExit::Shutdown → VcpuEmulation::Failed → thread exits.
         if !vcpu_exited {
             unsafe {
                 let _ = windows::Win32::System::Hypervisor::WHvCancelRunVirtualProcessor(

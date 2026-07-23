@@ -14,6 +14,13 @@ This directory contains helper scripts for Windows WHPX integration smoke tests.
 - Emits `summary.json` for machine-readable CI parsing.
 - Includes runner identity and git SHA in metadata/summary outputs.
 
+The generated rootfs is a placeholder used to exercise test orchestration; it
+does not prove that a Linux userspace command ran. Release qualification must
+also boot a real, checksum-pinned rootfs, run a guest command, and verify a
+guest-written marker on the host. A zero `krun_start_enter` result alone is not
+sufficient evidence because the marker distinguishes workload completion from
+an early VMM shutdown.
+
 Usage example:
 
 ```powershell

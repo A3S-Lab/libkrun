@@ -76,23 +76,12 @@ use windows::Win32::System::Hypervisor::{
 };
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
+use super::hyperv_enlightenments_enabled;
 use super::interrupts::{PendingInterrupt, PendingInterruptQueue};
 use super::registers::{
     get_virtual_processor_registers as WHvGetVirtualProcessorRegisters,
     set_virtual_processor_registers as WHvSetVirtualProcessorRegisters,
 };
-
-fn windows_hyperv_enlightenments_enabled() -> bool {
-    static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var("LIBKRUN_WINDOWS_HYPERV_ENLIGHTENMENTS")
-            .map(|v| {
-                let v = v.trim();
-                v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
-            })
-            .unwrap_or(false)
-    })
-}
 
 fn windows_io_debug_enabled() -> bool {
     static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -475,6 +464,9 @@ pub enum VcpuEmulation {
 
     /// The VM should stop execution.
     Stopped,
+
+    /// The VM stopped because the VMM could not continue safely.
+    Failed,
 
     /// The CPU is halted.
     Halted,
@@ -2068,20 +2060,16 @@ impl WhpxVcpu {
             // Leaf 0x1: when Hyper-V enlightenments are disabled, explicitly
             // clear the "hypervisor present" bit so Linux stays on the native
             // x86 path instead of probing an incomplete Hyper-V ABI.
-            0x1 if !windows_hyperv_enlightenments_enabled() => (
+            0x1 if !hyperv_enlightenments_enabled() => (
                 cpuid.DefaultResultRax,
                 cpuid.DefaultResultRbx,
                 cpuid.DefaultResultRcx & !(1u64 << 31),
                 cpuid.DefaultResultRdx,
             ),
-            // Leaf 0x40000000+: optional Hyper-V enlightenments.
-            // Keep this disabled for now; exposing an incomplete Hyper-V surface
-            // (vendor leaves without the full MSR/hypercall contract) sends the
-            // guest into a partially paravirtualized path that regressed boot.
-            0x40000000..=0x40000006 if !windows_hyperv_enlightenments_enabled() => {
-                (0u64, 0u64, 0u64, 0u64)
-            }
-            0x40000000..=0x40000006 if windows_hyperv_enlightenments_enabled() => {
+            // Leaf 0x40000000+: Hyper-V enlightenments are boot-safe by
+            // default, but retain an explicit opt-out for diagnostics.
+            0x40000000..=0x40000006 if !hyperv_enlightenments_enabled() => (0u64, 0u64, 0u64, 0u64),
+            0x40000000..=0x40000006 if hyperv_enlightenments_enabled() => {
                 guest_hyperv_cpuid(function)
             }
             // Leaf 0x15: Time Stamp Counter and Nominal Core Crystal Clock.
@@ -2108,10 +2096,7 @@ impl WhpxVcpu {
             ),
         };
 
-        if windows_hyperv_enlightenments_enabled()
-            && function >= 0x40000000
-            && function <= 0x40000006
-        {
+        if hyperv_enlightenments_enabled() && function >= 0x40000000 && function <= 0x40000006 {
             windows_io_debug_log(format!(
                 "[CPUID] 0x{:08x}: eax=0x{:x} ebx=0x{:x} ecx=0x{:x} edx=0x{:x}",
                 function, rax, rbx, rcx, rdx
