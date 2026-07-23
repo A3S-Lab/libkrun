@@ -1490,9 +1490,7 @@ impl FileSystem for PassthroughFs {
             }
         };
 
-        // Convert to bytes
-        let target_str = target.to_string_lossy();
-        Ok(target_str.as_bytes().to_vec())
+        Ok(guest_symlink_target(&target))
     }
 
     fn flush(
@@ -1754,6 +1752,13 @@ impl FileSystem for PassthroughFs {
     }
 }
 
+fn guest_symlink_target(target: &Path) -> Vec<u8> {
+    // Windows stores both `/` and `\` path separators as `\` in a reparse
+    // point. Linux guests require `/`, including for absolute OCI links such as
+    // `/bin/sh -> /bin/busybox`.
+    target.to_string_lossy().replace('\\', "/").into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1780,6 +1785,18 @@ mod tests {
         assert_eq!(attr.st_mode & 0o7777, mode);
         assert_eq!(attr.st_uid, uid);
         assert_eq!(attr.st_gid, gid);
+    }
+
+    #[test]
+    fn test_virtiofs_windows_readlink_restores_linux_separators() {
+        assert_eq!(
+            guest_symlink_target(Path::new(r"\bin\busybox")),
+            b"/bin/busybox"
+        );
+        assert_eq!(
+            guest_symlink_target(Path::new(r"..\lib\loader.so")),
+            b"../lib/loader.so"
+        );
     }
 
     #[test]

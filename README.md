@@ -374,6 +374,12 @@ All Windows diagnostic files are created below that directory. The setting is
 read once per process; unset it (or start a new process without it) to keep file
 logging disabled. It does not control guest files such as `/init-rust.log`.
 
+The Windows backend exposes the boot-safe Hyper-V CPUID and synthetic-feature
+surface by default. Set `LIBKRUN_WINDOWS_HYPERV_ENLIGHTENMENTS=0` only for
+diagnosis; disabling it can prevent current libkrunfw kernels from reaching
+userspace on WHPX. Fatal vCPU exits are returned as a non-zero runtime failure
+and are not treated as a successful guest shutdown.
+
 #### Running tests
 
 ```powershell
@@ -396,6 +402,10 @@ Windows virtiofs reports guest-created and guest-updated POSIX mode, UID, and
 GID values from its in-memory inode table. These values last for the VM
 lifetime; callers that need them across VM generations must capture them in the
 guest before shutdown and replay them after the next boot.
+
+Windows reparse points store path separators using Windows syntax. Virtiofs
+converts those separators back to `/` in `READLINK` replies so standard OCI
+links such as `/bin/sh -> /bin/busybox` remain executable in the Linux guest.
 
 #### Known limitations
 
