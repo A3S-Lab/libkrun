@@ -12,6 +12,17 @@ fn tsi_listen_header(dst_port: u32) -> [u8; 44] {
     hdr
 }
 
+fn stream_header(dst_port: u32) -> [u8; 44] {
+    let mut hdr = [0_u8; 44];
+    Vsock::set_u64(&mut hdr, 0, 3);
+    Vsock::set_u64(&mut hdr, 8, VSOCK_HOST_CID);
+    Vsock::set_u32(&mut hdr, 16, 49_152);
+    Vsock::set_u32(&mut hdr, 20, dst_port);
+    Vsock::set_u16(&mut hdr, 28, VSOCK_TYPE_STREAM);
+    Vsock::set_u16(&mut hdr, 30, VSOCK_OP_RW);
+    hdr
+}
+
 #[test]
 fn rejects_unsupported_tsi_listener_with_linux_eperm() {
     let mut vsock = Vsock::new(3, None, None, TsiFlags::HIJACK_INET).expect("create vsock");
@@ -46,4 +57,31 @@ fn leaves_non_tsi_datagrams_unchanged() {
 
     assert!(!vsock.reject_unsupported_tsi_listen(&request));
     assert!(vsock.pending_rx.is_empty());
+}
+
+#[test]
+fn splits_host_stream_reads_to_fit_guest_rx_descriptors() {
+    let request = stream_header(4093);
+    let mut vsock = Vsock::new(3, None, None, TsiFlags::empty()).expect("create vsock");
+    let payload = (0..MAX_STREAM_RX_CHUNK_BYTES * 2 + 1)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let expected = payload.clone();
+
+    vsock.queue_stream_data(&request, payload);
+
+    let chunks = vsock.pending_rx.iter().collect::<Vec<_>>();
+    assert_eq!(chunks.len(), 3);
+    assert_eq!(chunks[0].payload.len(), MAX_STREAM_RX_CHUNK_BYTES);
+    assert_eq!(chunks[1].payload.len(), MAX_STREAM_RX_CHUNK_BYTES);
+    assert_eq!(chunks[2].payload.len(), 1);
+    for chunk in &chunks {
+        assert_eq!(Vsock::hdr_u32(&chunk.hdr, 24) as usize, chunk.payload.len());
+        assert_eq!(Vsock::hdr_u16(&chunk.hdr, 30), VSOCK_OP_RW);
+    }
+    let reconstructed = chunks
+        .into_iter()
+        .flat_map(|chunk| chunk.payload.iter().copied())
+        .collect::<Vec<_>>();
+    assert_eq!(reconstructed, expected);
 }

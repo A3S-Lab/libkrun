@@ -73,6 +73,11 @@ const CONTROL_STREAM_KEEPALIVE_POLL_MS: u64 = 250;
 const CONTROL_STREAM_KEEPALIVE_POLLS: usize = 480;
 const MAX_RW_PAYLOAD: usize = 64 * 1024;
 const MAX_READ_BURST_PER_STREAM: usize = 8;
+// Linux AF_VSOCK may expose a receive descriptor smaller than the 4 KiB
+// Windows pipe read buffer after reserving its virtio header and skb metadata.
+// Keep each stream packet below that descriptor while preserving byte-stream
+// ordering across consecutive packets.
+const MAX_STREAM_RX_CHUNK_BYTES: usize = 3 * 1024;
 
 const AVAIL_FEATURES: u64 = (1 << VIRTIO_F_VERSION_1 as u64)
     | (1 << VIRTIO_F_IN_ORDER as u64)
@@ -785,6 +790,12 @@ impl Vsock {
         self.queue_response(incoming_hdr, VSOCK_OP_CREDIT_UPDATE, Vec::new());
     }
 
+    fn queue_stream_data(&mut self, incoming_hdr: &[u8; 44], payload: Vec<u8>) {
+        for chunk in payload.chunks(MAX_STREAM_RX_CHUNK_BYTES) {
+            self.queue_response(incoming_hdr, VSOCK_OP_RW, chunk.to_vec());
+        }
+    }
+
     fn reject_unsupported_tsi_listen(&mut self, incoming_hdr: &[u8; 44]) -> bool {
         if !self.tsi_flags.tsi_enabled()
             || Self::hdr_u64(incoming_hdr, 8) != VSOCK_HOST_CID
@@ -1159,7 +1170,7 @@ impl Vsock {
         }
 
         for (hdr, payload) in responses {
-            self.queue_response(&hdr, VSOCK_OP_RW, payload);
+            self.queue_stream_data(&hdr, payload);
         }
 
         for hdr in control_credit_updates {
