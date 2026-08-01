@@ -1529,9 +1529,12 @@ impl FileSystem for PassthroughFs {
 
         let path = &handle_data.path;
 
-        // Open the file and sync it
-        use std::fs::File;
-        let file = File::open(path)?;
+        // Windows FlushFileBuffers requires a handle opened for writing.
+        // Reopening with File::open creates a read-only handle, so a guest
+        // fsync after writing a recovery artifact was translated into EIO
+        // even though the preceding write had succeeded.
+        use std::fs::OpenOptions as StdOpenOptions;
+        let file = StdOpenOptions::new().write(true).open(path)?;
 
         if datasync {
             // Sync only data, not metadata
@@ -1941,6 +1944,23 @@ mod tests {
 
         assert_eq!(types["subdir"], DT_DIR as u32, "subdir must be DT_DIR");
         assert_eq!(types["file.txt"], DT_REG as u32, "file.txt must be DT_REG");
+    }
+
+    #[test]
+    fn test_virtiofs_windows_fsync_reopens_with_write_access() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("recovery-report.json");
+        std::fs::write(&path, b"authenticated-report").unwrap();
+
+        let fs = make_fs(dir.path());
+        let name = CString::new("recovery-report.json").unwrap();
+        let entry = fs.lookup(ctx(), ROOT_INODE, &name).expect("lookup");
+        let (handle, _) = fs
+            .open(ctx(), entry.inode, libc::O_WRONLY as u32)
+            .expect("open writable report");
+
+        fs.fsync(ctx(), entry.inode, false, handle.expect("file handle"))
+            .expect("fsync writable report");
     }
 
     #[test]
