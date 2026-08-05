@@ -34,10 +34,12 @@ jobs:
           if (( test_status != 0 )); then
             python3 - "$RUNNER_TEMP/backpressure.log" <<'PY'
           import pathlib
+          import re
           import sys
 
           log = pathlib.Path(sys.argv[1]).read_text(errors="replace")
-          detail = "\n".join(log.splitlines()[-120:])[-16000:]
+          detail = "\n".join(log.splitlines()[-100:])[-7000:]
+          detail = re.sub(r"\x1b\[[0-9;]*m", "", detail)
           detail = detail.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
           print(f"::error title=Focused libkrun backpressure test failed::{detail}")
           PY
