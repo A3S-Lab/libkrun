@@ -12,6 +12,16 @@ use super::write_virtio_net_hdr;
 
 const VFKIT_MAGIC: [u8; 4] = *b"VFKT";
 
+fn classify_write_error(error: nix::Error) -> WriteError {
+    #[allow(unreachable_patterns)]
+    match error {
+        nix::Error::EAGAIN | nix::Error::EWOULDBLOCK | nix::Error::ENOBUFS => {
+            WriteError::NothingWritten
+        }
+        error => WriteError::Internal(error),
+    }
+}
+
 pub struct Unixgram {
     fd: OwnedFd,
 }
@@ -115,7 +125,7 @@ impl NetBackend for Unixgram {
     /// Try to write a frame to the proxy.
     fn write_frame(&mut self, hdr_len: usize, buf: &mut [u8]) -> Result<(), WriteError> {
         let ret = send(self.fd.as_raw_fd(), &buf[hdr_len..], MsgFlags::empty())
-            .map_err(WriteError::Internal)?;
+            .map_err(classify_write_error)?;
         debug!(
             "Written frame size={}, written={}",
             buf.len() - hdr_len,
@@ -135,5 +145,30 @@ impl NetBackend for Unixgram {
 
     fn raw_socket_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transient_datagram_backpressure_is_retryable() {
+        assert!(matches!(
+            classify_write_error(nix::Error::EAGAIN),
+            WriteError::NothingWritten
+        ));
+        assert!(matches!(
+            classify_write_error(nix::Error::EWOULDBLOCK),
+            WriteError::NothingWritten
+        ));
+        assert!(matches!(
+            classify_write_error(nix::Error::ENOBUFS),
+            WriteError::NothingWritten
+        ));
+        assert!(matches!(
+            classify_write_error(nix::Error::EINVAL),
+            WriteError::Internal(nix::Error::EINVAL)
+        ));
     }
 }

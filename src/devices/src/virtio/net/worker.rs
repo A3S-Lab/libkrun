@@ -264,7 +264,7 @@ impl NetWorker {
                 .unwrap();
 
             if let Err(e) = self.process_tx() {
-                log::error!("Failed to process rx: {e:?} (triggered by backend socket readable)");
+                log::error!("Failed to process tx: {e:?}");
             };
 
             if !self.queues[TX_INDEX]
@@ -449,5 +449,113 @@ impl NetWorker {
     fn read_into_rx_frame_buf_from_backend(&mut self) -> result::Result<(), ReadError> {
         self.rx_frame_buf_len = self.backend.read_frame(&mut self.rx_frame_buf)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::legacy::DummyIrqChip;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use vm_memory::{Bytes, GuestAddress};
+
+    const TEST_QUEUE_SIZE: u16 = 8;
+    const TX_DESC_TABLE: u64 = 0;
+    const TX_AVAIL_RING: u64 = 0x100;
+    const TX_USED_RING: u64 = 0x200;
+    const TX_FRAME: u64 = 0x1000;
+
+    struct BackpressuredBackend {
+        writes: Arc<AtomicUsize>,
+    }
+
+    impl NetBackend for BackpressuredBackend {
+        fn read_frame(&mut self, _buf: &mut [u8]) -> Result<usize, ReadError> {
+            Err(ReadError::NothingRead)
+        }
+
+        fn write_frame(&mut self, _hdr_len: usize, _buf: &mut [u8]) -> Result<(), WriteError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            Err(WriteError::NothingWritten)
+        }
+
+        fn has_unfinished_write(&self) -> bool {
+            false
+        }
+
+        fn try_finish_write(&mut self, _hdr_len: usize, _buf: &[u8]) -> Result<(), WriteError> {
+            Ok(())
+        }
+
+        fn raw_socket_fd(&self) -> std::os::fd::RawFd {
+            -1
+        }
+    }
+
+    fn tx_queue(mem: &GuestMemoryMmap, frame_len: u32) -> Queue {
+        let mut queue = Queue::new(TEST_QUEUE_SIZE);
+        queue.size = TEST_QUEUE_SIZE;
+        queue.ready = true;
+        queue.desc_table = GuestAddress(TX_DESC_TABLE);
+        queue.avail_ring = GuestAddress(TX_AVAIL_RING);
+        queue.used_ring = GuestAddress(TX_USED_RING);
+
+        mem.write_obj(TX_FRAME, GuestAddress(TX_DESC_TABLE))
+            .unwrap();
+        mem.write_obj(frame_len, GuestAddress(TX_DESC_TABLE + 8))
+            .unwrap();
+        mem.write_obj(0_u16, GuestAddress(TX_DESC_TABLE + 12))
+            .unwrap();
+        mem.write_obj(0_u16, GuestAddress(TX_DESC_TABLE + 14))
+            .unwrap();
+        mem.write_obj(1_u16, GuestAddress(TX_AVAIL_RING + 2))
+            .unwrap();
+        mem.write_obj(0_u16, GuestAddress(TX_AVAIL_RING + 4))
+            .unwrap();
+        queue
+    }
+
+    #[test]
+    fn retryable_tx_backpressure_returns_descriptor_to_available_ring() {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x4000)]).unwrap();
+        let frame = vec![0x5a; vnet_hdr_len() + 64];
+        mem.write_slice(&frame, GuestAddress(TX_FRAME)).unwrap();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let backend = BackpressuredBackend {
+            writes: Arc::clone(&writes),
+        };
+        let mut worker = NetWorker {
+            queues: vec![
+                Queue::new(TEST_QUEUE_SIZE),
+                tx_queue(&mem, frame.len() as u32),
+            ],
+            queue_evts: vec![
+                EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+                EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap(),
+            ],
+            interrupt: InterruptTransport::new(DummyIrqChip::new().into(), "test".into()).unwrap(),
+            mem,
+            backend: Box::new(backend),
+            rx_frame_buf: [0; MAX_BUFFER_SIZE],
+            rx_frame_buf_len: 0,
+            rx_has_deferred_frame: false,
+            tx_iovec: Vec::with_capacity(TEST_QUEUE_SIZE as usize),
+            tx_frame_buf: [0; MAX_BUFFER_SIZE],
+            tx_frame_len: 0,
+        };
+
+        assert_eq!(worker.queues[TX_INDEX].len(&worker.mem), 1);
+        worker.process_tx().unwrap();
+
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        assert_eq!(worker.queues[TX_INDEX].len(&worker.mem), 1);
+        assert_eq!(
+            worker
+                .mem
+                .read_obj::<u16>(GuestAddress(TX_USED_RING + 2))
+                .unwrap(),
+            0
+        );
     }
 }
