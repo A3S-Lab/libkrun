@@ -39,14 +39,12 @@ mod tests {
     #[test]
     fn test_sigrtmin_is_rtsig() {
         let min = sigrtmin();
-        // sigrtmin should return a valid signal number
-        assert!(min >= libc::SIGRTMIN as c_int);
+        assert!(validate_signal_num(min).is_ok());
     }
 
     #[test]
     fn test_sigrtmax_is_rtsig() {
         let max = sigrtmax();
-        // sigrtmax should return a valid signal number
-        assert!(max <= libc::SIGRTMAX as c_int);
+        assert!(validate_signal_num(max).is_ok());
     }
 }
