@@ -43,22 +43,28 @@ jobs:
             echo "available=true" >> "$GITHUB_OUTPUT"
           else
             echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::ARM64 VMM unit tests will be compiled but not executed because this hosted runner does not expose /dev/kvm."
+            echo "::notice::ARM64 KVM-backed unit tests will be compiled but not executed because this hosted runner does not expose /dev/kvm."
             {
-              echo "### ARM64 VMM unit execution skipped"
+              echo "### ARM64 KVM-backed unit execution skipped"
               echo
               echo "The hosted runner does not expose a readable and writable /dev/kvm device."
-              echo "All non-VMM unit tests run normally, and the VMM unit-test target is still compiled."
+              echo "All other unit tests run normally, and the filtered Arch and VMM cases are still compiled."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Unit tests (non-VMM)
-        run: cargo test --workspace --exclude libkrunfw-windows --exclude a3s-libkrun-sys --exclude vmm
-
-      - name: VMM unit tests
+      - name: Unit tests with KVM
         if: steps.kvm.outputs.available == 'true'
-        run: cargo test -p vmm
+        run: cargo test --workspace --exclude libkrunfw-windows --exclude a3s-libkrun-sys
 
-      - name: Compile VMM unit tests without KVM
+      - name: Unit tests without KVM execution
         if: steps.kvm.outputs.available != 'true'
-        run: cargo test -p vmm --no-run
+        run: |
+          cargo test --workspace --exclude libkrunfw-windows --exclude a3s-libkrun-sys -- \
+            --skip aarch64::linux::regs::tests::test_setup_regs \
+            --skip aarch64::linux::regs::tests::test_read_mpidr \
+            --skip linux::vstate::tests::test_set_mmio_bus \
+            --skip linux::vstate::tests::test_vm_memory_init \
+            --skip linux::vstate::tests::test_configure_vcpu \
+            --skip linux::vstate::tests::test_vcpu_tls \
+            --skip linux::vstate::tests::test_invalid_tls \
+            --skip linux::vstate::tests::test_vcpu_kick
