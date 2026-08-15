@@ -190,6 +190,62 @@ struct WhpxIrqChip {
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+pub(crate) struct WindowsPitTimer {
+    shutdown_requested: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+impl WindowsPitTimer {
+    fn new(
+        shutdown_requested: Arc<std::sync::atomic::AtomicBool>,
+        thread: std::thread::JoinHandle<()>,
+    ) -> Self {
+        Self {
+            shutdown_requested,
+            thread: Some(thread),
+        }
+    }
+
+    pub(crate) fn shutdown(&mut self) {
+        self.shutdown_requested
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            if thread.join().is_err() {
+                error!("PIT timer thread panicked during shutdown");
+            }
+        }
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+impl Drop for WindowsPitTimer {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+fn windows_wait_for_shutdown(
+    shutdown_requested: &std::sync::atomic::AtomicBool,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    let poll_interval = std::time::Duration::from_millis(50);
+
+    loop {
+        if shutdown_requested.load(std::sync::atomic::Ordering::Acquire) {
+            return true;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return shutdown_requested.load(std::sync::atomic::Ordering::Acquire);
+        }
+        std::thread::sleep(remaining.min(poll_interval));
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
 fn windows_irq_debug_log(message: impl AsRef<str>) {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*ENABLED.get_or_init(|| {
@@ -2187,10 +2243,13 @@ pub fn build_microvm(
             fd if fd >= 0 => Some(Box::new(CrtFdWriter(fd))),
             _ => None,
         };
-        let input: Option<Box<dyn devices::legacy::ReadableFd + Send>> =
+        let input: Option<Box<dyn devices::legacy::ReadableFd + Send>> = if s.input_fd >= 0 {
             crate::windows::stdin_reader::WindowsStdinInput::new()
                 .ok()
-                .map(|r| Box::new(r) as Box<dyn devices::legacy::ReadableFd + Send>);
+                .map(|r| Box::new(r) as Box<dyn devices::legacy::ReadableFd + Send>)
+        } else {
+            None
+        };
         serial_devices.push(setup_serial_device(event_manager, input, output)?);
     }
 
@@ -2209,10 +2268,17 @@ pub fn build_microvm(
             } else {
                 Some(Box::new(io::stdout()))
             };
+        // File-backed console capture is output-only. Avoid creating an
+        // unnecessary stdin reader when the caller did not request
+        // interactive input.
         let input: Option<Box<dyn devices::legacy::ReadableFd + Send>> =
-            crate::windows::stdin_reader::WindowsStdinInput::new()
-                .ok()
-                .map(|r| Box::new(r) as Box<dyn devices::legacy::ReadableFd + Send>);
+            if vm_resources.console_output.is_none() {
+                crate::windows::stdin_reader::WindowsStdinInput::new()
+                    .ok()
+                    .map(|r| Box::new(r) as Box<dyn devices::legacy::ReadableFd + Send>)
+            } else {
+                None
+            };
         serial_devices.push(setup_serial_device(event_manager, input, output)?);
     }
 
@@ -2257,6 +2323,8 @@ pub fn build_microvm(
 
     let mut vcpus;
     let intc: IrqChip;
+    #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+    let pit_timer: WindowsPitTimer;
     // For x86_64 we need to create the interrupt controller before calling `KVM_CREATE_VCPUS`
     // while on aarch64 we need to do it the other way around.
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
@@ -2320,7 +2388,7 @@ pub fn build_microvm(
             pending_interrupt.clone(),
         )))));
 
-        attach_legacy_devices(
+        pit_timer = attach_legacy_devices(
             &mut pio_device_manager,
             &mut mmio_device_manager,
             intc.clone(),
@@ -2457,6 +2525,8 @@ pub fn build_microvm(
         arch_memory_info,
         kernel_cmdline,
         vcpus_handles: Vec::new(),
+        #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+        pit_timer: Some(pit_timer),
         exit_evt,
         exit_observers: Vec::new(),
         exit_code: exit_code.clone(),
@@ -3466,7 +3536,7 @@ fn attach_legacy_devices(
     pio_device_manager: &mut PortIODeviceManager,
     mmio_device_manager: &mut MMIODeviceManager,
     intc: IrqChip,
-) -> std::result::Result<(), StartMicrovmError> {
+) -> std::result::Result<WindowsPitTimer, StartMicrovmError> {
     pio_device_manager
         .register_devices()
         .map_err(Error::LegacyIOBus)
@@ -3527,7 +3597,9 @@ fn attach_legacy_devices(
     // On Windows, IRQ0 begins as a legacy PIC ExtINT via LAPIC LINT0 and later
     // migrates to IOAPIC delivery. Do not inject a blind fixed vector fallback.
     let intc_clone = intc.clone();
-    std::thread::Builder::new()
+    let shutdown_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let timer_shutdown = shutdown_requested.clone();
+    let timer_thread = std::thread::Builder::new()
         .name("pit-timer".into())
         .spawn(move || {
             let mut last_route = "waiting";
@@ -3579,7 +3651,12 @@ fn attach_legacy_devices(
                     last_route = route;
                 }
 
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                if windows_wait_for_shutdown(
+                    timer_shutdown.as_ref(),
+                    std::time::Duration::from_millis(10),
+                ) {
+                    break;
+                }
                 count += 1;
 
                 if count <= 20 || count % 100 == 0 {
@@ -3625,7 +3702,7 @@ fn attach_legacy_devices(
 
     log::debug!("PIT timer thread started (100 Hz IRQ 0 routing)");
 
-    Ok(())
+    Ok(WindowsPitTimer::new(shutdown_requested, timer_thread))
 }
 
 #[cfg(all(
@@ -4069,7 +4146,7 @@ fn autoconfigure_console_ports(
         if !vm_resources.disable_implicit_console && creating_implicit_console {
             let file = open_windows_console_output_file(path).map_err(OpenConsoleFile)?;
             return Ok(vec![PortDescription::console(
-                port_io::input_to_raw_fd_dup(0).ok(),
+                None,
                 Some(port_io::output_file(file).unwrap()),
                 port_io::term_fixed_size(0, 0),
             )]);
@@ -4505,6 +4582,29 @@ pub mod tests {
     use super::*;
     #[cfg(target_os = "linux")]
     use crate::vmm_config::kernel_bundle::KernelBundle;
+
+    #[test]
+    #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+    fn windows_pit_timer_shutdown_joins_thread() {
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_shutdown = shutdown.clone();
+        let thread_stopped = stopped.clone();
+        let thread = std::thread::spawn(move || {
+            if windows_wait_for_shutdown(
+                thread_shutdown.as_ref(),
+                std::time::Duration::from_secs(60),
+            ) {
+                thread_stopped.store(true, std::sync::atomic::Ordering::Release);
+            }
+        });
+        let mut timer = WindowsPitTimer::new(shutdown, thread);
+
+        timer.shutdown();
+
+        assert!(stopped.load(std::sync::atomic::Ordering::Acquire));
+        assert!(timer.thread.is_none());
+    }
 
     #[cfg(target_os = "linux")]
     fn default_guest_memory(

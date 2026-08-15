@@ -4,6 +4,7 @@
 use std::fmt::{Display, Formatter};
 use std::io;
 use std::result;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
@@ -72,6 +73,23 @@ const fn terminal_exit_code(emulation: VcpuEmulation) -> u8 {
         VcpuEmulation::Failed | VcpuEmulation::Handled | VcpuEmulation::Halted => {
             FC_EXIT_CODE_GENERIC_ERROR
         }
+    }
+}
+
+fn wait_for_shutdown(shutdown_requested: &AtomicBool, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    let poll_interval = std::time::Duration::from_millis(50);
+
+    loop {
+        if shutdown_requested.load(Ordering::Acquire) {
+            return true;
+        }
+
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return shutdown_requested.load(Ordering::Acquire);
+        }
+        std::thread::sleep(remaining.min(poll_interval));
     }
 }
 
@@ -570,6 +588,7 @@ pub struct Vcpu {
     /// work correctly.  `None` in unit tests that expect HLT to terminate.
     irq_pending_evt: Option<Arc<utils::eventfd::EventFd>>,
     pending_interrupt: Option<PendingInterruptQueue>,
+    shutdown_requested: Arc<AtomicBool>,
     event_receiver: crossbeam_channel::Receiver<VcpuEvent>,
     event_sender: Option<crossbeam_channel::Sender<VcpuEvent>>,
     response_receiver: Option<crossbeam_channel::Receiver<VcpuResponse>>,
@@ -596,8 +615,14 @@ impl Vcpu {
         let (event_sender, event_receiver) = crossbeam_channel::unbounded();
         let (response_sender, response_receiver) = crossbeam_channel::unbounded();
 
-        let whpx_vcpu = WhpxVcpu::new(partition, id as u32, pending_interrupt.clone())
-            .map_err(Error::VcpuSpawn)?;
+        let shutdown_requested = Arc::new(AtomicBool::new(false));
+        let whpx_vcpu = WhpxVcpu::new(
+            partition,
+            id as u32,
+            pending_interrupt.clone(),
+            shutdown_requested.clone(),
+        )
+        .map_err(Error::VcpuSpawn)?;
 
         Ok(Vcpu {
             id,
@@ -610,6 +635,7 @@ impl Vcpu {
             exit_evt,
             irq_pending_evt,
             pending_interrupt,
+            shutdown_requested,
             event_receiver,
             event_sender: Some(event_sender),
             response_receiver: Some(response_receiver),
@@ -951,6 +977,9 @@ impl Vcpu {
 
         let event_sender = self.event_sender.take().unwrap();
         let response_receiver = self.response_receiver.take().unwrap();
+        let partition = self.partition;
+        let vcpu_index = u32::from(self.id);
+        let shutdown_requested = self.shutdown_requested.clone();
         let (init_tls_sender, init_tls_receiver) = crossbeam_channel::unbounded::<bool>();
 
         let vcpu_thread = std::thread::Builder::new()
@@ -986,6 +1015,7 @@ impl Vcpu {
                             return;
                         }
                     }
+                    Ok(VcpuEvent::Shutdown) => return,
                     _ => {
                         // Channel closed or unexpected event before first resume.
                         self.exit(FC_EXIT_CODE_GENERIC_ERROR);
@@ -1001,10 +1031,11 @@ impl Vcpu {
                 let vcpu_id = self.id;
                 let last_exit_time_clone = last_exit_time.clone();
                 let pending_interrupt_clone = self.pending_interrupt.clone();
+                let monitor_shutdown = self.shutdown_requested.clone();
 
                 log::debug!("Spawning monitor thread for vCPU {}", self.id);
 
-                std::thread::Builder::new()
+                let monitor_thread = std::thread::Builder::new()
                     .name(format!("vcpu-{}-monitor", self.id))
                     .spawn(move || {
                         log::debug!("Monitor thread started for vCPU {}", vcpu_id);
@@ -1028,7 +1059,12 @@ impl Vcpu {
                         const DELAY_LOOP_RIP: u64 = 0xffffffff81956f43;
 
                         loop {
-                            std::thread::sleep(std::time::Duration::from_secs(5));
+                            if wait_for_shutdown(
+                                monitor_shutdown.as_ref(),
+                                std::time::Duration::from_secs(5),
+                            ) {
+                                break;
+                            }
 
                             let elapsed = last_exit_time_clone.lock().unwrap().elapsed().as_secs();
 
@@ -1290,7 +1326,7 @@ impl Vcpu {
                             }
                         }
                     })
-                    .expect("Failed to spawn vCPU monitor thread");
+                    .ok();
 
                 loop {
                     exit_count += 1;
@@ -1373,6 +1409,13 @@ impl Vcpu {
                         }
                     }
                 }
+
+                self.shutdown_requested.store(true, Ordering::Release);
+                if let Some(monitor_thread) = monitor_thread {
+                    if monitor_thread.join().is_err() {
+                        error!("vCPU {} monitor thread panicked", self.id);
+                    }
+                }
             })
             .map_err(Error::VcpuSpawn)?;
 
@@ -1384,6 +1427,9 @@ impl Vcpu {
             event_sender,
             response_receiver,
             vcpu_thread,
+            partition,
+            vcpu_index,
+            shutdown_requested,
         ))
     }
 
@@ -1413,6 +1459,7 @@ impl Vcpu {
         loop {
             while let Ok(event) = self.event_receiver.try_recv() {
                 match event {
+                    VcpuEvent::Shutdown => return Ok(VcpuEmulation::Stopped),
                     VcpuEvent::Pause => {
                         self.response_sender
                             .send(VcpuResponse::Paused)
@@ -1431,6 +1478,7 @@ impl Vcpu {
                                         .send(VcpuResponse::Paused)
                                         .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
                                 }
+                                Ok(VcpuEvent::Shutdown) => return Ok(VcpuEmulation::Stopped),
                                 Err(_) => return Ok(VcpuEmulation::Stopped),
                             }
                         }
@@ -1541,11 +1589,24 @@ impl Vcpu {
                     VcpuEmulation::Halted
                 }
                 VcpuExit::Shutdown => {
-                    log::warn!("vCPU {} shutdown - VM terminated abnormally", self.id);
-                    windows_vcpu_exit_state_log(self.id, "vcpu_exit=Shutdown");
+                    let lifecycle_shutdown = self.shutdown_requested.load(Ordering::Acquire);
+                    if lifecycle_shutdown {
+                        log::debug!("vCPU {} stopped for host teardown", self.id);
+                        windows_vcpu_exit_state_log(
+                            self.id,
+                            "vcpu_exit=Shutdown lifecycle_shutdown=true",
+                        );
+                    } else {
+                        log::warn!("vCPU {} shutdown - VM terminated abnormally", self.id);
+                        windows_vcpu_exit_state_log(self.id, "vcpu_exit=Shutdown");
+                    }
                     self.whpx_vcpu.clear_pending_mmio();
                     self.whpx_vcpu.clear_pending_io();
-                    VcpuEmulation::Failed
+                    if lifecycle_shutdown {
+                        VcpuEmulation::Stopped
+                    } else {
+                        VcpuEmulation::Failed
+                    }
                 }
             };
 
@@ -1694,10 +1755,32 @@ pub struct VcpuHandle {
     event_sender: crossbeam_channel::Sender<VcpuEvent>,
     response_receiver: crossbeam_channel::Receiver<VcpuResponse>,
     vcpu_thread: Option<std::thread::JoinHandle<()>>,
+    partition: Option<WHV_PARTITION_HANDLE>,
+    vcpu_index: u32,
+    shutdown_requested: Arc<AtomicBool>,
 }
 
 impl VcpuHandle {
     pub fn new(
+        event_sender: crossbeam_channel::Sender<VcpuEvent>,
+        response_receiver: crossbeam_channel::Receiver<VcpuResponse>,
+        vcpu_thread: std::thread::JoinHandle<()>,
+        partition: WHV_PARTITION_HANDLE,
+        vcpu_index: u32,
+        shutdown_requested: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            event_sender,
+            response_receiver,
+            vcpu_thread: Some(vcpu_thread),
+            partition: Some(partition),
+            vcpu_index,
+            shutdown_requested,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_for_test(
         event_sender: crossbeam_channel::Sender<VcpuEvent>,
         response_receiver: crossbeam_channel::Receiver<VcpuResponse>,
         vcpu_thread: std::thread::JoinHandle<()>,
@@ -1706,6 +1789,29 @@ impl VcpuHandle {
             event_sender,
             response_receiver,
             vcpu_thread: Some(vcpu_thread),
+            partition: None,
+            vcpu_index: 0,
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn request_shutdown(&self) {
+        if self.shutdown_requested.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let _ = self.event_sender.send(VcpuEvent::Shutdown);
+        if self
+            .vcpu_thread
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+        {
+            return;
+        }
+        if let Some(partition) = self.partition {
+            unsafe {
+                let _ = WHvCancelRunVirtualProcessor(partition, self.vcpu_index, 0);
+            }
         }
     }
 
@@ -1729,8 +1835,22 @@ impl VcpuHandle {
     }
 }
 
+impl Drop for VcpuHandle {
+    fn drop(&mut self) {
+        if self.vcpu_thread.is_none() {
+            return;
+        }
+
+        self.request_shutdown();
+        if let Some(thread) = self.vcpu_thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum VcpuEvent {
+    Shutdown,
     Pause,
     Resume,
 }
@@ -1781,7 +1901,7 @@ mod tests {
             }
         });
 
-        let handle = VcpuHandle::new(event_tx, response_rx, worker);
+        let handle = VcpuHandle::new_for_test(event_tx, response_rx, worker);
         handle.send_event(VcpuEvent::Resume).unwrap();
 
         let response = handle
@@ -1798,12 +1918,44 @@ mod tests {
         drop(event_rx);
 
         let worker = std::thread::spawn(|| {});
-        let handle = VcpuHandle::new(event_tx, response_rx, worker);
+        let handle = VcpuHandle::new_for_test(event_tx, response_rx, worker);
 
         assert!(matches!(
             handle.send_event(VcpuEvent::Pause),
             Err(Error::VcpuRun)
         ));
+    }
+
+    #[test]
+    fn test_vcpu_handle_shutdown_wakes_waiting_worker() {
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (_response_tx, response_rx) = crossbeam_channel::unbounded();
+        let worker_stopped = Arc::new(AtomicBool::new(false));
+        let worker_stopped_clone = worker_stopped.clone();
+        let worker = std::thread::spawn(move || {
+            if matches!(event_rx.recv(), Ok(VcpuEvent::Shutdown)) {
+                worker_stopped_clone.store(true, Ordering::Release);
+            }
+        });
+
+        let handle = VcpuHandle::new_for_test(event_tx, response_rx, worker);
+        handle.request_shutdown();
+        assert!(handle.shutdown_requested.load(Ordering::Acquire));
+        handle.join();
+        assert!(worker_stopped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_shutdown_wait_is_interruptible_without_whpx() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let signal = shutdown.clone();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            signal.store(true, Ordering::Release);
+        });
+
+        assert!(wait_for_shutdown(shutdown.as_ref(), Duration::from_secs(1)));
+        worker.join().unwrap();
     }
 
     #[test]
@@ -2015,6 +2167,79 @@ mod tests {
         // Join the thread before vm is dropped to avoid a race between
         // WHvDeleteVirtualProcessor (thread cleanup) and WHvDeletePartition (Vm::drop).
         handle.join();
+    }
+
+    fn run_whpx_hlt_lifecycle_cycle() {
+        const ENTRY_ADDR: u64 = 0x10000;
+        const MEM_SIZE: usize = 0x40_0000;
+
+        let mut vm = Vm::new(false, 1, false).unwrap();
+        let guest_mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MEM_SIZE)]).unwrap();
+        vm.memory_init(&guest_mem).unwrap();
+        guest_mem
+            .write_obj::<u8>(0xF4, GuestAddress(ENTRY_ADDR))
+            .unwrap();
+
+        let exit_evt = utils::eventfd::EventFd::new(utils::eventfd::EFD_NONBLOCK).unwrap();
+        let vcpu = Vcpu::new(
+            0,
+            vm.partition(),
+            guest_mem.clone(),
+            GuestAddress(ENTRY_ADDR),
+            devices::Bus::new(),
+            exit_evt,
+            None,
+            None,
+        )
+        .unwrap();
+        let handle = vcpu.start_threaded().unwrap();
+        handle.send_event(VcpuEvent::Resume).unwrap();
+        assert_eq!(
+            handle
+                .response_receiver()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            VcpuResponse::Resumed
+        );
+        assert_eq!(
+            handle
+                .response_receiver()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            VcpuResponse::Exited(FC_EXIT_CODE_OK)
+        );
+        handle.join();
+    }
+
+    fn current_process_handle_count() -> u32 {
+        use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+
+        let mut count = 0u32;
+        unsafe {
+            GetProcessHandleCount(GetCurrentProcess(), &mut count).unwrap();
+        }
+        count
+    }
+
+    #[test]
+    #[ignore = "Requires WHPX/Hyper-V available on host"]
+    fn test_whpx_in_process_handle_reclamation() {
+        // Warm up WinHvPlatform and the Rust runtime before taking the baseline;
+        // their one-time process handles are not VM leaks.
+        run_whpx_hlt_lifecycle_cycle();
+        let baseline = current_process_handle_count();
+        let mut peak = baseline;
+
+        for _ in 0..8 {
+            run_whpx_hlt_lifecycle_cycle();
+            peak = peak.max(current_process_handle_count());
+        }
+
+        let final_count = current_process_handle_count();
+        assert!(
+            final_count <= baseline + 2,
+            "WHPX lifecycle leaked process handles: baseline={baseline}, peak={peak}, final={final_count}"
+        );
     }
 
     #[test]
@@ -3447,18 +3672,11 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
-        // ── 12. Cancel vCPU if it has not yet exited ──────────────────────
-        // WHvCancelRunVirtualProcessor interrupts any in-flight
-        // WHvRunVirtualProcessor, causing it to return WHvRunVpExitReasonCanceled
-        // → VcpuExit::Shutdown → VcpuEmulation::Failed → thread exits.
+        // ── 12. Stop vCPU if it has not yet exited ────────────────────────
+        // Set the lifecycle shutdown flag before canceling the in-flight run.
+        // Interrupt-delivery cancellations without that flag must continue.
         if !vcpu_exited {
-            unsafe {
-                let _ = windows::Win32::System::Hypervisor::WHvCancelRunVirtualProcessor(
-                    vm.partition(),
-                    0, // vCPU index
-                    0, // flags (reserved, must be 0)
-                );
-            }
+            handle.request_shutdown();
             let _ = handle
                 .response_receiver()
                 .recv_timeout(std::time::Duration::from_secs(5));

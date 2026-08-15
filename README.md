@@ -380,12 +380,23 @@ diagnosis; disabling it can prevent current libkrunfw kernels from reaching
 userspace on WHPX. Fatal vCPU exits are returned as a non-zero runtime failure
 and are not treated as a successful guest shutdown.
 
+Windows embedders that set `LIBKRUN_WINDOWS_RETURN_ON_EXIT=1` receive the guest
+exit code from `krun_start_enter()` after libkrun has stopped and joined the
+vCPU, PIT, console, virtiofs, and vsock background tasks. WHPX virtual
+processors and the partition are destroyed before the call returns, allowing
+another VM to run in the same process without relying on process exit for
+resource reclamation.
+
 #### Running tests
 
 ```powershell
 # Requires Windows Hypervisor Platform; must use --test-threads=1
 cargo test -p vmm --target x86_64-pc-windows-msvc --lib -- test_whpx_ --ignored --test-threads=1
 ```
+
+The ignored suite includes `test_whpx_in_process_handle_reclamation`, which
+runs repeated VM lifecycles and verifies that the warmed process handle count
+returns to baseline.
 
 #### API differences from Linux/macOS
 
