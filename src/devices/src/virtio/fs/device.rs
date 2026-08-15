@@ -156,6 +156,21 @@ impl Fs {
     pub fn set_map_sender(&mut self, map_sender: Sender<WorkerMessage>) {
         self.map_sender = Some(map_sender);
     }
+
+    fn stop_worker(&mut self) {
+        if let Some(worker) = self.worker_thread.take() {
+            let _ = self.worker_stopfd.write(1);
+            if let Err(e) = worker.join() {
+                error!("error waiting for worker thread: {e:?}");
+            }
+        }
+    }
+}
+
+impl Drop for Fs {
+    fn drop(&mut self) {
+        self.stop_worker();
+    }
 }
 
 impl VirtioDevice for Fs {
@@ -259,12 +274,7 @@ impl VirtioDevice for Fs {
     }
 
     fn reset(&mut self) -> bool {
-        if let Some(worker) = self.worker_thread.take() {
-            let _ = self.worker_stopfd.write(1);
-            if let Err(e) = worker.join() {
-                error!("error waiting for worker thread: {e:?}");
-            }
-        }
+        self.stop_worker();
         self.device_state = DeviceState::Inactive;
         true
     }

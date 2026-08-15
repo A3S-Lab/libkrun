@@ -2986,6 +2986,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
     }
 
     #[cfg(target_arch = "x86_64")]
+    #[cfg(not(target_os = "windows"))]
     if ctx_cfg.vmr.split_irqchip {
         vmm::worker::start_worker_thread(_vmm.clone(), _receiver.clone()).unwrap();
     }
@@ -3009,12 +3010,16 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
                 vmm.take_host_return_exit_code()
             };
             if let Some(exit_code) = host_return_exit_code {
-                // The opt-in caller exits immediately after draining its
-                // host-side logs. Avoid running incomplete VMM teardown in this
-                // narrow return path; the process releases all resources
-                // moments later.
-                std::mem::forget(_vmm);
-                std::mem::forget(event_manager);
+                {
+                    let mut vmm = _vmm.lock().unwrap();
+                    vmm.shutdown();
+                }
+                // EventManager owns subscriber Arcs for the VMM and devices.
+                // Release those before the final VMM Arc so device worker
+                // threads and interrupt transports are destroyed while the
+                // WHPX partition is still valid.
+                drop(event_manager);
+                drop(_vmm);
                 return exit_code;
             }
         }

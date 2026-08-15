@@ -250,8 +250,9 @@ pub struct Vmm {
     kernel_cmdline: KernelCmdline,
 
     vcpus_handles: Vec<VcpuHandle>,
+    #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+    pit_timer: Option<builder::WindowsPitTimer>,
     exit_evt: EventFd,
-    vm: Vm,
     exit_observers: Vec<Arc<Mutex<dyn VmmExitObserver>>>,
     exit_code: Arc<AtomicI32>,
     #[cfg(target_os = "windows")]
@@ -261,6 +262,10 @@ pub struct Vmm {
     mmio_device_manager: MMIODeviceManager,
     #[cfg(target_arch = "x86_64")]
     pio_device_manager: PortIODeviceManager,
+
+    // The partition must outlive every vCPU, timer, interrupt controller, and
+    // device that can issue a WHPX call during teardown.
+    vm: Vm,
 }
 
 impl Vmm {
@@ -467,6 +472,21 @@ impl Vmm {
     #[cfg(target_os = "windows")]
     pub fn take_host_return_exit_code(&mut self) -> Option<i32> {
         self.host_return_exit_code.take()
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn shutdown(&mut self) {
+        for handle in &self.vcpus_handles {
+            handle.request_shutdown();
+        }
+        for handle in std::mem::take(&mut self.vcpus_handles) {
+            handle.join();
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if let Some(mut pit_timer) = self.pit_timer.take() {
+            pit_timer.shutdown();
+        }
     }
 
     /// Returns a reference to the inner KVM Vm object.

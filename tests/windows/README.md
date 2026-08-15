@@ -102,6 +102,11 @@ These run automatically in the `windows-build-and-tests` CI job on `windows-late
 
 ### WHPX smoke tests (`#[ignore]` — require Hyper-V/WHPX)
 
+`test_whpx_in_process_handle_reclamation` warms up WinHvPlatform, then creates,
+runs, joins, and destroys eight HLT-only VMs in the same process. It samples
+`GetProcessHandleCount` after every cycle and fails if the final handle count
+does not return to the warmed baseline within a two-handle runtime margin.
+
 These require a self-hosted runner with HyperV enabled and are only run manually
 via `workflow_dispatch`.  Run them with `--ignored --test-threads=1`.
 

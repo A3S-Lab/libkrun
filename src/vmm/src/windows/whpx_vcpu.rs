@@ -43,7 +43,7 @@
 
 use std::ffi::c_void;
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use utils::time::timestamp_cycles;
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
@@ -493,6 +493,7 @@ pub struct WhpxVcpu {
     pending_mmio_read: Option<PendingMmioRead>,
     pending_mmio_write: Option<PendingMmioWrite>,
     pending_interrupt: Option<PendingInterruptQueue>,
+    shutdown_requested: Arc<AtomicBool>,
     guest_mem: *const GuestMemoryMmap,
     hyperv_guest_os_id: AtomicU64,
     hyperv_hypercall: AtomicU64,
@@ -2286,6 +2287,7 @@ impl WhpxVcpu {
         partition: WHV_PARTITION_HANDLE,
         index: u32,
         pending_interrupt: Option<PendingInterruptQueue>,
+        shutdown_requested: Arc<AtomicBool>,
     ) -> io::Result<Self> {
         // SAFETY: We assume the caller has provided a valid partition handle.
         // The partition must remain valid for the lifetime of this vCPU (documented in struct).
@@ -2322,6 +2324,7 @@ impl WhpxVcpu {
             pending_mmio_read: None,
             pending_mmio_write: None,
             pending_interrupt,
+            shutdown_requested,
             guest_mem: std::ptr::null(),
             hyperv_guest_os_id: AtomicU64::new(0),
             hyperv_hypercall: AtomicU64::new(0),
@@ -2605,6 +2608,10 @@ impl WhpxVcpu {
         static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
         self.guest_mem = guest_mem;
         loop {
+            if self.shutdown_requested.load(Ordering::Acquire) {
+                return Ok(VcpuExit::Shutdown);
+            }
+
             let run_seq = RUN_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
             let queue_snapshot = self.pending_interrupt.as_ref().map(|queue| {
                 let guard = queue.lock().unwrap();
@@ -3344,9 +3351,19 @@ impl WhpxVcpu {
                 }
                 reason if reason == WHvRunVpExitReasonCanceled => {
                     // vCPU was interrupted by WHvCancelRunVirtualProcessor.
-                    // This is used to force interrupt delivery when the guest
-                    // is in a tight loop. Just continue execution.
+                    // Interrupt delivery cancellations resume execution, while
+                    // lifecycle cancellations terminate the run loop so the
+                    // owning thread can destroy the virtual processor before
+                    // the partition is released.
                     windows_exit_debug_log("canceled", exit_context.VpContext.Rip, "");
+                    if self.shutdown_requested.load(Ordering::Acquire) {
+                        windows_exit_debug_log(
+                            "canceled_shutdown",
+                            exit_context.VpContext.Rip,
+                            "shutdown_requested=true",
+                        );
+                        return Ok(VcpuExit::Shutdown);
+                    }
                     let can_inject_now = (exit_context.VpContext.Rflags & (1 << 9)) != 0;
                     if self.inject_pending_interrupt(
                         exit_context.VpContext.Rip,
