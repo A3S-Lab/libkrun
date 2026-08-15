@@ -65,7 +65,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: x86_64-pc-windows-msvc,x86_64-unknown-linux-musl
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
@@ -101,7 +101,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: x86_64-pc-windows-msvc,x86_64-unknown-linux-musl
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
@@ -136,7 +136,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: x86_64-pc-windows-msvc,x86_64-unknown-linux-musl
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
