@@ -15,7 +15,7 @@ use vm_memory::GuestMemoryMmap;
 use super::super::{FsError, Queue};
 use super::defs::{HPQ_INDEX, REQ_INDEX};
 use super::descriptor_utils::{Reader, Writer};
-use super::passthrough::PassthroughFs;
+use super::passthrough::{self, PassthroughFs};
 use super::server::Server;
 use crate::virtio::{InterruptTransport, VirtioShmRegion};
 
