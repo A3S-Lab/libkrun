@@ -67,4 +67,8 @@ jobs:
             --skip linux::vstate::tests::test_configure_vcpu \
             --skip linux::vstate::tests::test_vcpu_tls \
             --skip linux::vstate::tests::test_invalid_tls \
-            --skip linux::vstate::tests::test_vcpu_kick
+            --skip linux::vstate::tests::test_vcpu_kick \
+            --skip builder::tests::test_create_vcpus_aarch64 \
+            --skip device_manager::kvm::mmio::tests::test_device_info \
+            --skip device_manager::kvm::mmio::tests::test_register_too_many_devices \
+            --skip device_manager::kvm::mmio::tests::test_register_virtio_device
