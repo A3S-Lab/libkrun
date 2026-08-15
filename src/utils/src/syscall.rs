@@ -62,8 +62,8 @@ mod tests {
     }
 
     #[test]
-    fn test_into_result_large_negative() {
+    fn test_into_result_other_negative() {
         let code = SyscallReturnCode(-100);
-        assert!(code.into_result().is_err());
+        assert_eq!(code.into_result().unwrap(), -100);
     }
 }

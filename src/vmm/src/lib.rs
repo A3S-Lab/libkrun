@@ -555,9 +555,7 @@ mod tests {
         // We can at least verify the error variant exists and formats
         #[cfg(target_os = "linux")]
         {
-            use crate::linux::vstate::Error as VstateError;
-            // Create a mock error through debug formatting
-            let error = Error::Vm(crate::linux::vstate::Error::VmFdNotOpened);
+            let error = Error::Vm(crate::linux::vstate::Error::HTNotInitialized);
             let display = format!("{}", error);
             assert!(display.contains("Vm error"));
         }
@@ -567,7 +565,7 @@ mod tests {
     fn test_error_display_kvm_context() {
         #[cfg(target_os = "linux")]
         {
-            let error = Error::KvmContext(crate::linux::vstate::Error::KvmFdNotOpened);
+            let error = Error::KvmContext(crate::linux::vstate::Error::KvmApiVersion(0));
             let display = format!("{}", error);
             assert!(display.contains("Failed to validate KVM support"));
         }
@@ -577,7 +575,7 @@ mod tests {
     fn test_error_display_vcpu() {
         #[cfg(target_os = "linux")]
         {
-            let error = Error::Vcpu(crate::linux::vstate::Error::VcpuNotFound);
+            let error = Error::Vcpu(crate::linux::vstate::Error::VcpuCountNotInitialized);
             let display = format!("{}", error);
             assert!(display.contains("Vcpu error"));
         }
