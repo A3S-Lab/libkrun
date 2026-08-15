@@ -5,16 +5,16 @@ authors = ["Amazon Firecracker team <firecracker-devel@amazon.com>"]
 edition = "2021"
 
 [features]
-tee = []
-amd-sev = [ "blk", "bitfield", "bitflags", "iocuddle", "tee", "kbs-types", "serde", "serde_json" ]
-tdx = [ "blk", "tee", "kbs-types", "serde", "serde_json", "dep:tdx" ]
+tee = ["arch/tee", "devices/tee"]
+amd-sev = [ "blk", "bitfield", "bitflags", "iocuddle", "tee", "kbs-types", "serde", "serde_json", "arch/amd-sev", "devices/amd-sev" ]
+tdx = [ "blk", "tee", "kbs-types", "serde", "serde_json", "dep:tdx", "arch/tdx", "cpuid/tdx", "devices/tdx" ]
 net = [ "devices/net" ]
 blk = [ "devices/blk" ]
-efi = [ "blk", "net" ]
+efi = ["blk", "net", "arch/efi", "devices/efi"]
 gpu = ["krun_display", "devices/gpu"]
 snd = ["devices/snd"]
 input = ["krun_input"]
-nitro = []
+nitro = ["devices/nitro"]
 
 [dependencies]
 crossbeam-channel = ">=0.5.15"
