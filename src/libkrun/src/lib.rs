@@ -31,7 +31,7 @@ use std::ffi::{c_void, CStr};
 use std::fs::File;
 #[cfg(not(target_os = "windows"))]
 use std::io::IsTerminal;
-#[cfg(not(target_os = "windows"))]
+#[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "x86_64")))]
 use std::os::fd::AsRawFd;
 #[cfg(not(target_os = "windows"))]
 use std::os::fd::{BorrowedFd, FromRawFd, RawFd};

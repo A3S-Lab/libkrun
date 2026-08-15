@@ -2304,7 +2304,10 @@ pub fn build_microvm(
         Arc::new(VcpuList::new(cpu_count as u64))
     };
 
+    #[cfg(target_os = "windows")]
     let mut vcpus;
+    #[cfg(not(target_os = "windows"))]
+    let vcpus;
     let intc: IrqChip;
     #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
     let pit_timer: WindowsPitTimer;

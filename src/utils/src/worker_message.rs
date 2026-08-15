@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MemoryProperties {
     pub gpa: u64,
     pub size: u64,

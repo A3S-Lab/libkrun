@@ -58,7 +58,6 @@ jobs:
   windows-build-and-tests:
     name: Windows build and tests
     runs-on: windows-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -78,19 +77,15 @@ jobs:
 
       - name: Build check (Windows target)
         run: cargo check -p utils -p polly -p devices -p vmm -p libkrun --target x86_64-pc-windows-msvc
-        continue-on-error: true
 
       - name: Utils tests (Windows)
         run: cargo test -p utils --target x86_64-pc-windows-msvc --lib
-        continue-on-error: true
 
       - name: Polly tests
         run: cargo test -p polly --target x86_64-pc-windows-msvc --lib
-        continue-on-error: true
 
       - name: VMM tests (Windows)
         run: cargo test -p vmm --target x86_64-pc-windows-msvc --lib
-        continue-on-error: true
 
   windows-build-dll:
     name: Build krun.dll (Windows release)

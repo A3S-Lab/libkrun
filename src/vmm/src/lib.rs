@@ -68,6 +68,7 @@ use kernel::cmdline::Cmdline as KernelCmdline;
 use polly::event_manager::{self, EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::EventFd;
+#[cfg(target_os = "windows")]
 use vm_memory::Bytes;
 use vm_memory::GuestMemoryMmap;
 

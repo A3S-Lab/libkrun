@@ -79,6 +79,7 @@ mod tests {
 
     #[test]
     fn test_vec_with_array_field_simple() {
+        #[derive(Default)]
         #[repr(C)]
         struct Foo {
             header: u32,
@@ -90,6 +91,7 @@ mod tests {
 
     #[test]
     fn test_vec_with_array_field_zero_count() {
+        #[derive(Default)]
         #[repr(C)]
         struct Foo {
             header: u32,
@@ -101,6 +103,7 @@ mod tests {
 
     #[test]
     fn test_vec_with_array_field_large_count() {
+        #[derive(Default)]
         #[repr(C)]
         struct Foo {
             header: u32,
@@ -113,6 +116,7 @@ mod tests {
 
     #[test]
     fn test_vec_with_array_field_u8_entry() {
+        #[derive(Default)]
         #[repr(C)]
         struct Foo {
             header: u32,
@@ -125,6 +129,7 @@ mod tests {
     #[test]
     fn test_vec_with_array_field_multiple_types() {
         // Test with different F types
+        #[derive(Default)]
         #[repr(C)]
         struct Header {
             a: u32,
