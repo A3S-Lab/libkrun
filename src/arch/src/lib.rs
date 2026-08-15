@@ -6,7 +6,7 @@
 
 use std::result;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ArchMemoryInfo {
     #[cfg(target_arch = "x86_64")]
     pub ram_below_gap: u64,

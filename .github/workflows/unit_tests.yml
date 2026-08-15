@@ -36,5 +36,29 @@ jobs:
       - name: Create a fake init
         run: touch init/init
 
-      - name: Unit tests
-        run: cargo test --workspace --exclude libkrunfw-windows --exclude a3s-libkrun-sys
+      - name: Check KVM availability
+        id: kvm
+        run: |
+          if [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::ARM64 VMM unit tests will be compiled but not executed because this hosted runner does not expose /dev/kvm."
+            {
+              echo "### ARM64 VMM unit execution skipped"
+              echo
+              echo "The hosted runner does not expose a readable and writable /dev/kvm device."
+              echo "All non-VMM unit tests run normally, and the VMM unit-test target is still compiled."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Unit tests (non-VMM)
+        run: cargo test --workspace --exclude libkrunfw-windows --exclude a3s-libkrun-sys --exclude vmm
+
+      - name: VMM unit tests
+        if: steps.kvm.outputs.available == 'true'
+        run: cargo test -p vmm
+
+      - name: Compile VMM unit tests without KVM
+        if: steps.kvm.outputs.available != 'true'
+        run: cargo test -p vmm --no-run
