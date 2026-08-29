@@ -23,7 +23,11 @@ use std::os::fd::{BorrowedFd, FromRawFd};
 #[cfg(not(target_os = "windows"))]
 use std::path::PathBuf;
 use std::sync::atomic::AtomicI32;
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+use std::thread::JoinHandle;
 
 use super::{Error, Vmm};
 
@@ -191,28 +195,34 @@ struct WhpxIrqChip {
 
 #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
 pub(crate) struct WindowsPitTimer {
-    shutdown_requested: Arc<std::sync::atomic::AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
 impl WindowsPitTimer {
-    fn new(
-        shutdown_requested: Arc<std::sync::atomic::AtomicBool>,
-        thread: std::thread::JoinHandle<()>,
-    ) -> Self {
-        Self {
-            shutdown_requested,
-            thread: Some(thread),
-        }
+    fn spawn<F>(worker: F) -> io::Result<Self>
+    where
+        F: FnOnce(Arc<AtomicBool>) + Send + 'static,
+    {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let worker = std::thread::Builder::new()
+            .name("pit-timer".into())
+            .spawn(move || worker(worker_stop))?;
+
+        Ok(Self {
+            stop,
+            worker: Some(worker),
+        })
     }
 
-    pub(crate) fn shutdown(&mut self) {
-        self.shutdown_requested
-            .store(true, std::sync::atomic::Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            if thread.join().is_err() {
-                error!("PIT timer thread panicked during shutdown");
+    pub(crate) fn stop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            worker.thread().unpark();
+            if worker.join().is_err() {
+                warn!("PIT timer thread panicked during shutdown");
             }
         }
     }
@@ -221,27 +231,7 @@ impl WindowsPitTimer {
 #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
 impl Drop for WindowsPitTimer {
     fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
-#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
-fn windows_wait_for_shutdown(
-    shutdown_requested: &std::sync::atomic::AtomicBool,
-    timeout: std::time::Duration,
-) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    let poll_interval = std::time::Duration::from_millis(50);
-
-    loop {
-        if shutdown_requested.load(std::sync::atomic::Ordering::Acquire) {
-            return true;
-        }
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            return shutdown_requested.load(std::sync::atomic::Ordering::Acquire);
-        }
-        std::thread::sleep(remaining.min(poll_interval));
+        self.stop();
     }
 }
 
@@ -3368,16 +3358,14 @@ fn attach_legacy_devices(
     // PIT IRQ 0 timer thread (100 Hz).
     // On Windows, IRQ0 begins as a legacy PIC ExtINT via LAPIC LINT0 and later
     // migrates to IOAPIC delivery. Do not inject a blind fixed vector fallback.
-    let intc_clone = intc.clone();
-    let shutdown_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let timer_shutdown = shutdown_requested.clone();
-    let timer_thread = std::thread::Builder::new()
-        .name("pit-timer".into())
-        .spawn(move || {
+    let pit_timer = WindowsPitTimer::spawn(move |stop| {
             let mut last_route = "waiting";
             let mut count = 0u64;
 
             loop {
+                if stop.load(Ordering::Acquire) {
+                    break;
+                }
                 let route = if matches!(
                     devices::legacy::windows_apic_stub::query_route(0),
                     Some(route) if !route.masked && route.vector != 0
@@ -3423,10 +3411,8 @@ fn attach_legacy_devices(
                     last_route = route;
                 }
 
-                if windows_wait_for_shutdown(
-                    timer_shutdown.as_ref(),
-                    std::time::Duration::from_millis(10),
-                ) {
+                std::thread::park_timeout(std::time::Duration::from_millis(10));
+                if stop.load(Ordering::Acquire) {
                     break;
                 }
                 count += 1;
@@ -3442,7 +3428,16 @@ fn attach_legacy_devices(
                     ));
                 }
 
-                if let Err(e) = intc_clone.lock().unwrap().set_irq(Some(0), None) {
+                let irq_result = match intc.lock() {
+                    Ok(intc) => intc.set_irq(Some(0), None),
+                    Err(_) => {
+                        warn!(
+                            "PIT IRQ0 injection stopped because the interrupt controller lock was poisoned"
+                        );
+                        break;
+                    }
+                };
+                if let Err(e) = irq_result {
                     windows_irq_debug_log(format!(
                         "[PIT] set_irq_failed tick={} route={} err={:?}",
                         count, last_route, e
@@ -3474,7 +3469,7 @@ fn attach_legacy_devices(
 
     log::debug!("PIT timer thread started (100 Hz IRQ 0 routing)");
 
-    Ok(WindowsPitTimer::new(shutdown_requested, timer_thread))
+    Ok(pit_timer)
 }
 
 #[cfg(all(
@@ -4357,25 +4352,39 @@ pub mod tests {
 
     #[test]
     #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
-    fn windows_pit_timer_shutdown_joins_thread() {
-        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let thread_shutdown = shutdown.clone();
-        let thread_stopped = stopped.clone();
-        let thread = std::thread::spawn(move || {
-            if windows_wait_for_shutdown(
-                thread_shutdown.as_ref(),
-                std::time::Duration::from_secs(60),
-            ) {
-                thread_stopped.store(true, std::sync::atomic::Ordering::Release);
+    fn windows_pit_timer_stop_joins_worker() {
+        let worker_exited = Arc::new(AtomicBool::new(false));
+        let worker_exited_clone = worker_exited.clone();
+        let mut timer = WindowsPitTimer::spawn(move |stop| {
+            while !stop.load(Ordering::Acquire) {
+                std::thread::park_timeout(std::time::Duration::from_secs(60));
             }
-        });
-        let mut timer = WindowsPitTimer::new(shutdown, thread);
+            worker_exited_clone.store(true, Ordering::Release);
+        })
+        .unwrap();
 
-        timer.shutdown();
+        timer.stop();
 
-        assert!(stopped.load(std::sync::atomic::Ordering::Acquire));
-        assert!(timer.thread.is_none());
+        assert!(worker_exited.load(Ordering::Acquire));
+        assert!(timer.worker.is_none());
+    }
+
+    #[test]
+    #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+    fn windows_pit_timer_drop_joins_worker() {
+        let worker_exited = Arc::new(AtomicBool::new(false));
+        let worker_exited_clone = worker_exited.clone();
+        let timer = WindowsPitTimer::spawn(move |stop| {
+            while !stop.load(Ordering::Acquire) {
+                std::thread::park_timeout(std::time::Duration::from_secs(60));
+            }
+            worker_exited_clone.store(true, Ordering::Release);
+        })
+        .unwrap();
+
+        drop(timer);
+
+        assert!(worker_exited.load(Ordering::Acquire));
     }
 
     #[cfg(target_os = "linux")]
