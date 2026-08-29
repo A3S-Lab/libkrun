@@ -47,6 +47,7 @@ The Windows WHPX backend currently depends on an x86_64 Linux kernel that:
 
 - supports `virtio_mmio.device=` command-line discovery
 - supports the legacy x86 `_MP_` parsing path used by the current Windows boot flow
+- implements NUMA policy syscalls used by OCI `linux.memoryPolicy`
 - includes the required virtio drivers as built-in drivers, not loadable modules
 
 The file must be a little-endian x86_64 ET_EXEC ELF. Its bounded PT_LOAD ranges
@@ -58,10 +59,14 @@ The minimum config requirements enforced by `src/libkrunfw-win/build.rs` are:
 - `CONFIG_VIRTIO_MMIO=y`
 - `CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y`
 - `CONFIG_X86_MPPARSE=y`
+- `CONFIG_NUMA=y`
 
 The repository also provides the config fragment used for local builds:
 
 `src/libkrunfw-win/kernel/config-wsl-libkrun-x86_64.fragment`
+
+For an official libkrunfw v5.5.0 generic x86_64 base, use the smaller
+`src/libkrunfw-win/kernel/config-libkrunfw-numa-x86_64.fragment` instead.
 
 ## Recommended source
 
@@ -155,7 +160,7 @@ If the kernel tree provides `scripts/extract-ikconfig`, use:
 
 ```bash
 scripts/extract-ikconfig vmlinux | grep -E \
-  'CONFIG_VIRTIO_MMIO=|CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=|CONFIG_X86_MPPARSE='
+  'CONFIG_NUMA=|CONFIG_VIRTIO_MMIO=|CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=|CONFIG_X86_MPPARSE='
 ```
 
 Expected output:
@@ -164,6 +169,7 @@ Expected output:
 CONFIG_VIRTIO_MMIO=y
 CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y
 CONFIG_X86_MPPARSE=y
+CONFIG_NUMA=y
 ```
 
 If `extract-ikconfig` is unavailable, keep `CONFIG_IKCONFIG=y` and
@@ -225,6 +231,11 @@ Windows backend.
 
 The guest does not parse the legacy `_MP_` table used by the current Windows
 boot path, which breaks LAPIC/PIT based bring-up.
+
+### Missing `CONFIG_NUMA=y`
+
+OCI memory-policy requests fail with `ENOSYS` because the guest kernel omits
+the NUMA policy syscall implementation.
 
 ### Built `bzImage` instead of `vmlinux`
 

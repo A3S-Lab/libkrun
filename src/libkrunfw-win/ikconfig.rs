@@ -4,6 +4,20 @@ const IKCFG_START: &[u8] = b"IKCFG_ST";
 const IKCFG_END: &[u8] = b"IKCFG_ED";
 
 pub const MAX_IKCONFIG_BYTES: u64 = 4 * 1024 * 1024;
+pub const REQUIRED_WINDOWS_CONFIGS: &[&str] = &[
+    "CONFIG_NUMA=y",
+    "CONFIG_VIRTIO_MMIO=y",
+    "CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y",
+    "CONFIG_X86_MPPARSE=y",
+];
+
+pub fn missing_required_configs(config: &str) -> Vec<&'static str> {
+    REQUIRED_WINDOWS_CONFIGS
+        .iter()
+        .copied()
+        .filter(|required| !config.lines().any(|line| line.trim() == *required))
+        .collect()
+}
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
@@ -93,5 +107,16 @@ mod tests {
         assert!(read_bounded_utf8(Cursor::new([0xff]), 16)
             .unwrap_err()
             .contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn requires_numa_and_whpx_boot_settings() {
+        let config = "\
+CONFIG_VIRTIO_MMIO=y\n\
+CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y\n\
+CONFIG_X86_MPPARSE=y\n";
+
+        assert_eq!(missing_required_configs(config), ["CONFIG_NUMA=y"]);
+        assert!(missing_required_configs(&format!("{config}CONFIG_NUMA=y\n")).is_empty());
     }
 }

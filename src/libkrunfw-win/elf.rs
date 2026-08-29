@@ -170,8 +170,23 @@ pub fn validate_elf(kernel: &[u8]) -> Result<ValidatedElf, String> {
             .checked_add(mem_size)
             .ok_or_else(|| format!("PT_LOAD segment {index} virtual range overflows u64"))?;
 
-        if flags & PF_X != 0 && raw_entry >= virt_addr && raw_entry < virt_end {
-            let entry_offset = raw_entry - virt_addr;
+        let virtual_entry_offset =
+            (flags & PF_X != 0 && raw_entry >= virt_addr && raw_entry < virt_end)
+                .then(|| raw_entry - virt_addr);
+        let physical_entry_offset =
+            (flags & PF_X != 0 && raw_entry >= guest_addr && raw_entry < guest_end)
+                .then(|| raw_entry - guest_addr);
+        let entry_offset = match (virtual_entry_offset, physical_entry_offset) {
+            (Some(virtual_offset), Some(physical_offset)) if virtual_offset != physical_offset => {
+                return Err(format!(
+                    "kernel ELF entry point maps ambiguously through virtual and guest addresses of executable PT_LOAD segment {index}"
+                ));
+            }
+            (Some(offset), _) | (_, Some(offset)) => Some(offset),
+            (None, None) => None,
+        };
+
+        if let Some(entry_offset) = entry_offset {
             if entry_offset >= file_size_u64 {
                 return Err(format!(
                     "kernel ELF entry point falls in non-file-backed memory of executable PT_LOAD segment {index}"
@@ -324,6 +339,26 @@ mod tests {
         assert_eq!(validated.segments[0].file_offset, 256);
         assert_eq!(validated.segments[0].file_size, 4);
         assert_eq!(validated.segments[0].destination_offset, 0);
+    }
+
+    #[test]
+    fn accepts_a_file_backed_physical_kernel_entry() {
+        let mut elf = valid_test_elf();
+        elf[24..32].copy_from_slice(&0x0100_0002_u64.to_le_bytes());
+
+        let validated = validate_elf(&elf).unwrap();
+
+        assert_eq!(validated.entry_addr, 0x0100_0002);
+    }
+
+    #[test]
+    fn rejects_a_physical_kernel_entry_in_zero_filled_memory() {
+        let mut elf = valid_test_elf();
+        elf[24..32].copy_from_slice(&0x0100_0006_u64.to_le_bytes());
+
+        let error = validate_elf(&elf).unwrap_err();
+
+        assert!(error.contains("non-file-backed memory"));
     }
 
     #[test]
