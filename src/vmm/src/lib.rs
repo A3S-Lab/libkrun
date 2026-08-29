@@ -486,7 +486,7 @@ impl Vmm {
 
         #[cfg(target_arch = "x86_64")]
         if let Some(mut pit_timer) = self.pit_timer.take() {
-            pit_timer.shutdown();
+            pit_timer.stop();
         }
     }
 
