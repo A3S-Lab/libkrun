@@ -1,30 +1,41 @@
-// libkrunfw.dll — Windows companion for libkrun
+// libkrunfw.dll - Windows companion for libkrun.
 //
-// Bundles a pre-built x86_64 Linux kernel as an ELF `vmlinux` and exports
-// krunfw_get_kernel() so libkrun can discover and load it automatically
-// without the caller needing to call krun_set_kernel().
-//
-// libkrun's kernel-bundle ABI expects a single contiguous, page-aligned host
-// buffer laid out exactly as guest physical memory should look. The bundled
-// kernel here is a normal ELF file, so on first use we parse its PT_LOAD
-// segments, flatten them into one contiguous guest-physical image, and keep
-// that prepared buffer alive for the lifetime of the process.
+// ELF parsing and raw metadata validation happen in build.rs. The build emits
+// only bounded, validated copy descriptors and addresses for this runtime, so
+// krunfw_get_kernel() never has to interpret untrusted kernel bytes.
 
 use std::alloc::{alloc_zeroed, Layout};
 use std::ffi::c_char;
+use std::ptr;
 use std::sync::OnceLock;
 
-static KERNEL_ELF: &[u8] = include_bytes!("../kernel/vmlinux");
+const GUEST_LOAD_ALIGNMENT: u64 = 4096;
 
-const PT_LOAD: u32 = 1;
+static KERNEL_IMAGE: &[u8] = include_bytes!(env!("LIBKRUNFW_EMBEDDED_KERNEL_PATH"));
 
-struct LoadSegment {
+#[derive(Clone, Copy, Debug)]
+struct EmbeddedLoadSegment {
     file_offset: usize,
     file_size: usize,
-    mem_size: usize,
-    guest_addr: u64,
-    virt_addr: u64,
+    destination_offset: usize,
 }
+
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+enum EmbeddedKernelSource {
+    Elf {
+        guest_load_addr: u64,
+        entry_addr: u64,
+        image_size: usize,
+        segments: &'static [EmbeddedLoadSegment],
+    },
+    RawBundle {
+        guest_load_addr: u64,
+        entry_addr: u64,
+    },
+}
+
+include!(concat!(env!("OUT_DIR"), "/kernel_source_generated.rs"));
 
 struct PreparedKernel {
     guest_addr: u64,
@@ -33,162 +44,244 @@ struct PreparedKernel {
     ptr: usize,
 }
 
-static PREPARED_KERNEL: OnceLock<PreparedKernel> = OnceLock::new();
+type PrepareResult = Result<PreparedKernel, &'static str>;
+static PREPARED_KERNEL: OnceLock<PrepareResult> = OnceLock::new();
 
-fn read_u16_le(bytes: &[u8], offset: usize) -> u16 {
-    let end = offset + 2;
-    u16::from_le_bytes(bytes[offset..end].try_into().expect("short ELF u16"))
+fn valid_guest_load_address(address: u64) -> bool {
+    address != 0 && address & (GUEST_LOAD_ALIGNMENT - 1) == 0
 }
 
-fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
-    let end = offset + 4;
-    u32::from_le_bytes(bytes[offset..end].try_into().expect("short ELF u32"))
-}
-
-fn read_u64_le(bytes: &[u8], offset: usize) -> u64 {
-    let end = offset + 8;
-    u64::from_le_bytes(bytes[offset..end].try_into().expect("short ELF u64"))
-}
-
-fn translate_entry_addr(seg: &LoadSegment, raw_entry: u64) -> Option<u64> {
-    let virt_end = seg.virt_addr + seg.mem_size as u64;
-    if seg.virt_addr != 0 && raw_entry >= seg.virt_addr && raw_entry < virt_end {
-        Some(seg.guest_addr + (raw_entry - seg.virt_addr))
-    } else {
-        None
+fn allocate_page_aligned(size: usize) -> Result<*mut u8, &'static str> {
+    if size == 0 {
+        return Err("kernel image is empty");
     }
+    let layout =
+        Layout::from_size_align(size, 4096).map_err(|_| "kernel allocation size is invalid")?;
+    let pointer = unsafe { alloc_zeroed(layout) };
+    if pointer.is_null() {
+        return Err("page-aligned kernel allocation failed");
+    }
+    Ok(pointer)
 }
 
-fn parse_load_segments() -> (Vec<LoadSegment>, u64) {
-    assert!(KERNEL_ELF.len() >= 64, "libkrunfw: ELF image too small");
-    assert_eq!(
-        &KERNEL_ELF[0..4],
-        b"\x7FELF",
-        "libkrunfw: invalid ELF magic"
-    );
-    assert_eq!(KERNEL_ELF[4], 2, "libkrunfw: expected ELF64 kernel");
-    assert_eq!(KERNEL_ELF[5], 1, "libkrunfw: expected little-endian kernel");
-
-    let entry = read_u64_le(KERNEL_ELF, 24);
-    let phoff = read_u64_le(KERNEL_ELF, 32) as usize;
-    let phentsize = read_u16_le(KERNEL_ELF, 54) as usize;
-    let phnum = read_u16_le(KERNEL_ELF, 56) as usize;
-
-    assert!(
-        phentsize >= 56,
-        "libkrunfw: unexpected ELF program header size"
-    );
-
-    let mut segments = Vec::new();
-    for idx in 0..phnum {
-        let off = phoff + idx * phentsize;
-        let p_type = read_u32_le(KERNEL_ELF, off);
-        if p_type != PT_LOAD {
-            continue;
-        }
-
-        let file_offset = read_u64_le(KERNEL_ELF, off + 8) as usize;
-        let virt_addr = read_u64_le(KERNEL_ELF, off + 16);
-        let guest_addr = read_u64_le(KERNEL_ELF, off + 24);
-        let file_size = read_u64_le(KERNEL_ELF, off + 32) as usize;
-        let mem_size = read_u64_le(KERNEL_ELF, off + 40) as usize;
-
-        if mem_size == 0 {
-            continue;
-        }
-
-        assert!(
-            file_offset + file_size <= KERNEL_ELF.len(),
-            "libkrunfw: PT_LOAD segment exceeds ELF image"
-        );
-
-        segments.push(LoadSegment {
-            file_offset,
-            file_size,
-            mem_size,
-            guest_addr,
-            virt_addr,
-        });
+fn prepare_validated_elf(
+    kernel_elf: &[u8],
+    guest_load_addr: u64,
+    entry_addr: u64,
+    image_size: usize,
+    segments: &[EmbeddedLoadSegment],
+) -> PrepareResult {
+    if !valid_guest_load_address(guest_load_addr) {
+        return Err("generated ELF guest load address is not 4096-byte aligned");
+    }
+    if entry_addr == 0 || segments.is_empty() {
+        return Err("generated ELF metadata is incomplete");
     }
 
-    assert!(
-        !segments.is_empty(),
-        "libkrunfw: ELF image does not contain any PT_LOAD segments"
-    );
-
-    (segments, entry)
-}
-
-fn prepare_kernel() -> &'static PreparedKernel {
-    PREPARED_KERNEL.get_or_init(|| {
-        let (segments, raw_entry) = parse_load_segments();
-
-        let min_guest = segments
-            .iter()
-            .map(|seg| seg.guest_addr)
-            .min()
-            .expect("libkrunfw: missing PT_LOAD guest start");
-        let max_guest = segments
-            .iter()
-            .map(|seg| seg.guest_addr + seg.mem_size as u64)
-            .max()
-            .expect("libkrunfw: missing PT_LOAD guest end");
-        let image_size = (max_guest - min_guest) as usize;
-
-        let layout = Layout::from_size_align(image_size, 4096)
-            .expect("libkrunfw: failed to build allocation layout");
-        let ptr = unsafe { alloc_zeroed(layout) };
-        assert!(!ptr.is_null(), "libkrunfw: page-aligned allocation failed");
-
-        for seg in &segments {
-            let dst = unsafe { ptr.add((seg.guest_addr - min_guest) as usize) };
-            let src = &KERNEL_ELF[seg.file_offset..seg.file_offset + seg.file_size];
-            unsafe {
-                std::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
-            }
+    for segment in segments {
+        let source_end = segment
+            .file_offset
+            .checked_add(segment.file_size)
+            .ok_or("generated ELF source range overflows usize")?;
+        if source_end > kernel_elf.len() {
+            return Err("generated ELF source range exceeds embedded image");
         }
-
-        let entry_addr = segments
-            .iter()
-            .find_map(|seg| translate_entry_addr(seg, raw_entry))
-            .unwrap_or(raw_entry);
-
-        PreparedKernel {
-            guest_addr: min_guest,
-            entry_addr,
-            size: image_size,
-            ptr: ptr as usize,
+        let destination_end = segment
+            .destination_offset
+            .checked_add(segment.file_size)
+            .ok_or("generated ELF destination range overflows usize")?;
+        if destination_end > image_size {
+            return Err("generated ELF destination range exceeds guest image");
         }
+    }
+
+    let pointer = allocate_page_aligned(image_size)?;
+    for segment in segments {
+        let source = &kernel_elf[segment.file_offset..segment.file_offset + segment.file_size];
+        unsafe {
+            ptr::copy_nonoverlapping(
+                source.as_ptr(),
+                pointer.add(segment.destination_offset),
+                source.len(),
+            );
+        }
+    }
+
+    Ok(PreparedKernel {
+        guest_addr: guest_load_addr,
+        entry_addr,
+        size: image_size,
+        ptr: pointer as usize,
     })
 }
 
+fn prepare_validated_raw(
+    raw_bundle: &[u8],
+    guest_load_addr: u64,
+    entry_addr: u64,
+) -> PrepareResult {
+    if !valid_guest_load_address(guest_load_addr) {
+        return Err("generated raw bundle guest load address is not 4096-byte aligned");
+    }
+    if entry_addr == 0 {
+        return Err("generated raw bundle metadata is incomplete");
+    }
+    let pointer = allocate_page_aligned(raw_bundle.len())?;
+    unsafe {
+        ptr::copy_nonoverlapping(raw_bundle.as_ptr(), pointer, raw_bundle.len());
+    }
+    Ok(PreparedKernel {
+        guest_addr: guest_load_addr,
+        entry_addr,
+        size: raw_bundle.len(),
+        ptr: pointer as usize,
+    })
+}
+
+fn initialize_kernel() -> PrepareResult {
+    match KERNEL_SOURCE {
+        EmbeddedKernelSource::Elf {
+            guest_load_addr,
+            entry_addr,
+            image_size,
+            segments,
+        } => prepare_validated_elf(
+            KERNEL_IMAGE,
+            guest_load_addr,
+            entry_addr,
+            image_size,
+            segments,
+        ),
+        EmbeddedKernelSource::RawBundle {
+            guest_load_addr,
+            entry_addr,
+        } => prepare_validated_raw(KERNEL_IMAGE, guest_load_addr, entry_addr),
+    }
+}
+
+fn prepare_kernel() -> Option<&'static PreparedKernel> {
+    PREPARED_KERNEL.get_or_init(initialize_kernel).as_ref().ok()
+}
+
 #[no_mangle]
+/// Returns the process-lifetime kernel bundle and writes its guest metadata.
+///
+/// # Safety
+///
+/// Each non-null output pointer must be properly aligned and valid for one
+/// write of its pointed-to type. Null output pointers are rejected safely.
 pub unsafe extern "C" fn krunfw_get_kernel(
     guest_addr: *mut u64,
     entry_addr: *mut u64,
     size: *mut usize,
 ) -> *const c_char {
-    let kernel = prepare_kernel();
-    *guest_addr = kernel.guest_addr;
-    *entry_addr = kernel.entry_addr;
-    *size = kernel.size;
+    if guest_addr.is_null() || entry_addr.is_null() || size.is_null() {
+        return ptr::null();
+    }
+
+    let Some(kernel) = prepare_kernel() else {
+        return ptr::null();
+    };
+    unsafe {
+        *guest_addr = kernel.guest_addr;
+        *entry_addr = kernel.entry_addr;
+        *size = kernel.size;
+    }
     kernel.ptr as *const c_char
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{translate_entry_addr, LoadSegment};
+    use super::*;
+
+    const TEST_SEGMENT: EmbeddedLoadSegment = EmbeddedLoadSegment {
+        file_offset: 2,
+        file_size: 4,
+        destination_offset: 1,
+    };
 
     #[test]
-    fn entry_translation_is_lazy_for_non_matching_segments() {
-        let seg = LoadSegment {
-            file_offset: 0,
-            file_size: 0,
-            mem_size: 0x1000,
-            guest_addr: 0x0010_0000,
-            virt_addr: 0xffff_ffff_8100_0000,
+    fn prepares_only_build_validated_elf_copy_descriptors() {
+        let prepared = prepare_validated_elf(
+            &[9, 9, 1, 2, 3, 4],
+            0x0100_0000,
+            0x0100_0002,
+            8,
+            &[TEST_SEGMENT],
+        )
+        .unwrap();
+        assert_eq!(prepared.guest_addr, 0x0100_0000);
+        assert_eq!(prepared.entry_addr, 0x0100_0002);
+        assert_eq!(prepared.size, 8);
+        let flattened =
+            unsafe { std::slice::from_raw_parts(prepared.ptr as *const u8, prepared.size) };
+        assert_eq!(flattened, &[0, 1, 2, 3, 4, 0, 0, 0]);
+    }
+
+    #[test]
+    fn rejects_invalid_generated_descriptor_without_panicking() {
+        let invalid = EmbeddedLoadSegment {
+            file_offset: usize::MAX,
+            file_size: 2,
+            destination_offset: 0,
+        };
+        assert!(prepare_validated_elf(&[1, 2], 0x0100_0000, 0x0100_0001, 2, &[invalid]).is_err());
+    }
+
+    #[test]
+    fn rejects_unaligned_generated_guest_address_without_panicking() {
+        assert_eq!(
+            prepare_validated_elf(&[1, 2, 3, 4], 1, 3, 4, &[TEST_SEGMENT]).err(),
+            Some("generated ELF guest load address is not 4096-byte aligned")
+        );
+        assert_eq!(
+            prepare_validated_raw(&[1, 2, 3, 4], 1, 3).err(),
+            Some("generated raw bundle guest load address is not 4096-byte aligned")
+        );
+    }
+
+    #[test]
+    fn prepares_validated_raw_bundle_without_interpreting_bytes() {
+        let raw = [1_u8, 2, 3, 4];
+        let prepared = prepare_validated_raw(&raw, 0x0100_0000, 0x0100_0123).unwrap();
+        assert_eq!(prepared.guest_addr, 0x0100_0000);
+        assert_eq!(prepared.entry_addr, 0x0100_0123);
+        assert_eq!(prepared.size, raw.len());
+        let copied = unsafe { std::slice::from_raw_parts(prepared.ptr as *const u8, raw.len()) };
+        assert_eq!(copied, raw);
+    }
+
+    #[test]
+    fn exported_bundle_uses_generated_build_time_metadata() {
+        let (expected_guest, expected_entry, expected_size) = match KERNEL_SOURCE {
+            EmbeddedKernelSource::Elf {
+                guest_load_addr,
+                entry_addr,
+                image_size,
+                ..
+            } => (guest_load_addr, entry_addr, image_size),
+            EmbeddedKernelSource::RawBundle {
+                guest_load_addr,
+                entry_addr,
+            } => (guest_load_addr, entry_addr, KERNEL_IMAGE.len()),
         };
 
-        assert_eq!(translate_entry_addr(&seg, 0x0010_0000), None);
+        let mut exported_guest = 0;
+        let mut exported_entry = 0;
+        let mut exported_size = 0;
+        let pointer = unsafe {
+            krunfw_get_kernel(&mut exported_guest, &mut exported_entry, &mut exported_size)
+        };
+        assert!(!pointer.is_null());
+        assert_eq!(exported_guest, expected_guest);
+        assert_eq!(exported_entry, expected_entry);
+        assert_eq!(exported_size, expected_size);
+    }
+
+    #[test]
+    fn exported_function_rejects_null_outputs() {
+        let pointer =
+            unsafe { krunfw_get_kernel(ptr::null_mut(), ptr::null_mut(), ptr::null_mut()) };
+        assert!(pointer.is_null());
     }
 }

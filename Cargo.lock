@@ -913,6 +913,8 @@ name = "libkrunfw-windows"
 version = "5.0.0"
 dependencies = [
  "flate2",
+ "libc",
+ "sha2",
 ]
 
 [[package]]

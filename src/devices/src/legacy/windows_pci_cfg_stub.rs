@@ -33,15 +33,7 @@ impl Default for PciConfigIoStub {
 
 impl PciConfigIoStub {
     fn debug_log(message: impl AsRef<str>) {
-        use std::io::Write;
-
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(r"C:\Users\18770\.a3s\libkrun-whpx-io-current.log")
-        {
-            let _ = writeln!(file, "{}", message.as_ref());
-        }
+        utils::windows_debug_log("whpx-io.log", message);
     }
 
     pub fn new() -> Self {

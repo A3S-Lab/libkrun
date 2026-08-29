@@ -1,6 +1,7 @@
 [workspace]
 members = ["src/libkrun", "src/krun_input", "src/libkrunfw-win", "krun-sys-windows"]
-exclude = ["examples/gtk_display"]
+default-members = ["src/libkrun", "src/krun_input"]
+exclude = ["examples/gtk_display", "corresponding-source/2692169"]
 resolver = "2"
 
 [profile.dev]

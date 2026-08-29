@@ -1,116 +1,143 @@
 /*
- * extract_kernel.c
+ * Extract the already-prepared kernel bundle exported by libkrunfw.
  *
- * Load libkrunfw.so, call krunfw_get_kernel(), and write:
- *   - kernel/vmlinux   (raw kernel bytes)
- *   - kernel/addrs.rs  (Rust constants for guest_addr and entry_addr)
+ * The returned bytes are not an ELF vmlinux. They are a flattened guest-memory
+ * image, so the load and entry addresses exported by the same library must stay
+ * attached to it as metadata.
  *
  * Build:
- *   gcc -o extract_kernel extract_kernel.c -ldl
+ *   cc -std=c11 -Wall -Wextra -Werror -o extract_kernel extract_kernel.c -ldl
  *
  * Usage:
- *   ./extract_kernel <path-to-libkrunfw.so>
+ *   ./extract_kernel <libkrunfw.so> <raw-output> <metadata-output>
  */
 
 #include <dlfcn.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
-typedef char *(*krunfw_get_kernel_fn)(uint64_t *, uint64_t *, size_t *);
+typedef char *(*krunfw_get_kernel_fn)(size_t *, size_t *, size_t *);
 
-static int makedirs(const char *path) {
-    char tmp[4096];
-    strncpy(tmp, path, sizeof(tmp) - 1);
-    char *p = strrchr(tmp, '/');
-    if (p) {
-        *p = '\0';
-        /* best-effort mkdir -p */
-        char cmd[4200];
-        snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", tmp);
-        system(cmd);
+static int close_checked(FILE *file, const char *description) {
+    if (fclose(file) != 0) {
+        fprintf(stderr, "failed to close %s\n", description);
+        return -1;
     }
     return 0;
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <path-to-libkrunfw.so>\n", argv[0]);
+    if (argc != 4) {
+        fprintf(stderr,
+                "Usage: %s <path-to-libkrunfw.so> <raw-output> "
+                "<metadata-output>\n",
+                argv[0]);
+        return 2;
+    }
+    if (sizeof(size_t) != sizeof(uint64_t)) {
+        fprintf(stderr, "extract_kernel requires a 64-bit host\n");
         return 1;
     }
 
     const char *lib_path = argv[1];
-
-    void *lib = dlopen(lib_path, RTLD_LAZY);
-    if (!lib) {
+    const char *raw_path = argv[2];
+    const char *metadata_path = argv[3];
+    void *library = dlopen(lib_path, RTLD_NOW | RTLD_LOCAL);
+    if (library == NULL) {
         fprintf(stderr, "dlopen(%s) failed: %s\n", lib_path, dlerror());
         return 1;
     }
 
-    krunfw_get_kernel_fn get_kernel =
-        (krunfw_get_kernel_fn)dlsym(lib, "krunfw_get_kernel");
-    if (!get_kernel) {
-        fprintf(stderr, "dlsym(krunfw_get_kernel) failed: %s\n", dlerror());
-        dlclose(lib);
+    dlerror();
+    void *symbol = dlsym(library, "krunfw_get_kernel");
+    const char *symbol_error = dlerror();
+    if (symbol_error != NULL || symbol == NULL) {
+        fprintf(stderr, "dlsym(krunfw_get_kernel) failed: %s\n",
+                symbol_error != NULL ? symbol_error : "symbol is null");
+        dlclose(library);
+        return 1;
+    }
+    if (sizeof(symbol) != sizeof(krunfw_get_kernel_fn)) {
+        fprintf(stderr, "object and function pointers have incompatible sizes\n");
+        dlclose(library);
         return 1;
     }
 
-    uint64_t guest_addr = 0, entry_addr = 0;
-    size_t size = 0;
-    char *kernel_ptr = get_kernel(&guest_addr, &entry_addr, &size);
+    krunfw_get_kernel_fn get_kernel = NULL;
+    memcpy(&get_kernel, &symbol, sizeof(get_kernel));
 
-    if (!kernel_ptr || size == 0) {
-        fprintf(stderr, "krunfw_get_kernel returned null or zero size\n");
-        dlclose(lib);
+    size_t guest_load_addr = 0;
+    size_t entry_addr = 0;
+    size_t bundle_size = 0;
+    char *bundle = get_kernel(&guest_load_addr, &entry_addr, &bundle_size);
+    if (bundle == NULL || bundle_size == 0) {
+        fprintf(stderr, "krunfw_get_kernel returned a null or empty bundle\n");
+        dlclose(library);
+        return 1;
+    }
+    if (guest_load_addr == 0 || (guest_load_addr % 4096) != 0 ||
+        entry_addr == 0 || (bundle_size % 4096) != 0) {
+        fprintf(stderr,
+                "krunfw_get_kernel returned invalid alignment/address metadata: "
+                "load=0x%" PRIx64 " entry=0x%" PRIx64 " size=%zu\n",
+                (uint64_t)guest_load_addr, (uint64_t)entry_addr, bundle_size);
+        dlclose(library);
+        return 1;
+    }
+    if ((uint64_t)guest_load_addr > UINT64_MAX - (uint64_t)bundle_size) {
+        fprintf(stderr, "kernel bundle guest address range overflows u64\n");
+        dlclose(library);
         return 1;
     }
 
-    printf("kernel: guest_addr=0x%lx  entry_addr=0x%lx  size=%zu bytes (%.1f MB)\n",
-           (unsigned long)guest_addr, (unsigned long)entry_addr,
-           size, (double)size / 1048576.0);
-
-    /* ---- write kernel/vmlinux ---- */
-    makedirs("kernel/vmlinux");
-    FILE *f = fopen("kernel/vmlinux", "wb");
-    if (!f) {
-        perror("fopen kernel/vmlinux");
-        dlclose(lib);
+    FILE *raw_file = fopen(raw_path, "wb");
+    if (raw_file == NULL) {
+        perror("cannot open raw kernel bundle output");
+        dlclose(library);
         return 1;
     }
-    if (fwrite(kernel_ptr, 1, size, f) != size) {
-        perror("fwrite kernel/vmlinux");
-        fclose(f);
-        dlclose(lib);
+    if (fwrite(bundle, 1, bundle_size, raw_file) != bundle_size) {
+        perror("cannot write raw kernel bundle");
+        fclose(raw_file);
+        dlclose(library);
         return 1;
     }
-    fclose(f);
-    printf("wrote kernel/vmlinux (%zu bytes)\n", size);
-
-    /* ---- write kernel/addrs.rs ---- */
-    f = fopen("kernel/addrs.rs", "w");
-    if (!f) {
-        perror("fopen kernel/addrs.rs");
-        dlclose(lib);
+    if (close_checked(raw_file, "raw kernel bundle") != 0) {
+        dlclose(library);
         return 1;
     }
-    fprintf(f,
-        "// Kernel guest physical load address and entry point.\n"
-        "//\n"
-        "// !! THIS FILE IS AUTO-GENERATED by scripts/extract_kernel.sh !!\n"
-        "// !! Do not edit manually — re-run the script to regenerate.   !!\n"
-        "//\n"
-        "// Extracted from: %s\n"
-        "\n"
-        "pub const KERNEL_GUEST_ADDR: u64 = 0x%lx;\n"
-        "pub const KERNEL_ENTRY_ADDR: u64 = 0x%lx;\n",
-        lib_path,
-        (unsigned long)guest_addr,
-        (unsigned long)entry_addr);
-    fclose(f);
-    printf("wrote kernel/addrs.rs\n");
 
-    dlclose(lib);
+    FILE *metadata_file = fopen(metadata_path, "wb");
+    if (metadata_file == NULL) {
+        perror("cannot open raw bundle metadata output");
+        dlclose(library);
+        return 1;
+    }
+    int written = fprintf(
+        metadata_file,
+        "format=libkrunfw-raw-bundle-v1\n"
+        "generator=scripts/extract_kernel.c\n"
+        "guest_load_addr=0x%016" PRIx64 "\n"
+        "entry_addr=0x%016" PRIx64 "\n"
+        "bundle_size=%zu\n",
+        (uint64_t)guest_load_addr, (uint64_t)entry_addr, bundle_size);
+    if (written < 0) {
+        perror("cannot write raw bundle metadata");
+        fclose(metadata_file);
+        dlclose(library);
+        return 1;
+    }
+    if (close_checked(metadata_file, "raw bundle metadata") != 0) {
+        dlclose(library);
+        return 1;
+    }
+
+    printf("extracted raw kernel bundle: load=0x%" PRIx64
+           " entry=0x%" PRIx64 " size=%zu bytes\n",
+           (uint64_t)guest_load_addr, (uint64_t)entry_addr, bundle_size);
+    dlclose(library);
     return 0;
 }

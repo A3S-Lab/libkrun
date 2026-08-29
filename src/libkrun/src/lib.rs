@@ -22,6 +22,7 @@ use rand::distr::{Alphanumeric, SampleString};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::convert::TryInto;
+#[cfg(not(target_os = "windows"))]
 use std::env;
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
@@ -30,7 +31,7 @@ use std::ffi::{c_void, CStr};
 use std::fs::File;
 #[cfg(not(target_os = "windows"))]
 use std::io::IsTerminal;
-#[cfg(not(target_os = "windows"))]
+#[cfg(any(target_os = "linux", all(target_os = "macos", target_arch = "x86_64")))]
 use std::os::fd::AsRawFd;
 #[cfg(not(target_os = "windows"))]
 use std::os::fd::{BorrowedFd, FromRawFd, RawFd};
@@ -115,15 +116,7 @@ static KRUNFW: LazyLock<Option<libloading::Library>> =
 
 #[cfg(target_os = "windows")]
 fn windows_boot_debug_log(message: impl AsRef<str>) {
-    use std::io::Write;
-
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(r"C:\Users\18770\.a3s\libkrun-boot-current.log")
-    {
-        let _ = writeln!(file, "{}", message.as_ref());
-    }
+    utils::windows_debug_log("boot.log", message);
 }
 
 pub struct KrunfwBindings {
@@ -2993,6 +2986,7 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
     }
 
     #[cfg(target_arch = "x86_64")]
+    #[cfg(not(target_os = "windows"))]
     if ctx_cfg.vmr.split_irqchip {
         vmm::worker::start_worker_thread(_vmm.clone(), _receiver.clone()).unwrap();
     }
@@ -3016,12 +3010,16 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
                 vmm.take_host_return_exit_code()
             };
             if let Some(exit_code) = host_return_exit_code {
-                // The opt-in caller exits immediately after draining its
-                // host-side logs. Avoid running incomplete VMM teardown in this
-                // narrow return path; the process releases all resources
-                // moments later.
-                std::mem::forget(_vmm);
-                std::mem::forget(event_manager);
+                {
+                    let mut vmm = _vmm.lock().unwrap();
+                    vmm.shutdown();
+                }
+                // EventManager owns subscriber Arcs for the VMM and devices.
+                // Release those before the final VMM Arc so device worker
+                // threads and interrupt transports are destroyed while the
+                // WHPX partition is still valid.
+                drop(event_manager);
+                drop(_vmm);
                 return exit_code;
             }
         }

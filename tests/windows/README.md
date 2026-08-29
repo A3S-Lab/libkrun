@@ -14,6 +14,13 @@ This directory contains helper scripts for Windows WHPX integration smoke tests.
 - Emits `summary.json` for machine-readable CI parsing.
 - Includes runner identity and git SHA in metadata/summary outputs.
 
+The generated rootfs is a placeholder used to exercise test orchestration; it
+does not prove that a Linux userspace command ran. Release qualification must
+also boot a real, checksum-pinned rootfs, run a guest command, and verify a
+guest-written marker on the host. A zero `krun_start_enter` result alone is not
+sufficient evidence because the marker distinguishes workload completion from
+an early VMM shutdown.
+
 Usage example:
 
 ```powershell
@@ -94,6 +101,11 @@ These run automatically in the `windows-build-and-tests` CI job on `windows-late
 | `test_whpx_stdin_reader_smoke` | `WindowsStdinInput`: empty buffer returns 0 bytes; EventFd fd is valid |
 
 ### WHPX smoke tests (`#[ignore]` — require Hyper-V/WHPX)
+
+`test_whpx_in_process_handle_reclamation` warms up WinHvPlatform, then creates,
+runs, joins, and destroys eight HLT-only VMs in the same process. It samples
+`GetProcessHandleCount` after every cycle and fails if the final handle count
+does not return to the warmed baseline within a two-handle runtime margin.
 
 These require a self-hosted runner with HyperV enabled and are only run manually
 via `workflow_dispatch`.  Run them with `--ignored --test-threads=1`.
@@ -190,18 +202,18 @@ Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
 
 ```powershell
 rustup target add x86_64-pc-windows-msvc
+winget install --id zig.zig --exact --version 0.16.0
 ```
 
 ### Run individual tests locally
 
 ```powershell
-# Clone and switch to the branch
+# Clone the revision under test
 git clone https://github.com/A3S-Lab/libkrun.git
 cd libkrun
-git checkout chore/windows-ci-smoke-validation
 
-# Create the fake init required by the build
-New-Item -ItemType File -Path "init/init" -Force
+# Build the real, stripped Linux init payload required by the build
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-init.ps1
 
 # Run only the HLT boot test (synchronous path)
 cargo test -p vmm --target x86_64-pc-windows-msvc --lib test_whpx_vm_hlt_boot -- --ignored --test-threads=1
@@ -232,6 +244,11 @@ cargo test -p vmm --target x86_64-pc-windows-msvc --lib -- windows::
 > **Note:** `--test-threads=1` is required. WHPX has system-level limits on the
 > number of concurrent partitions and GPA mappings; running tests in parallel
 > causes `WHvMapGpaRange` failures and access violations.
+
+Host-side debug files are opt-in. Set
+`LIBKRUN_WINDOWS_DEBUG_LOG_DIR` to an explicit directory before launching the
+test process when diagnostics are needed; by default libkrun writes no host
+debug log files. The environment variable is read once per process.
 
 ### Run via the smoke script
 

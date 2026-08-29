@@ -17,20 +17,7 @@ fn windows_pic_debug_log(message: impl AsRef<str>) {
     }) {
         return;
     }
-    use std::io::Write;
-
-    for path in [
-        r"C:\Users\18770\.a3s\libkrun-whpx-io-current.log",
-        "tmp_whpx_io.log",
-    ] {
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(file, "{}", message.as_ref());
-        }
-    }
+    utils::windows_debug_log("whpx-io.log", message);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

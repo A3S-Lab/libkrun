@@ -23,6 +23,8 @@ test-prefix
 
 # libkrunfw-win: kernel binary fetched at build time, not committed
 src/libkrunfw-win/kernel/vmlinux
+src/libkrunfw-win/kernel/kernel.bundle
+src/libkrunfw-win/kernel/kernel.bundle.metadata
 # Test logs
 test_*.log
 trace.log

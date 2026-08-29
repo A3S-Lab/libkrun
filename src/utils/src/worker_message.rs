@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MemoryProperties {
     pub gpa: u64,
     pub size: u64,
@@ -34,8 +34,8 @@ mod tests {
         };
         let debug_str = format!("{:?}", props);
         assert!(debug_str.contains("MemoryProperties"));
-        assert!(debug_str.contains("0x1000"));
-        assert!(debug_str.contains("0x2000"));
+        assert!(debug_str.contains("gpa: 4096"));
+        assert!(debug_str.contains("size: 8192"));
         assert!(debug_str.contains("private"));
     }
 

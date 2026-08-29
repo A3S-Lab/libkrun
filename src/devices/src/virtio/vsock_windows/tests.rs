@@ -85,3 +85,19 @@ fn splits_host_stream_reads_to_fit_guest_rx_descriptors() {
         .collect::<Vec<_>>();
     assert_eq!(reconstructed, expected);
 }
+
+#[test]
+fn drop_stops_and_joins_background_tasks() {
+    let stopped = Arc::new(AtomicBool::new(false));
+    let task_stopped = stopped.clone();
+    let vsock = Vsock::new(3, None, None, TsiFlags::empty()).expect("create vsock");
+    vsock.spawn_background_task("vsock-shutdown-test".to_string(), move |shutdown| {
+        if wait_for_background_shutdown(shutdown.as_ref(), Duration::from_secs(60)) {
+            task_stopped.store(true, Ordering::Release);
+        }
+    });
+
+    drop(vsock);
+
+    assert!(stopped.load(Ordering::Acquire));
+}

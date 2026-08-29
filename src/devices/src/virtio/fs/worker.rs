@@ -8,9 +8,6 @@ use std::os::fd::AsRawFd;
 use std::sync::atomic::AtomicI32;
 use std::sync::Arc;
 use std::thread;
-#[cfg(target_os = "windows")]
-use std::{fs::OpenOptions, io::Write};
-
 use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
 use utils::eventfd::EventFd;
 use vm_memory::GuestMemoryMmap;
@@ -39,14 +36,7 @@ fn fs_worker_debug_log(message: impl AsRef<str>) {
     }
     let message = message.as_ref();
     eprintln!("[VIRTIOFS-WORKER] {message}");
-    for path in [
-        r"C:\Users\18770\.a3s\libkrun-virtiofs-device.log",
-        r"D:\code\libkrun\tmp_virtiofs_device.log",
-    ] {
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(file, "{message}");
-        }
-    }
+    utils::windows_debug_log("virtiofs-device.log", message);
 }
 
 pub struct FsWorker {

@@ -45,18 +45,7 @@ pub struct EventManager {
 
 #[cfg(target_os = "windows")]
 fn windows_event_manager_debug_log(message: impl AsRef<str>) {
-    use std::fs::OpenOptions;
-    use std::io::Write;
-
-    let message = message.as_ref();
-    for path in [
-        r"C:\Users\18770\.a3s\libkrun-event-manager.log",
-        r"D:\code\libkrun\tmp_event_manager.log",
-    ] {
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(file, "{message}");
-        }
-    }
+    utils::windows_debug_log("event-manager.log", message);
 }
 
 impl EventManager {

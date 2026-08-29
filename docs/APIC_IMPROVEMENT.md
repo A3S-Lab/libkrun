@@ -212,7 +212,7 @@ fn write(&mut self, _base: u64, offset: u64, data: &[u8]) {
 
 ### 1. 编译
 ```bash
-cd D:\code\libkrun
+cd C:\path\to\libkrun
 cargo build --release --example test_kernel_boot
 ```
 

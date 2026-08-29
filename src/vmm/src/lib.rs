@@ -68,20 +68,13 @@ use kernel::cmdline::Cmdline as KernelCmdline;
 use polly::event_manager::{self, EventManager, Subscriber};
 use utils::epoll::{EpollEvent, EventSet};
 use utils::eventfd::EventFd;
+#[cfg(target_os = "windows")]
 use vm_memory::Bytes;
 use vm_memory::GuestMemoryMmap;
 
 #[cfg(target_os = "windows")]
 fn windows_vmm_debug_log(message: impl AsRef<str>) {
-    use std::io::Write;
-
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(r"C:\Users\18770\.a3s\libkrun-whpx-exit-current.log")
-    {
-        let _ = writeln!(file, "{}", message.as_ref());
-    }
+    utils::windows_debug_log("whpx-exit.log", message);
 }
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
@@ -258,8 +251,9 @@ pub struct Vmm {
     kernel_cmdline: KernelCmdline,
 
     vcpus_handles: Vec<VcpuHandle>,
+    #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+    pit_timer: Option<builder::WindowsPitTimer>,
     exit_evt: EventFd,
-    vm: Vm,
     exit_observers: Vec<Arc<Mutex<dyn VmmExitObserver>>>,
     exit_code: Arc<AtomicI32>,
     #[cfg(target_os = "windows")]
@@ -269,6 +263,10 @@ pub struct Vmm {
     mmio_device_manager: MMIODeviceManager,
     #[cfg(target_arch = "x86_64")]
     pio_device_manager: PortIODeviceManager,
+
+    // The partition must outlive every vCPU, timer, interrupt controller, and
+    // device that can issue a WHPX call during teardown.
+    vm: Vm,
 }
 
 impl Vmm {
@@ -477,6 +475,21 @@ impl Vmm {
         self.host_return_exit_code.take()
     }
 
+    #[cfg(target_os = "windows")]
+    pub fn shutdown(&mut self) {
+        for handle in &self.vcpus_handles {
+            handle.request_shutdown();
+        }
+        for handle in std::mem::take(&mut self.vcpus_handles) {
+            handle.join();
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if let Some(mut pit_timer) = self.pit_timer.take() {
+            pit_timer.shutdown();
+        }
+    }
+
     /// Returns a reference to the inner KVM Vm object.
     pub fn kvm_vm(&self) -> &Vm {
         &self.vm
@@ -542,9 +555,7 @@ mod tests {
         // We can at least verify the error variant exists and formats
         #[cfg(target_os = "linux")]
         {
-            use crate::linux::vstate::Error as VstateError;
-            // Create a mock error through debug formatting
-            let error = Error::Vm(crate::linux::vstate::Error::VmFdNotOpened);
+            let error = Error::Vm(crate::linux::vstate::Error::HTNotInitialized);
             let display = format!("{}", error);
             assert!(display.contains("Vm error"));
         }
@@ -554,7 +565,7 @@ mod tests {
     fn test_error_display_kvm_context() {
         #[cfg(target_os = "linux")]
         {
-            let error = Error::KvmContext(crate::linux::vstate::Error::KvmFdNotOpened);
+            let error = Error::KvmContext(crate::linux::vstate::Error::KvmApiVersion(0));
             let display = format!("{}", error);
             assert!(display.contains("Failed to validate KVM support"));
         }
@@ -564,7 +575,7 @@ mod tests {
     fn test_error_display_vcpu() {
         #[cfg(target_os = "linux")]
         {
-            let error = Error::Vcpu(crate::linux::vstate::Error::VcpuNotFound);
+            let error = Error::Vcpu(crate::linux::vstate::Error::VcpuCountNotInitialized);
             let display = format!("{}", error);
             assert!(display.contains("Vcpu error"));
         }

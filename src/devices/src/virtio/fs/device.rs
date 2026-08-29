@@ -1,8 +1,6 @@
 #[cfg(target_os = "macos")]
 use crossbeam_channel::Sender;
 use std::cmp;
-#[cfg(target_os = "windows")]
-use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -40,14 +38,7 @@ fn fs_device_debug_log(message: impl AsRef<str>) {
     }
     let message = message.as_ref();
     eprintln!("[VIRTIOFS-DEV] {message}");
-    for path in [
-        r"C:\Users\18770\.a3s\libkrun-virtiofs-device.log",
-        r"D:\code\libkrun\tmp_virtiofs_device.log",
-    ] {
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(file, "{message}");
-        }
-    }
+    utils::windows_debug_log("virtiofs-device.log", message);
 }
 
 #[derive(Copy, Clone)]
@@ -165,6 +156,21 @@ impl Fs {
     pub fn set_map_sender(&mut self, map_sender: Sender<WorkerMessage>) {
         self.map_sender = Some(map_sender);
     }
+
+    fn stop_worker(&mut self) {
+        if let Some(worker) = self.worker_thread.take() {
+            let _ = self.worker_stopfd.write(1);
+            if let Err(e) = worker.join() {
+                error!("error waiting for worker thread: {e:?}");
+            }
+        }
+    }
+}
+
+impl Drop for Fs {
+    fn drop(&mut self) {
+        self.stop_worker();
+    }
 }
 
 impl VirtioDevice for Fs {
@@ -268,12 +274,7 @@ impl VirtioDevice for Fs {
     }
 
     fn reset(&mut self) -> bool {
-        if let Some(worker) = self.worker_thread.take() {
-            let _ = self.worker_stopfd.write(1);
-            if let Err(e) = worker.join() {
-                error!("error waiting for worker thread: {e:?}");
-            }
-        }
+        self.stop_worker();
         self.device_state = DeviceState::Inactive;
         true
     }

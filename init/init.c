@@ -3,9 +3,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,7 +57,8 @@ char DEFAULT_KRUN_INIT[] = "/bin/sh";
 
 static bool is_internal_exec_arg(const char *arg)
 {
-    return strcmp(arg, "tsi_hijack") == 0 || strcmp(arg, "tsi_hijack_unix") == 0;
+    return strcmp(arg, "tsi_hijack") == 0 ||
+           strcmp(arg, "tsi_hijack_unix") == 0;
 }
 
 static char **sanitize_exec_argv(int argc, char **argv, char *exec0)
@@ -163,7 +164,8 @@ static void import_cmdline_env_if_needed(void)
     ssize_t len;
     int imported = 0;
 
-    for (size_t i = 0; i < sizeof(required_env) / sizeof(required_env[0]); i++) {
+    for (size_t i = 0; i < sizeof(required_env) / sizeof(required_env[0]);
+         i++) {
         if (!getenv(required_env[i])) {
             need_import = true;
             break;
@@ -1289,9 +1291,11 @@ int main(int argc, char **argv)
     debug_log("init.krun: mount_filesystems ok");
     console_trace("init.krun: mount_filesystems ok");
     import_cmdline_env_if_needed();
-    console_trace("init.krun: after cmdline env import KRUN_INIT=%s KRUN_INIT_PID1=%s BOX_EXEC_EXEC=%s",
+    console_trace("init.krun: after cmdline env import KRUN_INIT=%s "
+                  "KRUN_INIT_PID1=%s BOX_EXEC_EXEC=%s",
                   getenv("KRUN_INIT") ? getenv("KRUN_INIT") : "<null>",
-                  getenv("KRUN_INIT_PID1") ? getenv("KRUN_INIT_PID1") : "<null>",
+                  getenv("KRUN_INIT_PID1") ? getenv("KRUN_INIT_PID1")
+                                           : "<null>",
                   getenv("BOX_EXEC_EXEC") ? getenv("BOX_EXEC_EXEC") : "<null>");
 
     krun_root = getenv("KRUN_BLOCK_ROOT_DEVICE");
@@ -1306,7 +1310,8 @@ int main(int argc, char **argv)
 
         if (try_mount(krun_root, "/newroot", krun_root_fstype, 0,
                       krun_root_options) < 0) {
-            debug_log("init.krun: try_mount(%s) failed errno=%d", krun_root, errno);
+            debug_log("init.krun: try_mount(%s) failed errno=%d", krun_root,
+                      errno);
             perror("mount KRUN_BLOCK_ROOT_DEVICE");
             exit(-1);
         }
@@ -1332,7 +1337,9 @@ int main(int argc, char **argv)
 
         // we must mount filesystems again after chrooting
         if (mount_filesystems() < 0) {
-            debug_log("init.krun: post-chroot mount_filesystems failed errno=%d", errno);
+            debug_log(
+                "init.krun: post-chroot mount_filesystems failed errno=%d",
+                errno);
             printf("Couldn't mount filesystems, bailing out\n");
             exit(-2);
         }
@@ -1389,13 +1396,15 @@ int main(int argc, char **argv)
     env_workdir = getenv("KRUN_WORKDIR");
     if (env_workdir) {
         if (chdir(env_workdir) < 0) {
-            debug_log("init.krun: chdir(%s) failed errno=%d", env_workdir, errno);
+            debug_log("init.krun: chdir(%s) failed errno=%d", env_workdir,
+                      errno);
         } else {
             debug_log("init.krun: chdir(%s) ok", env_workdir);
         }
     } else if (config_workdir) {
         if (chdir(config_workdir) < 0) {
-            debug_log("init.krun: chdir(config=%s) failed errno=%d", config_workdir, errno);
+            debug_log("init.krun: chdir(config=%s) failed errno=%d",
+                      config_workdir, errno);
         } else {
             debug_log("init.krun: chdir(config=%s) ok", config_workdir);
         }
@@ -1415,7 +1424,8 @@ int main(int argc, char **argv)
     }
 
     env_strip_internal_args = getenv("KRUN_STRIP_INTERNAL_ARGS");
-    if (env_strip_internal_args && *env_strip_internal_args == '1' && exec_argv == argv) {
+    if (env_strip_internal_args && *env_strip_internal_args == '1' &&
+        exec_argv == argv) {
         char **filtered_argv = sanitize_exec_argv(argc, argv, exec_argv[0]);
         if (filtered_argv) {
             exec_argv = filtered_argv;
@@ -1444,7 +1454,8 @@ int main(int argc, char **argv)
         debug_log("init.krun: exec_argv[%d]=%s", argi, exec_argv[argi]);
     }
     for (int envi = 0; environ && environ[envi]; envi++) {
-        if (strncmp(environ[envi], "LD_", 3) == 0 || strstr(environ[envi], "tsi") != NULL) {
+        if (strncmp(environ[envi], "LD_", 3) == 0 ||
+            strstr(environ[envi], "tsi") != NULL) {
             debug_log("init.krun: environ[%d]=%s", envi, environ[envi]);
         }
     }
@@ -1478,7 +1489,8 @@ int main(int argc, char **argv)
         console_trace("init.krun: execvp(%s) starting", exec_argv[0]);
         if (execvp(exec_argv[0], exec_argv) < 0) {
             saved_errno = errno;
-            debug_log("init.krun: execvp(%s) failed errno=%d", exec_argv[0], saved_errno);
+            debug_log("init.krun: execvp(%s) failed errno=%d", exec_argv[0],
+                      saved_errno);
             console_trace("init.krun: execvp(%s) failed errno=%d", exec_argv[0],
                           saved_errno);
             printf("Couldn't execute '%s' inside the vm: %s\n", exec_argv[0],

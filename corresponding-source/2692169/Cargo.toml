@@ -3,7 +3,6 @@ name = "libkrunfw-windows"
 version = "5.0.0"
 edition = "2021"
 description = "Windows companion library for libkrun: bundles a pre-built x86_64 Linux kernel"
-publish = false
 
 # On Windows MSVC: produces libkrunfw.dll + libkrunfw.lib (import library)
 # On Windows GNU:  produces libkrunfw.dll
@@ -14,5 +13,3 @@ crate-type = ["cdylib"]
 
 [build-dependencies]
 flate2 = "1.1"
-libc = "0.2"
-sha2 = "0.10"

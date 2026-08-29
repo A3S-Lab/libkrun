@@ -43,7 +43,7 @@
 
 use std::ffi::c_void;
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use utils::time::timestamp_cycles;
 use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
@@ -76,23 +76,12 @@ use windows::Win32::System::Hypervisor::{
 };
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
+use super::hyperv_enlightenments_enabled;
 use super::interrupts::{PendingInterrupt, PendingInterruptQueue};
 use super::registers::{
     get_virtual_processor_registers as WHvGetVirtualProcessorRegisters,
     set_virtual_processor_registers as WHvSetVirtualProcessorRegisters,
 };
-
-fn windows_hyperv_enlightenments_enabled() -> bool {
-    static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var("LIBKRUN_WINDOWS_HYPERV_ENLIGHTENMENTS")
-            .map(|v| {
-                let v = v.trim();
-                v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
-            })
-            .unwrap_or(false)
-    })
-}
 
 fn windows_io_debug_enabled() -> bool {
     static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -330,20 +319,7 @@ fn windows_io_debug_log(message: impl AsRef<str>) {
     if !windows_io_debug_enabled() {
         return;
     }
-    use std::io::Write;
-
-    for path in [
-        r"C:\Users\18770\.a3s\libkrun-whpx-io-current.log",
-        "tmp_whpx_io.log",
-    ] {
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(file, "{}", message.as_ref());
-        }
-    }
+    utils::windows_debug_log("whpx-io.log", message);
 }
 
 fn measured_tsc_hz() -> u64 {
@@ -489,6 +465,9 @@ pub enum VcpuEmulation {
     /// The VM should stop execution.
     Stopped,
 
+    /// The VM stopped because the VMM could not continue safely.
+    Failed,
+
     /// The CPU is halted.
     Halted,
 }
@@ -514,6 +493,7 @@ pub struct WhpxVcpu {
     pending_mmio_read: Option<PendingMmioRead>,
     pending_mmio_write: Option<PendingMmioWrite>,
     pending_interrupt: Option<PendingInterruptQueue>,
+    shutdown_requested: Arc<AtomicBool>,
     guest_mem: *const GuestMemoryMmap,
     hyperv_guest_os_id: AtomicU64,
     hyperv_hypercall: AtomicU64,
@@ -2081,20 +2061,16 @@ impl WhpxVcpu {
             // Leaf 0x1: when Hyper-V enlightenments are disabled, explicitly
             // clear the "hypervisor present" bit so Linux stays on the native
             // x86 path instead of probing an incomplete Hyper-V ABI.
-            0x1 if !windows_hyperv_enlightenments_enabled() => (
+            0x1 if !hyperv_enlightenments_enabled() => (
                 cpuid.DefaultResultRax,
                 cpuid.DefaultResultRbx,
                 cpuid.DefaultResultRcx & !(1u64 << 31),
                 cpuid.DefaultResultRdx,
             ),
-            // Leaf 0x40000000+: optional Hyper-V enlightenments.
-            // Keep this disabled for now; exposing an incomplete Hyper-V surface
-            // (vendor leaves without the full MSR/hypercall contract) sends the
-            // guest into a partially paravirtualized path that regressed boot.
-            0x40000000..=0x40000006 if !windows_hyperv_enlightenments_enabled() => {
-                (0u64, 0u64, 0u64, 0u64)
-            }
-            0x40000000..=0x40000006 if windows_hyperv_enlightenments_enabled() => {
+            // Leaf 0x40000000+: Hyper-V enlightenments are boot-safe by
+            // default, but retain an explicit opt-out for diagnostics.
+            0x40000000..=0x40000006 if !hyperv_enlightenments_enabled() => (0u64, 0u64, 0u64, 0u64),
+            0x40000000..=0x40000006 if hyperv_enlightenments_enabled() => {
                 guest_hyperv_cpuid(function)
             }
             // Leaf 0x15: Time Stamp Counter and Nominal Core Crystal Clock.
@@ -2121,10 +2097,7 @@ impl WhpxVcpu {
             ),
         };
 
-        if windows_hyperv_enlightenments_enabled()
-            && function >= 0x40000000
-            && function <= 0x40000006
-        {
+        if hyperv_enlightenments_enabled() && function >= 0x40000000 && function <= 0x40000006 {
             windows_io_debug_log(format!(
                 "[CPUID] 0x{:08x}: eax=0x{:x} ebx=0x{:x} ecx=0x{:x} edx=0x{:x}",
                 function, rax, rbx, rcx, rdx
@@ -2314,6 +2287,7 @@ impl WhpxVcpu {
         partition: WHV_PARTITION_HANDLE,
         index: u32,
         pending_interrupt: Option<PendingInterruptQueue>,
+        shutdown_requested: Arc<AtomicBool>,
     ) -> io::Result<Self> {
         // SAFETY: We assume the caller has provided a valid partition handle.
         // The partition must remain valid for the lifetime of this vCPU (documented in struct).
@@ -2350,6 +2324,7 @@ impl WhpxVcpu {
             pending_mmio_read: None,
             pending_mmio_write: None,
             pending_interrupt,
+            shutdown_requested,
             guest_mem: std::ptr::null(),
             hyperv_guest_os_id: AtomicU64::new(0),
             hyperv_hypercall: AtomicU64::new(0),
@@ -2633,6 +2608,10 @@ impl WhpxVcpu {
         static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
         self.guest_mem = guest_mem;
         loop {
+            if self.shutdown_requested.load(Ordering::Acquire) {
+                return Ok(VcpuExit::Shutdown);
+            }
+
             let run_seq = RUN_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
             let queue_snapshot = self.pending_interrupt.as_ref().map(|queue| {
                 let guard = queue.lock().unwrap();
@@ -3372,9 +3351,19 @@ impl WhpxVcpu {
                 }
                 reason if reason == WHvRunVpExitReasonCanceled => {
                     // vCPU was interrupted by WHvCancelRunVirtualProcessor.
-                    // This is used to force interrupt delivery when the guest
-                    // is in a tight loop. Just continue execution.
+                    // Interrupt delivery cancellations resume execution, while
+                    // lifecycle cancellations terminate the run loop so the
+                    // owning thread can destroy the virtual processor before
+                    // the partition is released.
                     windows_exit_debug_log("canceled", exit_context.VpContext.Rip, "");
+                    if self.shutdown_requested.load(Ordering::Acquire) {
+                        windows_exit_debug_log(
+                            "canceled_shutdown",
+                            exit_context.VpContext.Rip,
+                            "shutdown_requested=true",
+                        );
+                        return Ok(VcpuExit::Shutdown);
+                    }
                     let can_inject_now = (exit_context.VpContext.Rflags & (1 << 9)) != 0;
                     if self.inject_pending_interrupt(
                         exit_context.VpContext.Rip,

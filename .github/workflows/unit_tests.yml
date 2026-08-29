@@ -22,11 +22,11 @@ jobs:
           sudo usermod -a -G kvm $USER
 
       - name: Unit tests
-        run: cargo test
+        run: cargo test --workspace --exclude libkrunfw-windows --exclude a3s-libkrun-sys
 
   unit-tests-linux-aarch64:
     name: Unit tests (Linux aarch64)
-    runs-on: self-hosted
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
@@ -36,6 +36,39 @@ jobs:
       - name: Create a fake init
         run: touch init/init
 
-      - name: Unit tests
-        run: cargo test
+      - name: Check KVM availability
+        id: kvm
+        run: |
+          if [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::ARM64 KVM-backed unit tests will be compiled but not executed because this hosted runner does not expose /dev/kvm."
+            {
+              echo "### ARM64 KVM-backed unit execution skipped"
+              echo
+              echo "The hosted runner does not expose a readable and writable /dev/kvm device."
+              echo "All other unit tests run normally, and the filtered Arch and VMM cases are still compiled."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
+      - name: Unit tests with KVM
+        if: steps.kvm.outputs.available == 'true'
+        run: cargo test --workspace --exclude libkrunfw-windows --exclude a3s-libkrun-sys
+
+      - name: Unit tests without KVM execution
+        if: steps.kvm.outputs.available != 'true'
+        run: |
+          cargo test --workspace --exclude libkrunfw-windows --exclude a3s-libkrun-sys -- \
+            --skip aarch64::linux::regs::tests::test_setup_regs \
+            --skip aarch64::linux::regs::tests::test_read_mpidr \
+            --skip linux::vstate::tests::test_set_mmio_bus \
+            --skip linux::vstate::tests::test_vm_memory_init \
+            --skip linux::vstate::tests::test_configure_vcpu \
+            --skip linux::vstate::tests::test_vcpu_tls \
+            --skip linux::vstate::tests::test_invalid_tls \
+            --skip linux::vstate::tests::test_vcpu_kick \
+            --skip builder::tests::test_create_vcpus_aarch64 \
+            --skip device_manager::kvm::mmio::tests::test_device_info \
+            --skip device_manager::kvm::mmio::tests::test_register_too_many_devices \
+            --skip device_manager::kvm::mmio::tests::test_register_virtio_device

@@ -264,7 +264,7 @@ impl VsockMuxer {
         }
     }
 
-    pub fn update_polling(&self, id: u64, fd: RawFd, evset: EventSet) {
+    pub fn update_polling(&self, id: u64, fd: RawFdType, evset: EventSet) {
         debug!("update_polling id={id} fd={fd:?} evset={evset:?}");
         let _ = self
             .epoll

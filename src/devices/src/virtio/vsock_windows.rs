@@ -3,9 +3,9 @@ use std::collections::VecDeque;
 use std::io;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
-use std::path::Path;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -125,6 +125,24 @@ pub struct Vsock {
     connect_timeout_ms: u64, // Configurable connection timeout
     defer_control_rx: bool,
     tsi_flags: TsiFlags,
+    background_shutdown: Arc<AtomicBool>,
+    background_tasks: Mutex<Vec<thread::JoinHandle<()>>>,
+}
+
+fn wait_for_background_shutdown(shutdown: &AtomicBool, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    let poll_interval = Duration::from_millis(50);
+
+    loop {
+        if shutdown.load(Ordering::Acquire) {
+            return true;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return shutdown.load(Ordering::Acquire);
+        }
+        thread::sleep(remaining.min(poll_interval));
+    }
 }
 
 // Trait to abstract TCP streams and Named Pipes
@@ -412,6 +430,8 @@ impl Vsock {
             connect_timeout_ms: CONNECT_TIMEOUT_MS, // Use default timeout
             defer_control_rx: false,
             tsi_flags,
+            background_shutdown: Arc::new(AtomicBool::new(false)),
+            background_tasks: Mutex::new(Vec::new()),
         })
     }
 
@@ -427,6 +447,60 @@ impl Vsock {
 
     pub fn cid(&self) -> u64 {
         self.cid
+    }
+
+    fn spawn_background_task<F>(&self, name: String, task: F)
+    where
+        F: FnOnce(Arc<AtomicBool>) + Send + 'static,
+    {
+        if self.background_shutdown.load(Ordering::Acquire) {
+            return;
+        }
+
+        let shutdown = self.background_shutdown.clone();
+        let handle = match thread::Builder::new()
+            .name(name.clone())
+            .spawn(move || task(shutdown))
+        {
+            Ok(handle) => handle,
+            Err(e) => {
+                error!("vsock(windows): failed to spawn {name}: {e}");
+                return;
+            }
+        };
+
+        let mut tasks = self
+            .background_tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut running = Vec::with_capacity(tasks.len() + 1);
+        for existing in std::mem::take(&mut *tasks) {
+            if existing.is_finished() {
+                if existing.join().is_err() {
+                    error!("vsock(windows): background task panicked");
+                }
+            } else {
+                running.push(existing);
+            }
+        }
+        running.push(handle);
+        *tasks = running;
+    }
+
+    fn stop_background_tasks(&mut self) {
+        self.background_shutdown.store(true, Ordering::Release);
+        let tasks = {
+            let mut tasks = self
+                .background_tasks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut *tasks)
+        };
+        for task in tasks {
+            if task.join().is_err() {
+                error!("vsock(windows): background task panicked during shutdown");
+            }
+        }
     }
 
     fn register_runtime_events(&self, event_manager: &mut EventManager) {
@@ -475,9 +549,14 @@ impl Vsock {
             return;
         };
 
-        thread::spawn(move || {
+        self.spawn_background_task(format!("vsock-keepalive-{src_port}"), move |shutdown| {
             for tick in 0..CONTROL_STREAM_KEEPALIVE_POLLS {
-                thread::sleep(Duration::from_millis(CONTROL_STREAM_KEEPALIVE_POLL_MS));
+                if wait_for_background_shutdown(
+                    shutdown.as_ref(),
+                    Duration::from_millis(CONTROL_STREAM_KEEPALIVE_POLL_MS),
+                ) {
+                    return;
+                }
                 let _ = wake_evt.write(1);
                 vsock_control_trace_log(|| {
                     format!(
@@ -500,8 +579,10 @@ impl Vsock {
             return;
         };
 
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(delay_ms));
+        self.spawn_background_task(format!("vsock-harvest-{src_port}"), move |shutdown| {
+            if wait_for_background_shutdown(shutdown.as_ref(), Duration::from_millis(delay_ms)) {
+                return;
+            }
             let _ = wake_evt.write(1);
             vsock_control_trace_log(|| {
                 format!(
@@ -522,12 +603,15 @@ impl Vsock {
         };
 
         let interrupt = interrupt.clone();
-        thread::spawn(move || {
+        self.spawn_background_task(format!("vsock-irq-retry-{src_port}"), move |shutdown| {
             // Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms, 1600ms, 3200ms, 6400ms
             // Total coverage ~12.7s — long enough for the guest vCPU to be schedulable even
             // when the 2-connection (alias) path delays virtio interrupt processing.
             for delay_ms in [50_u64, 100, 200, 400, 800, 1600, 3200, 6400] {
-                thread::sleep(Duration::from_millis(delay_ms));
+                if wait_for_background_shutdown(shutdown.as_ref(), Duration::from_millis(delay_ms))
+                {
+                    return;
+                }
                 interrupt.signal_used_queue();
                 vsock_debug_log(format!(
                     "schedule_control_response_irq_retry kick src_port={} delay_ms={}",
@@ -538,7 +622,9 @@ impl Vsock {
             // Keep retrying after the initial backoff window. Some Windows runs
             // do not service the first control-response interrupt for 17s+.
             for _ in 0..40 {
-                thread::sleep(Duration::from_secs(1));
+                if wait_for_background_shutdown(shutdown.as_ref(), Duration::from_secs(1)) {
+                    return;
+                }
                 interrupt.signal_used_queue();
                 vsock_debug_log(format!(
                     "schedule_control_response_irq_retry kick src_port={} delay_ms=1000",
@@ -1952,49 +2038,25 @@ impl Vsock {
     }
 }
 
-fn vsock_debug_log(message: String) {
-    let path = vsock_debug_log_path();
-    if let Some(parent) = Path::new(path).parent() {
-        let _ = std::fs::create_dir_all(parent);
+impl Drop for Vsock {
+    fn drop(&mut self) {
+        self.stop_background_tasks();
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        let _ = writeln!(
-            file,
+}
+
+fn vsock_debug_log(message: String) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    utils::windows_debug_log(
+        "vsock.log",
+        format!(
             "[{:>10}.{:03}] {}",
             now.as_secs(),
             now.subsec_millis(),
             message
-        );
-    }
-}
-
-fn vsock_debug_log_path() -> &'static PathBuf {
-    static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
-    LOG_PATH.get_or_init(|| {
-        if let Some(path) = std::env::var_os("LIBKRUN_WINDOWS_VSOCK_LOG_PATH") {
-            return PathBuf::from(path);
-        }
-
-        std::env::var_os("USERPROFILE")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-            .or_else(|| {
-                let drive = std::env::var_os("HOMEDRIVE")?;
-                let path = std::env::var_os("HOMEPATH")?;
-                let mut base = PathBuf::from(drive);
-                base.push(path);
-                Some(base)
-            })
-            .map(|home| home.join(".a3s").join("libkrun-vsock-windows.log"))
-            .unwrap_or_else(|| std::env::temp_dir().join("libkrun-vsock-windows.log"))
-    })
+        ),
+    );
 }
 
 fn vsock_control_trace_enabled() -> bool {
