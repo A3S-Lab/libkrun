@@ -91,7 +91,19 @@ function Assert-PeHasNoCodeView {
 }
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
-& (Join-Path $PSScriptRoot "build-windows-init.ps1") -Zig $Zig
+
+$normalizedPackages = @(
+    foreach ($packageList in $Packages) {
+        $packageList.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    }
+)
+if ($normalizedPackages.Count -eq 0) {
+    throw "At least one Cargo package is required."
+}
+
+if ($normalizedPackages -contains "libkrun") {
+    & (Join-Path $PSScriptRoot "build-windows-init.ps1") -Zig $Zig
+}
 
 $cargoCommand = Get-Command $Cargo -ErrorAction Stop
 $separator = [char]0x1f
@@ -120,15 +132,6 @@ $rustFlags += "--remap-path-prefix=$repoRoot=libkrun"
 # temporary paths; /DEBUG:NONE omits that release-only PDB/CodeView metadata.
 $rustFlags += "-Clink-arg=/Brepro"
 $rustFlags += "-Clink-arg=/DEBUG:NONE"
-
-$normalizedPackages = @(
-    foreach ($packageList in $Packages) {
-        $packageList.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-    }
-)
-if ($normalizedPackages.Count -eq 0) {
-    throw "At least one Cargo package is required."
-}
 
 $artifactNames = @()
 if ($normalizedPackages -contains "libkrun") {

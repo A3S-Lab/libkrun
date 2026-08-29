@@ -15,14 +15,10 @@ mod ikconfig;
 #[path = "kernel_source.rs"]
 mod kernel_source;
 
-use ikconfig::{compressed_payload, read_bounded_utf8, MAX_IKCONFIG_BYTES};
+use ikconfig::{
+    compressed_payload, missing_required_configs, read_bounded_utf8, MAX_IKCONFIG_BYTES,
+};
 use kernel_source::{detect_kernel_source, validate_pinned_raw_bundle, KernelSource};
-
-const REQUIRED_CONFIGS: &[&str] = &[
-    "CONFIG_VIRTIO_MMIO=y",
-    "CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y",
-    "CONFIG_X86_MPPARSE=y",
-];
 const MAX_KERNEL_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
 const IMAGE_OVERRIDE_ENV: &str = "LIBKRUNFW_KERNEL_IMAGE";
@@ -50,15 +46,11 @@ fn validate_kernel_config(kernel: &[u8], display_name: &str) {
         return;
     };
 
-    let missing: Vec<_> = REQUIRED_CONFIGS
-        .iter()
-        .copied()
-        .filter(|required| !config.lines().any(|line| line.trim() == *required))
-        .collect();
+    let missing = missing_required_configs(&config);
 
     if !missing.is_empty() {
         panic!(
-            "{display_name} is not compatible with libkrun WHPX x86_64 MMIO discovery. Missing: {}. \
+            "{display_name} is not compatible with the required libkrun WHPX guest capabilities. Missing: {}. \
              Rebuild or replace the bundled kernel with one that enables these options. \
              See src/libkrunfw-win/VMLINUX_SETUP.md.",
             missing.join(", ")

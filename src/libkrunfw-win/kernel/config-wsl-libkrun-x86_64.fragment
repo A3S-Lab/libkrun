@@ -5,6 +5,12 @@
 CONFIG_VIRTIO_MMIO=y
 CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y
 CONFIG_X86_MPPARSE=y
+CONFIG_NUMA=y
+
+# Embed the resolved config so the Windows firmware build can enforce every
+# required guest capability before producing a DLL.
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
 
 # Build the core transports into the kernel image so the bundled vmlinux can
 # boot without relying on external modules.

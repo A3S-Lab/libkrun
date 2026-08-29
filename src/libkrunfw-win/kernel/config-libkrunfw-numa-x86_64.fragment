@@ -1,0 +1,6 @@
+# OCI memory-policy and build-time validation delta for the official
+# libkrunfw x86_64 config.
+
+CONFIG_NUMA=y
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y

@@ -32,6 +32,8 @@ For the current Windows/WHPX backend, the guest must support
 `virtio_mmio.device=` kernel command-line discovery on x86_64. The stock WSL2
 kernel does not enable this, so a plain upstream `microsoft-standard-WSL2`
 `vmlinux` will not boot libkrun guests far enough to discover virtio devices.
+The guest must also enable NUMA so OCI `linux.memoryPolicy` requests reach the
+real `set_mempolicy(2)` implementation instead of returning `ENOSYS`.
 
 ## Recommended source
 
@@ -48,10 +50,11 @@ allowing a minimal libkrun-specific config delta.
 
 Apply [config-wsl-libkrun-x86_64.fragment](kernel/config-wsl-libkrun-x86_64.fragment).
 
-The critical setting is:
+The critical settings are:
 
 - `CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y`
 - `CONFIG_X86_MPPARSE=y`
+- `CONFIG_NUMA=y`
 
 Without it, Linux ignores the `virtio_mmio.device=...` entries emitted by
 libkrun's Windows MMIO device manager.
@@ -62,7 +65,14 @@ to "virtual wire mode with no configuration" and the LAPIC timer path never
 comes up correctly.
 
 The fragment also forces a few virtio drivers to built-in `=y` to avoid
-depending on external modules in the bundled `vmlinux`.
+depending on external modules in the bundled `vmlinux`. It enables IKCONFIG so
+the Windows firmware build can enforce these settings from the final ELF.
+
+For a minimal production delta from the official libkrunfw v5.5.0 generic
+x86_64 configuration, apply
+[config-libkrunfw-numa-x86_64.fragment](kernel/config-libkrunfw-numa-x86_64.fragment)
+instead. That baseline already contains the required virtio and x86 MP-table
+settings, so the fragment adds only NUMA and embedded-config verification.
 
 ## Example build flow
 
