@@ -523,7 +523,12 @@ impl BusDevice for MmioTransport {
                             ));
                         }
                         if let Some(eventfd) = self.queue_evts.get(&v) {
-                            eventfd.write(v as u64).unwrap();
+                            if let Err(error) = eventfd.write(1) {
+                                error!(
+                                    "failed to signal virtio queue {v} for {}: {error}",
+                                    self.locked_device().device_name()
+                                );
+                            }
                         }
                     }
                     0x64 => {
@@ -711,6 +716,21 @@ pub(crate) mod tests {
         d.queue_select = 2;
         assert_eq!(d.with_queue(0, Queue::get_max_size), 0);
         assert!(!d.with_queue_mut(|q| q.size = 16));
+    }
+
+    #[test]
+    fn test_queue_zero_notification_signals_event() {
+        let m = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x1000)]).unwrap();
+        let dummy = Arc::new(Mutex::new(DummyDevice::new()));
+        let queue_event = dummy.lock().unwrap().queue_events()[0].try_clone().unwrap();
+        let mut transport = MmioTransport::new(m, DummyIrqChip::new().into(), dummy).unwrap();
+        transport.register_queue_evt(queue_event.try_clone().unwrap(), 0);
+
+        let mut notification = [0; 4];
+        write_le_u32(&mut notification, 0);
+        transport.write(0, NOTIFY_REG_OFFSET as u64, &notification);
+
+        assert_eq!(queue_event.read().unwrap(), 1);
     }
 
     #[test]

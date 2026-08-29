@@ -179,19 +179,19 @@ impl Block {
             // Collect all descriptors in this chain.
             let descs: Vec<DescriptorChain<'_>> = head.into_iter().collect();
 
-            let status = if descs.len() < 2 {
+            let used_len = if descs.len() < 2 {
                 error!("blk(windows): descriptor chain too short ({})", descs.len());
-                VIRTIO_BLK_S_IOERR
+                0
             } else {
                 let status_desc_idx = descs.len() - 1;
                 let status_addr = descs[status_desc_idx].addr;
 
                 // Parse the 16-byte request header from the first descriptor.
                 let mut hdr = [0u8; REQ_HDR_SIZE];
-                let st = if descs[0].len < REQ_HDR_SIZE as u32
+                let (status, used_len) = if descs[0].len < REQ_HDR_SIZE as u32
                     || mem.read_slice(&mut hdr, descs[0].addr).is_err()
                 {
-                    VIRTIO_BLK_S_IOERR
+                    (VIRTIO_BLK_S_IOERR, 0)
                 } else {
                     let req_type = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
                     let sector = u64::from_le_bytes([
@@ -204,26 +204,28 @@ impl Block {
                         }
                         VIRTIO_BLK_T_OUT => {
                             if self.read_only {
-                                VIRTIO_BLK_S_IOERR
+                                (VIRTIO_BLK_S_IOERR, 0)
                             } else {
-                                Self::blk_write(&self.disk, self.nsectors, data, mem, sector)
+                                (
+                                    Self::blk_write(&self.disk, self.nsectors, data, mem, sector),
+                                    0,
+                                )
                             }
                         }
-                        VIRTIO_BLK_T_FLUSH => Self::blk_flush(&self.disk),
+                        VIRTIO_BLK_T_FLUSH => (Self::blk_flush(&self.disk), 0),
                         VIRTIO_BLK_T_GET_ID => Self::blk_get_id(&self.id, data, mem),
-                        _ => VIRTIO_BLK_S_UNSUPP,
+                        _ => (VIRTIO_BLK_S_UNSUPP, 0),
                     }
                 };
 
-                if mem.write_slice(&[st], status_addr).is_err() {
+                if mem.write_slice(&[status], status_addr).is_err() {
                     error!("blk(windows): failed to write status byte");
                 }
-                st
+                used_len
             };
 
-            let _ = status; // status was written to guest memory above
             have_used = true;
-            if let Err(e) = self.queues[REQ_QUEUE].add_used(mem, index, 1) {
+            if let Err(e) = self.queues[REQ_QUEUE].add_used(mem, index, used_len) {
                 error!("blk(windows): failed to add used entry: {e:?}");
             }
         }
@@ -237,31 +239,36 @@ impl Block {
         data_descs: &[DescriptorChain<'_>],
         mem: &GuestMemoryMmap,
         start_sector: u64,
-    ) -> u8 {
+    ) -> (u8, u32) {
         if start_sector >= nsectors {
-            return VIRTIO_BLK_S_IOERR;
+            return (VIRTIO_BLK_S_IOERR, 0);
         }
         let byte_offset = start_sector * SECTOR_SIZE;
         let mut disk = match disk.lock() {
             Ok(d) => d,
-            Err(_) => return VIRTIO_BLK_S_IOERR,
+            Err(_) => return (VIRTIO_BLK_S_IOERR, 0),
         };
         if disk.seek(SeekFrom::Start(byte_offset)).is_err() {
-            return VIRTIO_BLK_S_IOERR;
+            return (VIRTIO_BLK_S_IOERR, 0);
         }
+        let mut used_len = 0u32;
         for desc in data_descs {
             if !desc.is_write_only() {
                 continue;
             }
+            let Some(next_used_len) = used_len.checked_add(desc.len) else {
+                return (VIRTIO_BLK_S_IOERR, 0);
+            };
             let mut buf = vec![0u8; desc.len as usize];
             if disk.read_exact(&mut buf).is_err() {
-                return VIRTIO_BLK_S_IOERR;
+                return (VIRTIO_BLK_S_IOERR, 0);
             }
             if mem.write_slice(&buf, desc.addr).is_err() {
-                return VIRTIO_BLK_S_IOERR;
+                return (VIRTIO_BLK_S_IOERR, 0);
             }
+            used_len = next_used_len;
         }
-        VIRTIO_BLK_S_OK
+        (VIRTIO_BLK_S_OK, used_len)
     }
 
     fn blk_write(
@@ -309,7 +316,11 @@ impl Block {
         }
     }
 
-    fn blk_get_id(id: &str, data_descs: &[DescriptorChain<'_>], mem: &GuestMemoryMmap) -> u8 {
+    fn blk_get_id(
+        id: &str,
+        data_descs: &[DescriptorChain<'_>],
+        mem: &GuestMemoryMmap,
+    ) -> (u8, u32) {
         // The device ID string is at most 20 bytes, NUL-padded.
         let id_bytes = id.as_bytes();
         let mut id_buf = [0u8; 20];
@@ -321,11 +332,11 @@ impl Block {
             }
             let write_len = (desc.len as usize).min(20);
             if mem.write_slice(&id_buf[..write_len], desc.addr).is_err() {
-                return VIRTIO_BLK_S_IOERR;
+                return (VIRTIO_BLK_S_IOERR, 0);
             }
-            break;
+            return (VIRTIO_BLK_S_OK, write_len as u32);
         }
-        VIRTIO_BLK_S_OK
+        (VIRTIO_BLK_S_OK, 0)
     }
 }
 
@@ -433,5 +444,95 @@ impl Subscriber for Block {
             EventSet::IN,
             self.activate_evt.as_raw_fd() as u64,
         )]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::legacy::DummyIrqChip;
+    use crate::virtio::queue::{tests::VirtQueue, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE};
+    use tempfile::tempfile;
+    use vm_memory::GuestAddress;
+
+    const REQUEST_ADDR: GuestAddress = GuestAddress(0x1000);
+    const DATA_ADDR: GuestAddress = GuestAddress(0x2000);
+    const STATUS_ADDR: GuestAddress = GuestAddress(0x3000);
+
+    fn create_block(memory: &GuestMemoryMmap, queue: Queue) -> Block {
+        let mut disk = tempfile().unwrap();
+        disk.write_all(&vec![0xa5; SECTOR_SIZE as usize]).unwrap();
+
+        Block {
+            id: "test-drive".to_string(),
+            disk: Mutex::new(disk),
+            nsectors: 1,
+            read_only: false,
+            queues: vec![queue],
+            queue_events: vec![EventFd::new(EFD_NONBLOCK).unwrap()],
+            activate_evt: EventFd::new(EFD_NONBLOCK).unwrap(),
+            state: DeviceState::Activated(
+                memory.clone(),
+                InterruptTransport::new(DummyIrqChip::new().into(), "blk-test".to_string())
+                    .unwrap(),
+            ),
+            acked_features: 0,
+        }
+    }
+
+    fn configure_request(
+        memory: &GuestMemoryMmap,
+        virt_queue: &VirtQueue<'_>,
+        request_type: u32,
+        data_len: u32,
+    ) {
+        virt_queue.dtable[0].set(REQUEST_ADDR.0, REQ_HDR_SIZE as u32, VIRTQ_DESC_F_NEXT, 1);
+        virt_queue.dtable[1].set(
+            DATA_ADDR.0,
+            data_len,
+            VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE,
+            2,
+        );
+        virt_queue.dtable[2].set(STATUS_ADDR.0, 1, VIRTQ_DESC_F_WRITE, 0);
+        virt_queue.avail.ring[0].set(0);
+        virt_queue.avail.idx.set(1);
+
+        let mut header = [0u8; REQ_HDR_SIZE];
+        header[..4].copy_from_slice(&request_type.to_le_bytes());
+        memory.write_slice(&header, REQUEST_ADDR).unwrap();
+    }
+
+    #[test]
+    fn read_request_reports_data_used_length() {
+        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let virt_queue = VirtQueue::new(GuestAddress(0), &memory, 8);
+        configure_request(&memory, &virt_queue, VIRTIO_BLK_T_IN, SECTOR_SIZE as u32);
+        let mut block = create_block(&memory, virt_queue.create_queue());
+
+        assert!(block.process_queue());
+
+        assert_eq!(virt_queue.used.idx.get(), 1);
+        assert_eq!(virt_queue.used.ring[0].get().len, SECTOR_SIZE as u32);
+        assert_eq!(memory.read_obj::<u8>(STATUS_ADDR).unwrap(), VIRTIO_BLK_S_OK);
+        let mut data = vec![0; SECTOR_SIZE as usize];
+        memory.read_slice(&mut data, DATA_ADDR).unwrap();
+        assert!(data.iter().all(|byte| *byte == 0xa5));
+    }
+
+    #[test]
+    fn get_id_request_reports_truncated_used_length() {
+        let memory = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let virt_queue = VirtQueue::new(GuestAddress(0), &memory, 8);
+        configure_request(&memory, &virt_queue, VIRTIO_BLK_T_GET_ID, 4);
+        let mut block = create_block(&memory, virt_queue.create_queue());
+
+        assert!(block.process_queue());
+
+        assert_eq!(virt_queue.used.idx.get(), 1);
+        assert_eq!(virt_queue.used.ring[0].get().len, 4);
+        assert_eq!(memory.read_obj::<u8>(STATUS_ADDR).unwrap(), VIRTIO_BLK_S_OK);
+        let mut id = [0; 4];
+        memory.read_slice(&mut id, DATA_ADDR).unwrap();
+        assert_eq!(&id, b"test");
     }
 }
