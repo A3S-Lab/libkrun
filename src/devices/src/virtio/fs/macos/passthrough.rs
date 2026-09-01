@@ -9,7 +9,7 @@ use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
 use std::mem::{self, MaybeUninit};
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::ptr::null_mut;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
@@ -669,9 +669,14 @@ impl PassthroughFs {
         let mut ds = data.dirstream.lock().unwrap();
 
         let dir_stream = if ds.stream == 0 {
-            let dir = unsafe { libc::fdopendir(data.file.write().unwrap().as_raw_fd()) };
+            // fdopendir takes ownership of its descriptor. Give it a duplicate
+            // so closedir cannot invalidate the File retained by this handle.
+            let dir_fd = data.file.write().unwrap().try_clone()?.into_raw_fd();
+            let dir = unsafe { libc::fdopendir(dir_fd) };
             if dir.is_null() {
-                return Err(linux_error(io::Error::last_os_error()));
+                let error = linux_error(io::Error::last_os_error());
+                unsafe { drop(File::from_raw_fd(dir_fd)) };
+                return Err(error);
             }
             ds.stream = dir as u64;
             dir
@@ -684,12 +689,14 @@ impl PassthroughFs {
         }
 
         loop {
-            ds.offset = unsafe { libc::telldir(dir_stream) };
-
+            // telldir returns an opaque resume cookie on macOS. It is not a
+            // linear index and must never be synthesized with arithmetic.
+            let entry_offset = unsafe { libc::telldir(dir_stream) };
             let dentry = unsafe { libc::readdir(dir_stream) };
             if dentry.is_null() {
                 break;
             }
+            let next_offset = unsafe { libc::telldir(dir_stream) };
 
             let mut name: Vec<u8> = Vec::new();
 
@@ -703,13 +710,14 @@ impl PassthroughFs {
             }
 
             if name == b"." || name == b".." {
+                ds.offset = next_offset;
                 continue;
             }
 
             let res = unsafe {
                 add_entry(DirEntry {
                     ino: (*dentry).d_ino,
-                    offset: (ds.offset + 1) as u64,
+                    offset: next_offset as u64,
                     type_: u32::from((*dentry).d_type),
                     name: &name,
                 })
@@ -718,11 +726,15 @@ impl PassthroughFs {
             match res {
                 Ok(size) => {
                     if size == 0 {
-                        unsafe { libc::seekdir(dir_stream, ds.offset) };
+                        unsafe { libc::seekdir(dir_stream, entry_offset) };
+                        ds.offset = entry_offset;
                         break;
                     }
+                    ds.offset = next_offset;
                 }
                 Err(e) => {
+                    unsafe { libc::seekdir(dir_stream, entry_offset) };
+                    ds.offset = entry_offset;
                     warn!(
                         "virtio-fs: error adding entry {}: {:?}",
                         std::str::from_utf8(&name).unwrap(),
@@ -2173,3 +2185,7 @@ impl FileSystem for PassthroughFs {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "passthrough_tests.rs"]
+mod tests;
