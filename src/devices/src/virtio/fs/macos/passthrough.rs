@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use crossbeam_channel::{unbounded, Sender};
+use nix::errno::Errno;
 use utils::worker_message::WorkerMessage;
 
 use crate::virtio::fs::filesystem::SecContext;
@@ -53,9 +54,85 @@ struct InodeData {
     refcount: AtomicU64,
 }
 
+struct CachedDirEntry {
+    ino: bindings::ino64_t,
+    name: Box<[u8]>,
+    type_: u8,
+}
+
 struct DirStream {
-    stream: u64,
-    offset: i64,
+    entries: Vec<CachedDirEntry>,
+    ready: bool,
+}
+
+impl DirStream {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            ready: false,
+        }
+    }
+
+    fn get_entry(&self, offset: u64) -> Option<DirEntry<'_>> {
+        self.entries.get(offset as usize).map(|entry| DirEntry {
+            ino: entry.ino,
+            // FUSE treats this as an opaque cookie for the next entry.
+            offset: offset + 1,
+            type_: u32::from(entry.type_),
+            name: &entry.name,
+        })
+    }
+
+    fn fill_from_fd(&mut self, fd: RawFd) -> io::Result<()> {
+        let result = unsafe { libc::lseek(fd, 0, libc::SEEK_SET) };
+        if result < 0 {
+            return Err(linux_error(io::Error::last_os_error()));
+        }
+
+        // fdopendir takes ownership of its descriptor. Donate a duplicate so
+        // closedir cannot invalidate the File retained by the handle.
+        let dir_fd = unsafe { libc::dup(fd) };
+        if dir_fd < 0 {
+            return Err(linux_error(io::Error::last_os_error()));
+        }
+        let dir = unsafe { libc::fdopendir(dir_fd) };
+        if dir.is_null() {
+            let error = io::Error::last_os_error();
+            let _ = unsafe { libc::close(dir_fd) };
+            return Err(linux_error(error));
+        }
+
+        loop {
+            // A null pointer means either end-of-directory or an error.
+            Errno::clear();
+            let dentry = unsafe { libc::readdir(dir) };
+            if dentry.is_null() {
+                let errno = Errno::last_raw();
+                if errno != 0 {
+                    let error = io::Error::from_raw_os_error(errno);
+                    let _ = unsafe { libc::closedir(dir) };
+                    return Err(linux_error(error));
+                }
+                break;
+            }
+
+            let name = unsafe {
+                let name_len = usize::from((*dentry).d_namlen);
+                let name_ptr = (*dentry).d_name.as_ptr().cast();
+                let name = std::slice::from_raw_parts(name_ptr, name_len);
+                if name == b"." || name == b".." {
+                    continue;
+                }
+                Box::<[u8]>::from(name)
+            };
+            let ino = unsafe { (*dentry).d_ino };
+            let type_ = unsafe { (*dentry).d_type };
+            self.entries.push(CachedDirEntry { ino, name, type_ });
+        }
+
+        let _ = unsafe { libc::closedir(dir) };
+        Ok(())
+    }
 }
 
 struct HandleData {
@@ -647,7 +724,7 @@ impl PassthroughFs {
         inode: Inode,
         handle: Handle,
         size: u32,
-        offset: u64,
+        mut offset: u64,
         mut add_entry: F,
     ) -> io::Result<()>
     where
@@ -667,66 +744,34 @@ impl PassthroughFs {
             .ok_or_else(ebadf)?;
 
         let mut ds = data.dirstream.lock().unwrap();
-
-        let dir_stream = if ds.stream == 0 {
-            let dir = unsafe { libc::fdopendir(data.file.write().unwrap().as_raw_fd()) };
-            if dir.is_null() {
-                return Err(linux_error(io::Error::last_os_error()));
+        // A zero offset identifies a fresh or rewound stream. Refreshing here
+        // gives a rewound handle a current view while keeping one immutable
+        // snapshot across normal paginated reads.
+        if offset == 0 && ds.ready {
+            ds.entries.clear();
+            ds.ready = false;
+        }
+        if !ds.ready {
+            if let Err(error) = ds.fill_from_fd(data.file.write().unwrap().as_raw_fd()) {
+                if ds.entries.is_empty() {
+                    return Err(error);
+                }
+                warn!("virtio-fs: partial directory snapshot for inode {inode}: {error:?}");
             }
-            ds.stream = dir as u64;
-            dir
-        } else {
-            ds.stream as *mut libc::DIR
-        };
-
-        if (offset as i64) != ds.offset {
-            unsafe { libc::seekdir(dir_stream, offset as i64) };
+            ds.ready = true;
         }
 
-        loop {
-            ds.offset = unsafe { libc::telldir(dir_stream) };
-
-            let dentry = unsafe { libc::readdir(dir_stream) };
-            if dentry.is_null() {
-                break;
-            }
-
-            let mut name: Vec<u8> = Vec::new();
-
-            unsafe {
-                for c in &(*dentry).d_name {
-                    if *c == 0 {
-                        break;
-                    }
-                    name.push(*c as u8);
-                }
-            }
-
-            if name == b"." || name == b".." {
-                continue;
-            }
-
-            let res = unsafe {
-                add_entry(DirEntry {
-                    ino: (*dentry).d_ino,
-                    offset: (ds.offset + 1) as u64,
-                    type_: u32::from((*dentry).d_type),
-                    name: &name,
-                })
-            };
-
-            match res {
-                Ok(size) => {
-                    if size == 0 {
-                        unsafe { libc::seekdir(dir_stream, ds.offset) };
-                        break;
-                    }
-                }
-                Err(e) => {
+        while let Some(entry) = ds.get_entry(offset) {
+            offset += 1;
+            let name = entry.name;
+            match add_entry(entry) {
+                Ok(size) if size != 0 => {}
+                Ok(_) => break,
+                Err(error) => {
                     warn!(
                         "virtio-fs: error adding entry {}: {:?}",
-                        std::str::from_utf8(&name).unwrap(),
-                        e
+                        String::from_utf8_lossy(name),
+                        error
                     );
                     break;
                 }
@@ -745,10 +790,7 @@ impl PassthroughFs {
         let data = HandleData {
             inode,
             file,
-            dirstream: Mutex::new(DirStream {
-                stream: 0,
-                offset: 0,
-            }),
+            dirstream: Mutex::new(DirStream::new()),
         };
 
         self.handles.write().unwrap().insert(handle, Arc::new(data));
@@ -1052,20 +1094,6 @@ impl FileSystem for PassthroughFs {
         _flags: u32,
         handle: Handle,
     ) -> io::Result<()> {
-        let data = self
-            .handles
-            .read()
-            .unwrap()
-            .get(&handle)
-            .filter(|hd| hd.inode == inode)
-            .cloned()
-            .ok_or_else(ebadf)?;
-
-        let ds = data.dirstream.lock().unwrap();
-        if ds.stream != 0 {
-            unsafe { libc::closedir(ds.stream as *mut libc::DIR) };
-        }
-
         self.do_release(inode, handle)
     }
 
@@ -1226,10 +1254,7 @@ impl FileSystem for PassthroughFs {
         let data = HandleData {
             inode: entry.inode,
             file,
-            dirstream: Mutex::new(DirStream {
-                stream: 0,
-                offset: 0,
-            }),
+            dirstream: Mutex::new(DirStream::new()),
         };
 
         self.handles.write().unwrap().insert(handle, Arc::new(data));
@@ -2173,3 +2198,7 @@ impl FileSystem for PassthroughFs {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "passthrough_tests.rs"]
+mod tests;
