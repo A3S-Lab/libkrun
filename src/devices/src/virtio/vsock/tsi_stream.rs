@@ -199,42 +199,9 @@ impl TsiStreamProxy {
             return 0;
         }
 
-        // Host port map contract (libkrun.h krun_set_port_map):
-        // - None: legacy auto-publish — bind the guest listen address on the host.
-        // - Some(map): allowlist only — remap mapped guest ports; refuse unmapped
-        //   TCP/UDP ports so they never appear as host LISTEN sockets (empty map
-        //   means expose nothing). Unix sockets are unaffected by the TCP map.
-        let addr: SockaddrStorage = if let Some(port_map) = host_port_map {
-            if let Some(sin) = req.addr.as_sockaddr_in() {
-                debug!("sockaddr is ipv4");
-                if let Some(port) = port_map.get(&sin.port()) {
-                    SocketAddrV4::new(sin.ip(), *port).into()
-                } else {
-                    debug!(
-                        "refusing host bind for unmapped guest ipv4 port {}",
-                        sin.port()
-                    );
-                    return -libc::EADDRNOTAVAIL;
-                }
-            } else if let Some(sin6) = req.addr.as_sockaddr_in6() {
-                debug!("sockaddr is ipv6");
-                if let Some(port) = port_map.get(&sin6.port()) {
-                    SocketAddrV6::new(sin6.ip(), *port, sin6.flowinfo(), sin6.flowinfo()).into()
-                } else {
-                    debug!(
-                        "refusing host bind for unmapped guest ipv6 port {}",
-                        sin6.port()
-                    );
-                    return -libc::EADDRNOTAVAIL;
-                }
-            } else if req.addr.as_unix_addr().is_some() {
-                debug!("sockaddr is unix");
-                req.addr
-            } else {
-                return -libc::EINVAL;
-            }
-        } else {
-            req.addr
+        let addr = match map_listen_addr(req.addr, host_port_map) {
+            Ok(addr) => addr,
+            Err(errno) => return errno,
         };
 
         let unixsock_path = self.get_unixsock_path(&addr);
@@ -981,5 +948,96 @@ impl Drop for TsiStreamProxy {
         if let Some(path) = &self.unixsock_path {
             _ = fs::remove_file(path);
         }
+    }
+}
+
+/// Remap a guest listen address through the TSI host port map.
+///
+/// Host port map contract (`krun_set_port_map` in libkrun.h):
+/// - `None`: legacy auto-publish — bind the guest listen address on the host.
+/// - `Some(map)`: allowlist only. Mapped guest ports are remapped to the host
+///   port. Unmapped TCP/IPv6 ports return `-EPERM` so krun-guest `tsi_listen`
+///   keeps the already-bound native INET socket in the guest. `-EADDRNOTAVAIL`
+///   would make guest `listen()` fail instead of falling back. An empty map
+///   exposes nothing to the host. Unix sockets are unaffected by the TCP map.
+fn map_listen_addr(
+    addr: SockaddrStorage,
+    host_port_map: &Option<HashMap<u16, u16>>,
+) -> Result<SockaddrStorage, i32> {
+    let Some(port_map) = host_port_map else {
+        return Ok(addr);
+    };
+
+    if let Some(sin) = addr.as_sockaddr_in() {
+        debug!("sockaddr is ipv4");
+        if let Some(port) = port_map.get(&sin.port()) {
+            return Ok(SocketAddrV4::new(sin.ip(), *port).into());
+        }
+        debug!(
+            "refusing host bind for unmapped guest ipv4 port {}",
+            sin.port()
+        );
+        return Err(-libc::EPERM);
+    }
+    if let Some(sin6) = addr.as_sockaddr_in6() {
+        debug!("sockaddr is ipv6");
+        if let Some(port) = port_map.get(&sin6.port()) {
+            return Ok(SocketAddrV6::new(sin6.ip(), *port, sin6.flowinfo(), sin6.flowinfo()).into());
+        }
+        debug!(
+            "refusing host bind for unmapped guest ipv6 port {}",
+            sin6.port()
+        );
+        return Err(-libc::EPERM);
+    }
+    if addr.as_unix_addr().is_some() {
+        debug!("sockaddr is unix");
+        return Ok(addr);
+    }
+    Err(-libc::EINVAL)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv6Addr;
+
+    fn v4(port: u16) -> SockaddrStorage {
+        SockaddrStorage::from(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port))
+    }
+
+    fn v6(port: u16) -> SockaddrStorage {
+        SockaddrStorage::from(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0))
+    }
+
+    #[test]
+    fn unpublished_ipv4_listen_returns_eperm_for_guest_native_fallback() {
+        let map = Some(HashMap::new());
+        assert_eq!(map_listen_addr(v4(8080), &map), Err(-libc::EPERM));
+        assert_ne!(
+            map_listen_addr(v4(8080), &map),
+            Err(-libc::EADDRNOTAVAIL)
+        );
+    }
+
+    #[test]
+    fn unpublished_ipv6_listen_returns_eperm_for_guest_native_fallback() {
+        let map = Some(HashMap::new());
+        assert_eq!(map_listen_addr(v6(8080), &map), Err(-libc::EPERM));
+    }
+
+    #[test]
+    fn mapped_ipv4_listen_uses_the_host_port() {
+        let mut map = HashMap::new();
+        map.insert(80, 8080);
+        let mapped = map_listen_addr(v4(80), &Some(map)).expect("mapped listen");
+        assert_eq!(mapped.as_sockaddr_in().expect("ipv4").port(), 8080);
+    }
+
+    #[test]
+    fn missing_port_map_auto_publishes_the_guest_address() {
+        let addr = v4(8080);
+        let mapped = map_listen_addr(addr, &None).expect("auto-publish");
+        assert_eq!(mapped.as_sockaddr_in().expect("ipv4").port(), 8080);
     }
 }
