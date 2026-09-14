@@ -982,7 +982,9 @@ fn map_listen_addr(
     if let Some(sin6) = addr.as_sockaddr_in6() {
         debug!("sockaddr is ipv6");
         if let Some(port) = port_map.get(&sin6.port()) {
-            return Ok(SocketAddrV6::new(sin6.ip(), *port, sin6.flowinfo(), sin6.flowinfo()).into());
+            return Ok(
+                SocketAddrV6::new(sin6.ip(), *port, sin6.flowinfo(), sin6.flowinfo()).into(),
+            );
         }
         debug!(
             "refusing host bind for unmapped guest ipv6 port {}",
@@ -1014,10 +1016,7 @@ mod tests {
     fn unpublished_ipv4_listen_returns_eperm_for_guest_native_fallback() {
         let map = Some(HashMap::new());
         assert_eq!(map_listen_addr(v4(8080), &map), Err(-libc::EPERM));
-        assert_ne!(
-            map_listen_addr(v4(8080), &map),
-            Err(-libc::EADDRNOTAVAIL)
-        );
+        assert_ne!(map_listen_addr(v4(8080), &map), Err(-libc::EADDRNOTAVAIL));
     }
 
     #[test]

@@ -29,7 +29,9 @@ runs:
       if: runner.os == 'macOS'
       shell: bash
       run: |
-        brew tap slp/krun
+        # Modern Homebrew refuses untrusted third-party formulas during `tap`,
+        # so allow the clone to land, trust the tap, then install.
+        brew tap slp/krun || true
         brew trust slp/krun
         brew install virglrenderer clang-format llvm
 
