@@ -199,20 +199,33 @@ impl TsiStreamProxy {
             return 0;
         }
 
+        // Host port map contract (libkrun.h krun_set_port_map):
+        // - None: legacy auto-publish — bind the guest listen address on the host.
+        // - Some(map): allowlist only — remap mapped guest ports; refuse unmapped
+        //   TCP/UDP ports so they never appear as host LISTEN sockets (empty map
+        //   means expose nothing). Unix sockets are unaffected by the TCP map.
         let addr: SockaddrStorage = if let Some(port_map) = host_port_map {
             if let Some(sin) = req.addr.as_sockaddr_in() {
                 debug!("sockaddr is ipv4");
                 if let Some(port) = port_map.get(&sin.port()) {
                     SocketAddrV4::new(sin.ip(), *port).into()
                 } else {
-                    req.addr
+                    debug!(
+                        "refusing host bind for unmapped guest ipv4 port {}",
+                        sin.port()
+                    );
+                    return -libc::EADDRNOTAVAIL;
                 }
             } else if let Some(sin6) = req.addr.as_sockaddr_in6() {
                 debug!("sockaddr is ipv6");
                 if let Some(port) = port_map.get(&sin6.port()) {
                     SocketAddrV6::new(sin6.ip(), *port, sin6.flowinfo(), sin6.flowinfo()).into()
                 } else {
-                    req.addr
+                    debug!(
+                        "refusing host bind for unmapped guest ipv6 port {}",
+                        sin6.port()
+                    );
+                    return -libc::EADDRNOTAVAIL;
                 }
             } else if req.addr.as_unix_addr().is_some() {
                 debug!("sockaddr is unix");
