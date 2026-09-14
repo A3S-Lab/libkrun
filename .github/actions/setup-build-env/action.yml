@@ -21,7 +21,9 @@ runs:
 
     - name: Set up Homebrew (macOS)
       if: runner.os == 'macOS'
-      uses: Homebrew/actions/setup-homebrew@master
+      # Composite actions resolve every uses: entry before step ifs run, so a
+      # floating @master pin breaks Linux CI even though this step is macOS-only.
+      uses: Homebrew/actions/setup-homebrew@1f8e202ffddf94def7f42f6fa3a482e821489f9c # 2026.07.10.1
 
     - name: Install packages (macOS)
       if: runner.os == 'macOS'
