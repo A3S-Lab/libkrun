@@ -771,22 +771,31 @@ impl Proxy for TsiStreamProxy {
     }
 
     fn shutdown(&mut self, pkt: &VsockPacket) {
-        // For reverse proxies (accepted connections), ignore OP_SHUTDOWN.
-        // When a guest process forks (e.g., nginx master → worker), the parent
-        // closes its copy of the accepted socket fd, which triggers the kernel's
-        // tsi_release → OP_SHUTDOWN. But the child worker still has the vsock fd
-        // open and will use it for data transfer. Forwarding the shutdown to the
-        // host TCP socket would kill the connection before the worker can respond.
-        if self.parent_id != 0 {
+        let recv_off = pkt.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_RCV != 0;
+        let send_off = pkt.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_SEND != 0;
+
+        // Forking parents (e.g. nginx master → worker) close their copy of the
+        // accepted socket before the worker uses it. That surfaces as a both-
+        // direction OP_SHUTDOWN while no guest→host data has been sent yet —
+        // the same premature-close window `release` already ignores. Forwarding
+        // that would kill the host TCP socket before the worker can respond.
+        //
+        // Once data has flown, or for an explicit half-close (SHUT_WR / SHUT_RD),
+        // honor the shutdown so host clients see FIN promptly. Unconditionally
+        // ignoring every reverse-proxy OP_SHUTDOWN left the host waiting for the
+        // vsock reaper's 5s deferred removal (#447).
+        if self.parent_id != 0
+            && self.status == ProxyStatus::Connected
+            && self.tx_cnt.0 == 0
+            && recv_off
+            && send_off
+        {
             debug!(
-                "ignoring shutdown for reverse proxy: id={}, parent_id={}",
+                "ignoring premature shutdown for reverse proxy: id={}, parent_id={}",
                 self.id, self.parent_id
             );
             return;
         }
-
-        let recv_off = pkt.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_RCV != 0;
-        let send_off = pkt.flags() & uapi::VSOCK_FLAGS_SHUTDOWN_SEND != 0;
 
         let how = if recv_off && send_off {
             Shutdown::Both
