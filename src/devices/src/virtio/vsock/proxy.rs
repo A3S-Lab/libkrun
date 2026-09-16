@@ -76,7 +76,12 @@ pub trait Proxy: Send + AsRawFd {
     fn id(&self) -> u64;
     #[allow(dead_code)]
     fn status(&self) -> ProxyStatus;
-    fn connect(&mut self, pkt: &VsockPacket, req: TsiConnectReq) -> ProxyUpdate;
+    fn connect(
+        &mut self,
+        pkt: &VsockPacket,
+        req: TsiConnectReq,
+        host_port_map: &Option<HashMap<u16, u16>>,
+    ) -> ProxyUpdate;
     fn confirm_connect(&mut self, _pkt: &VsockPacket) -> Option<ProxyUpdate> {
         None
     }

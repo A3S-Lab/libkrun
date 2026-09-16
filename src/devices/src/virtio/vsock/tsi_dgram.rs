@@ -239,7 +239,12 @@ impl Proxy for TsiDgramProxy {
         self.status
     }
 
-    fn connect(&mut self, pkt: &VsockPacket, req: TsiConnectReq) -> ProxyUpdate {
+    fn connect(
+        &mut self,
+        pkt: &VsockPacket,
+        req: TsiConnectReq,
+        _host_port_map: &Option<HashMap<u16, u16>>,
+    ) -> ProxyUpdate {
         debug!("connect: addr={}", req.addr);
         let res = match connect(self.fd.as_raw_fd(), &req.addr) {
             Ok(()) => {

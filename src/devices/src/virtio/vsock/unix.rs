@@ -325,7 +325,12 @@ impl Proxy for UnixProxy {
         self.status
     }
 
-    fn connect(&mut self, _pkt: &VsockPacket, _req: TsiConnectReq) -> ProxyUpdate {
+    fn connect(
+        &mut self,
+        _pkt: &VsockPacket,
+        _req: TsiConnectReq,
+        _host_port_map: &Option<HashMap<u16, u16>>,
+    ) -> ProxyUpdate {
         let mut update = ProxyUpdate::default();
 
         let addr = UnixAddr::new(&self.path).unwrap();
@@ -665,7 +670,12 @@ impl Proxy for UnixAcceptorProxy {
     fn status(&self) -> ProxyStatus {
         ProxyStatus::WaitingOnAccept
     }
-    fn connect(&mut self, _: &VsockPacket, _: TsiConnectReq) -> ProxyUpdate {
+    fn connect(
+        &mut self,
+        _: &VsockPacket,
+        _: TsiConnectReq,
+        _: &Option<HashMap<u16, u16>>,
+    ) -> ProxyUpdate {
         unreachable!()
     }
     fn getpeername(&mut self, _: &VsockPacket) {
