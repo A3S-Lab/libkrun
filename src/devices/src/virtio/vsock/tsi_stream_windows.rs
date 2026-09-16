@@ -157,7 +157,12 @@ impl Proxy for TsiStreamProxyWindowsWrapper {
         self.status
     }
 
-    fn connect(&mut self, pkt: &VsockPacket, req: TsiConnectReq) -> ProxyUpdate {
+    fn connect(
+        &mut self,
+        pkt: &VsockPacket,
+        req: TsiConnectReq,
+        _host_port_map: &Option<std::collections::HashMap<u16, u16>>,
+    ) -> ProxyUpdate {
         let mut update = ProxyUpdate::default();
 
         // Parse address from request
