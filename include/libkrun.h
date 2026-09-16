@@ -533,9 +533,10 @@ int32_t krun_set_net_mac(uint32_t ctx_id, uint8_t *const c_mac);
  *  guest: the VMM returns -EPERM so krun-guest keeps the already-bound native INET
  *  socket instead of failing listen().
  *
- *  Exposed ports will only become accessible by their "host_port" in the guest too. This
- *  means that for a map such as "8080:80", applications running inside the guest will also
- *  need to access the service through the "8080" port.
+ *  Exposed ports remain reachable inside the guest on the guest port via
+ *  loopback hairpin: a guest `connect()` to `127.0.0.1:<guest_port>` (or
+ *  `[::1]:<guest_port>`) is remapped to the host listener. Non-loopback
+ *  destinations are not rewritten.
  *
  * If past networking mode is used (krun_set_passt_fd was called), port mapping is not supported
  * as an API of libkrun (but you can still do port mapping using command line arguments of passt)

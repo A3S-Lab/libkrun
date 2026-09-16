@@ -464,10 +464,19 @@ impl Proxy for TsiStreamProxy {
         self.status
     }
 
-    fn connect(&mut self, _pkt: &VsockPacket, req: TsiConnectReq) -> ProxyUpdate {
+    fn connect(
+        &mut self,
+        _pkt: &VsockPacket,
+        req: TsiConnectReq,
+        host_port_map: &Option<HashMap<u16, u16>>,
+    ) -> ProxyUpdate {
         let mut update = ProxyUpdate::default();
 
-        let result = match connect(self.fd.as_raw_fd(), &req.addr) {
+        // Hairpin published ports: guest connect to loopback:<guest_port> reaches
+        // the host listener at :<host_port> (Docker-like -p semantics, Box#448).
+        let addr = map_connect_addr(req.addr, host_port_map);
+
+        let result = match connect(self.fd.as_raw_fd(), &addr) {
             Ok(()) => {
                 debug!("connect: Connected");
                 self.switch_to_connected();
@@ -999,6 +1008,52 @@ fn map_listen_addr(
     Err(-libc::EINVAL)
 }
 
+/// Hairpin guest connects aimed at a published guest port on loopback through
+/// the host listener (`host_port` in the map).
+///
+/// Under TSI, `-p host:guest` listens only on the host, so in-guest
+/// `connect(127.0.0.1, guest)` would otherwise get `ECONNREFUSED` (Box#448).
+/// Remapping loopback connects to the host port restores Docker-like reachability
+/// without inventing a second in-guest listen. Non-loopback destinations are
+/// unchanged so ordinary egress is not rewritten.
+fn map_connect_addr(
+    addr: SockaddrStorage,
+    host_port_map: &Option<HashMap<u16, u16>>,
+) -> SockaddrStorage {
+    let Some(port_map) = host_port_map else {
+        return addr;
+    };
+
+    if let Some(sin) = addr.as_sockaddr_in() {
+        if sin.ip().is_loopback() {
+            if let Some(host_port) = port_map.get(&sin.port()) {
+                debug!(
+                    "hairpin connect: 127.0.0.1:{} -> 127.0.0.1:{}",
+                    sin.port(),
+                    host_port
+                );
+                return SocketAddrV4::new(sin.ip(), *host_port).into();
+            }
+        }
+        return addr;
+    }
+    if let Some(sin6) = addr.as_sockaddr_in6() {
+        if sin6.ip().is_loopback() {
+            if let Some(host_port) = port_map.get(&sin6.port()) {
+                debug!(
+                    "hairpin connect: [::1]:{} -> [::1]:{}",
+                    sin6.port(),
+                    host_port
+                );
+                return SocketAddrV6::new(sin6.ip(), *host_port, sin6.flowinfo(), sin6.scope_id())
+                    .into();
+            }
+        }
+        return addr;
+    }
+    addr
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1038,5 +1093,52 @@ mod tests {
         let addr = v4(8080);
         let mapped = map_listen_addr(addr, &None).expect("auto-publish");
         assert_eq!(mapped.as_sockaddr_in().expect("ipv4").port(), 8080);
+    }
+
+    fn loopback_v4(port: u16) -> SockaddrStorage {
+        SockaddrStorage::from(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+    }
+
+    fn loopback_v6(port: u16) -> SockaddrStorage {
+        SockaddrStorage::from(SocketAddrV6::new(Ipv6Addr::LOCALHOST, port, 0, 0))
+    }
+
+    #[test]
+    fn loopback_connect_to_published_guest_port_hairpins_to_host_port() {
+        let mut map = HashMap::new();
+        map.insert(8080, 18092);
+        let mapped = map_connect_addr(loopback_v4(8080), &Some(map));
+        let sin = mapped.as_sockaddr_in().expect("ipv4");
+        assert_eq!(sin.ip(), Ipv4Addr::LOCALHOST);
+        assert_eq!(sin.port(), 18092);
+    }
+
+    #[test]
+    fn loopback_connect_to_unpublished_port_is_unchanged() {
+        let map = Some(HashMap::new());
+        let addr = loopback_v4(8080);
+        let mapped = map_connect_addr(addr, &map);
+        assert_eq!(mapped.as_sockaddr_in().expect("ipv4").port(), 8080);
+    }
+
+    #[test]
+    fn non_loopback_connect_to_published_guest_port_is_unchanged() {
+        let mut map = HashMap::new();
+        map.insert(8080, 18092);
+        let addr = SockaddrStorage::from(SocketAddrV4::new(Ipv4Addr::new(8, 8, 8, 8), 8080));
+        let mapped = map_connect_addr(addr, &Some(map));
+        let sin = mapped.as_sockaddr_in().expect("ipv4");
+        assert_eq!(sin.ip(), Ipv4Addr::new(8, 8, 8, 8));
+        assert_eq!(sin.port(), 8080);
+    }
+
+    #[test]
+    fn loopback_v6_connect_to_published_guest_port_hairpins_to_host_port() {
+        let mut map = HashMap::new();
+        map.insert(8080, 18092);
+        let mapped = map_connect_addr(loopback_v6(8080), &Some(map));
+        let sin6 = mapped.as_sockaddr_in6().expect("ipv6");
+        assert_eq!(sin6.ip(), Ipv6Addr::LOCALHOST);
+        assert_eq!(sin6.port(), 18092);
     }
 }

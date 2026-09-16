@@ -434,7 +434,13 @@ impl VsockMuxer {
             debug!("proxy connect request: id={id}");
             match self.proxy_map.read().unwrap().get(&id) {
                 Some(proxy) => {
-                    self.process_proxy_update(id, proxy.lock().unwrap().connect(pkt, req));
+                    self.process_proxy_update(
+                        id,
+                        proxy
+                            .lock()
+                            .unwrap()
+                            .connect(pkt, req, &self.host_port_map),
+                    );
                 }
                 None => self.push_packet(MuxerRx::ConnResponse {
                     local_port: pkt.dst_port(),
@@ -653,7 +659,7 @@ impl VsockMuxer {
                     peer_port: 0,
                     addr: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0).into(),
                 };
-                let update = unix.connect(pkt, tsi);
+                let update = unix.connect(pkt, tsi, &None);
                 unix.confirm_connect(pkt);
                 proxy_map.insert(id, Mutex::new(Box::new(unix)));
                 self.process_proxy_update(id, update);
