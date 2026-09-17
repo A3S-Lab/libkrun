@@ -130,7 +130,12 @@ impl Proxy for TsiDgramProxyWindowsWrapper {
         self.status
     }
 
-    fn connect(&mut self, pkt: &VsockPacket, req: TsiConnectReq) -> ProxyUpdate {
+    fn connect(
+        &mut self,
+        pkt: &VsockPacket,
+        req: TsiConnectReq,
+        _host_port_map: &Option<std::collections::HashMap<u16, u16>>,
+    ) -> ProxyUpdate {
         // DGRAM sockets don't connect, just bind
         let mut update = ProxyUpdate::default();
         let addr_str = String::from_utf8_lossy(&req.addr);
