@@ -947,7 +947,7 @@ impl FileSystem for PassthroughFs {
         }
 
         // Verify the file exists and is a regular file
-        let metadata = match fs::metadata(&path) {
+        let mut metadata = match fs::metadata(&path) {
             Ok(metadata) => metadata,
             Err(err) => {
                 if should_trace_path(&path) {
@@ -958,6 +958,17 @@ impl FileSystem for PassthroughFs {
         };
         if !metadata.is_file() {
             return Err(io::Error::from_raw_os_error(libc::EISDIR));
+        }
+
+        // FUSE advertises ATOMIC_O_TRUNC, so guests pass O_TRUNC on open instead
+        // of setattr(size=0) first. Windows CreateFile does not honor Linux
+        // O_TRUNC; shrink here or shell redirects leave a long-file remnant
+        // (e.g. "changednd-ok" after rewriting "host-bind-ok").
+        if (flags & bindings::LINUX_O_TRUNC as u32) != 0 {
+            use std::fs::OpenOptions as StdOpenOptions;
+            let file = StdOpenOptions::new().write(true).open(&path)?;
+            file.set_len(0)?;
+            metadata = fs::metadata(&path)?;
         }
 
         // Create a new handle
@@ -1944,6 +1955,31 @@ mod tests {
 
         assert_eq!(types["subdir"], DT_DIR as u32, "subdir must be DT_DIR");
         assert_eq!(types["file.txt"], DT_REG as u32, "file.txt must be DT_REG");
+    }
+
+    #[test]
+    fn test_virtiofs_windows_open_o_trunc_shrinks_existing_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("marker.txt");
+        std::fs::write(&path, b"host-bind-ok").unwrap();
+
+        let fs = make_fs(dir.path());
+        let name = CString::new("marker.txt").unwrap();
+        let entry = fs.lookup(ctx(), ROOT_INODE, &name).expect("lookup");
+        assert_eq!(entry.attr.st_size, 12);
+
+        let flags = (libc::O_WRONLY | bindings::LINUX_O_TRUNC) as u32;
+        let (handle, _) = fs.open(ctx(), entry.inode, flags).expect("open O_TRUNC");
+        assert!(handle.is_some());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            0,
+            "ATOMIC_O_TRUNC open must shrink before guest write"
+        );
+
+        // Simulate the guest write after O_TRUNC open (shell redirect payload).
+        std::fs::write(&path, b"changed").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"changed");
     }
 
     #[test]
